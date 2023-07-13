@@ -1,0 +1,6 @@
+Source: calaos-container
+Maintainer: Calaos Team <team@calaos.fr>
+
+Package: calaos-container
+Architecture: any
+Description: Calaos-OS container service
