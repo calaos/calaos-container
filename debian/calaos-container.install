@@ -1,2 +1,2 @@
-calaos-container usr/bin
+bin/calaos-container usr/bin
 scripts/x11docker usr/bin

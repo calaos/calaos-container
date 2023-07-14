@@ -1,0 +1,4 @@
+7e62a4c4310565a1beb44eca7daddde3  lib/systemd/system/calaos-container.service
+bfba85cce7f575423fff9a163110e02c  usr/bin/calaos-container
+76eb3a0df90ff27a69fb3a5a90846c8b  usr/bin/x11docker
+ee8994ea36678b03ee182c1a83915a97  usr/share/doc/calaos-container/changelog.Debian.gz

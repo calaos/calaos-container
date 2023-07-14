@@ -1,7 +1,8 @@
 Source: calaos-container
 Maintainer: Calaos Team <team@calaos.fr>
 Build-Depends: debhelper (>= 11),
-               golang
+               pkgconf, golang,
+               libbtrfs-dev, libdevmapper-dev, libgpgme-dev
 
 Package: calaos-container
 Architecture: any
