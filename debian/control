@@ -1,6 +1,10 @@
 Source: calaos-container
 Maintainer: Calaos Team <team@calaos.fr>
+Build-Depends: debhelper (>= 11),
+               golang
 
 Package: calaos-container
 Architecture: any
 Description: Calaos-OS container service
+Depends: ${misc:Depends}, ${shlibs:Depends},
+         bash, podman
