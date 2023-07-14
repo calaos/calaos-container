@@ -42,7 +42,7 @@ jobs:
           context: "{{defaultContext}}:docker"
           # Note: tags has to be all lower-case
           tags: |
-            ghcr.io/calaos/debian_deb_build_base:${{ github.event.inputs.version }} 
+            ghcr.io/calaos/debian_deb_build_base:latest
             ghcr.io/calaos/debian_deb_build_base:${{ github.sha }}
           push: ${{ github.ref == 'refs/heads/main' }}
           platforms: linux/amd64, linux/arm64, linux/armv7
