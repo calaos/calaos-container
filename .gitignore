@@ -19,3 +19,11 @@
 
 # Go workspace file
 go.work
+
+debian/calaos-container
+debian/.debhelper
+debian/calaos-container.debhelper.log
+debian/calaos-container.postrm.debhelper
+debian/calaos-container.substvars
+debian/debhelper-build-stamp
+debian/files
