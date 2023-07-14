@@ -18,7 +18,7 @@ jobs:
         uses: pi-top/debian-package-build-action@master
         with:
           target_architecture: amd64
-          docker_image: debian:bookworm
+          docker_image: ghcr.io/calaos/debian_deb_build_base
           build_directory: artifacts
 
       - name: Upload artifacts
