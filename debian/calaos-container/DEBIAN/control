@@ -1,8 +1,0 @@
-Package: calaos-container
-Source: calaos-container (1.0-0)
-Version: 1.0.0-0~bookworm0
-Architecture: amd64
-Maintainer: Calaos Team <team@calaos.fr>
-Installed-Size: 22710
-Depends: libc6 (>= 2.34), libdevmapper1.02.1 (>= 2:1.02.97), libgpgme11 (>= 1.4.1), bash, podman
-Description: Calaos-OS container service
