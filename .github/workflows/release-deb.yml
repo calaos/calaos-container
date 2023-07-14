@@ -37,14 +37,9 @@ jobs:
           token: ${{ secrets.ACTION_DISPATCH }}
 
       - name: Create a Release
-        uses: elgohr/Github-Release-Action@v4
-        env:
-          GITHUB_TOKEN: ${{ secrets.ACTION_DISPATCH }}
+        uses: meeDamian/github-release@2.0
         with:
-          title: ${{ github.event.inputs.version }}
-
-      - name: Upload deb to release
-        uses: nebula-actions/upload-assets@v1.0.0
-        with:
-          asset-path: pkg/*.deb
+          token: ${{ secrets.ACTION_DISPATCH }}
           tag: ${{ github.event.inputs.version }}
+          name: ${{ github.event.inputs.version }}
+          files: pkg/*.deb
