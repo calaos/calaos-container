@@ -42,7 +42,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ACTION_DISPATCH }}
 
       - name: Upload deb to release
-        uses: nebula-actions/upload-assets@v1
+        uses: nebula-actions/upload-assets@v1.0.0
         with:
           asset-path: pkg/*.deb
           tag: ${{ github.event.inputs.version }}
