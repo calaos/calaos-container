@@ -1,4 +1,4 @@
-name: Build deb package
+name: Build release deb package
 
 on:
   workflow_dispatch:
