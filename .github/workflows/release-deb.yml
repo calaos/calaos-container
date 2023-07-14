@@ -1,0 +1,48 @@
+name: Build deb package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (x.x.x)'
+        required: true
+
+jobs:
+  build-and-push-deb-pkg:
+    name: Build deb package and push to repositories
+    runs-on: ubuntu-latest
+  
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v2
+
+      - name: Build package
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ghcr.io/calaos/debian_deb_build_base
+          options: -v ${{ github.workspace }}:/work
+          run: |
+            /build-deb.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: deb
+          path: pkg/*.deb
+
+      - name: Create Tag
+        uses: negz/create-tag@v1
+        with:
+          version: ${{ github.event.inputs.version }}
+          token: ${{ secrets.ACTION_DISPATCH }}
+
+      - name: Create a Release
+        uses: elgohr/Github-Release-Action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.ACTION_DISPATCH }}
+
+      - name: Upload deb to release
+        uses: nebula-actions/upload-assets
+        with:
+          asset-path: pkg/*.deb
+          tag: ${{ github.event.inputs.version }}
