@@ -6,23 +6,24 @@ on:
 
     
 jobs:
-  # define job to build and publish docker image
   build-and-push-deb-pkg:
     name: Build deb package and push to repositories
-    # run only when code is compiling and tests are passing
     runs-on: ubuntu-latest
   
-    # steps to perform in job
     steps:
-      - name: Build Debian package
-        uses: pi-top/debian-package-build-action@master
+      - name: Checkout the repo
+        uses: actions/checkout@v2
+
+      - name: Build package
+        uses: addnab/docker-run-action@v3
         with:
-          target_architecture: amd64
-          docker_image: ghcr.io/calaos/debian_deb_build_base
-          build_directory: artifacts
+          image: calaos/debian_deb_build_base
+          options: -v ${{ github.workspace }}:/work
+          run: |
+            /build-deb.sh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
         with:
           name: deb
-          path: artifacts/*.deb
+          path: pkg/*.deb

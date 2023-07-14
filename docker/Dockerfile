@@ -6,3 +6,5 @@ RUN apt -y update && \
     apt -y upgrade && \
     apt-get install -yq --no-install-recommends devscripts debhelper dpkg-dev fakeroot lintian sudo \
         pkgconf golang libbtrfs-dev libdevmapper-dev libgpgme-dev
+
+COPY build-deb.sh /build-deb.sh
