@@ -22,7 +22,7 @@ jobs:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            /build-deb.sh
+            /build-deb.sh ${{ github.event.inputs.version }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
@@ -40,6 +40,8 @@ jobs:
         uses: elgohr/Github-Release-Action@v4
         env:
           GITHUB_TOKEN: ${{ secrets.ACTION_DISPATCH }}
+        with:
+          title: ${{ github.event.inputs.version }}
 
       - name: Upload deb to release
         uses: nebula-actions/upload-assets@v1.0.0
