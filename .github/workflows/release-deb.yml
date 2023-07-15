@@ -11,6 +11,14 @@ jobs:
   build-and-push-deb-pkg:
     name: Build deb package and push to repositories
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm/v7
+          - linux/arm64
   
     steps:
       - name: Checkout the repo
