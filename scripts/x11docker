@@ -11067,7 +11067,7 @@ declare_variables() {           # declare global variables
   Xcontainer="auto"
   Xcontainerbackend=""
   Xcontainercommand=""
-  Xcontainerimage="x11docker/xserver"
+  Xcontainerimage="ghcr.io/calaos/xserver"
   Xcontainerip=""
   Xcontainername=""
   Xcontaineroptions=""
