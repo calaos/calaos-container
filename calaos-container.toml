@@ -1,0 +1,4 @@
+[general]
+#Port to listen for Web
+port = 8000
+address = "127.0.0.1"
