@@ -1,0 +1,28 @@
+[Unit]
+Description=calaos-web-app container
+After=local-fs.target
+Requires=network.target
+After=network.target
+RequiresMountsFor=/mnt/calaos
+
+[Service]
+Restart=always
+ExecStartPre=/usr/sbin/load_containers_cache.sh calaos-web-app ghcr.io/calaos/calaos-web-app:latest
+KillMode=mixed
+ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+Delegate=yes
+Type=notify
+NotifyAccess=all
+SyslogIdentifier=%N
+ExecStart=/usr/bin/podman run \
+        --name=calaos-web-app \
+        --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
+        --sdnotify=conmon -d \
+        --publish 5455:80/tcp \
+        --log-driver journald \
+        ghcr.io/calaos/calaos_base:latest \
+        /opt/bin/calaos_server
+
+[Install]
+WantedBy=multi-user.target
