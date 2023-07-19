@@ -1,3 +1,4 @@
 bin/calaos-container usr/bin
 scripts/x11docker usr/bin
 calaos-container.toml etc
+env/calaos.sh etc/profile.d
