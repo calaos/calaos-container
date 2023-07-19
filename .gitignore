@@ -20,7 +20,7 @@
 # Go workspace file
 go.work
 
-./calaos-container
+calaos-container
 bin
 debian/calaos-container
 debian/.debhelper
