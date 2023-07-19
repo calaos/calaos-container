@@ -23,4 +23,4 @@ apt-get build-dep -y .
 dpkg-buildpackage -us -uc -b
 
 mkdir $workdir/pkg
-mv ../"{$pkg_name}"_*.deb $workdir/pkg
+mv ../"${pkg_name}"_*.deb $workdir/pkg
