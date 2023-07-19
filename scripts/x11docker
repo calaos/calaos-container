@@ -3856,8 +3856,7 @@ create_xcommand() {             ### create command to start X server and/or Wayl
 
   # Disable screensaver
   Xserveroptions="$Xserveroptions \\
-  -dpms \\
-  -s off"
+  -nocursor"
 
   # X cookie authentication
   case "$Xauthentication" in
