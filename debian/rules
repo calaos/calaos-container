@@ -9,5 +9,11 @@ PACKAGEVERSION = $(VERSION)-0~$(DISTRIBUTION)0
 
 export GOCACHE=/tmp
 
+override_dh_installsystemd:
+	dh_installsystemd --name=calaos-container
+    dh_installsystemd --name=calaos-server
+	dh_installsystemd --name=calaos-home
+	dh_installsystemd --name=calaos-web-app
+
 override_dh_gencontrol:
 	dh_gencontrol -- -v$(PACKAGEVERSION)
