@@ -19,10 +19,9 @@ ExecStart=/usr/bin/podman run \
         --name=calaos-web-app \
         --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
         --sdnotify=conmon -d \
-        --publish 5455:80/tcp \
+        --publish 3000:3000/tcp \
         --log-driver journald \
-        ghcr.io/calaos/calaos_base:latest \
-        /opt/bin/calaos_server
+        ghcr.io/calaos/calaos-web-app:latest
 
 [Install]
 WantedBy=multi-user.target
