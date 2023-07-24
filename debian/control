@@ -8,4 +8,4 @@ Package: calaos-container
 Architecture: any
 Description: Calaos-OS container service
 Depends: ${misc:Depends}, ${shlibs:Depends},
-         bash, podman
+         bash, podman, openssl

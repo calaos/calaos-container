@@ -7,10 +7,12 @@ RequiresMountsFor=/mnt/calaos
 
 [Service]
 Restart=always
+ExecStartPre=/usr/sbin/init_calaosfs.sh
 ExecStartPre=/usr/sbin/load_containers_cache.sh calaos-server ghcr.io/calaos/calaos_base:latest
 KillMode=mixed
 ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
 ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+ExecStopPost=-/bin/rm -f %t/%N.cid
 Delegate=yes
 Type=notify
 NotifyAccess=all

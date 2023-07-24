@@ -6,6 +6,7 @@ After=network.target
 RequiresMountsFor=/mnt/calaos
 
 [Service]
+ExecStartPre=/usr/sbin/init_calaosfs.sh
 ExecStartPre=/usr/sbin/load_containers_cache.sh calaos-home ghcr.io/calaos/calaos_home:latest
 ExecStartPre=/usr/sbin/load_containers_cache.sh xserver ghcr.io/calaos/xserver:latest
 ExecStart=/usr/bin/x11docker \

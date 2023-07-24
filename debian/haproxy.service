@@ -7,16 +7,19 @@ RequiresMountsFor=/mnt/calaos
 
 [Service]
 Restart=always
+ExecStartPre=/usr/sbin/init_calaosfs.sh
+ExecStartPre=/usr/sbin/haproxy_pre.sh
 ExecStartPre=/usr/sbin/load_containers_cache.sh haproxy docker.io/haproxy:2.7.6-alpine
 KillMode=mixed
 ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
 ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+ExecStopPost=-/bin/rm -f %t/%N.cid
 Delegate=yes
 Type=notify
 NotifyAccess=all
 SyslogIdentifier=%N
 ExecStart=/usr/bin/podman run \
-        --name=calaos-server \
+        --name=haproxy \
         --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
         --sdnotify=conmon -d \
         -v /mnt/calaos/haproxy:/usr/local/etc/haproxy:ro
