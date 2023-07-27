@@ -33,6 +33,7 @@ serial:
   # Location of CC2531 USB sniffer
   port: /dev/ttyACM0
 
+frontend: true
 EOF
 
 echo "Initial Zigbee2mqtt config file created."
