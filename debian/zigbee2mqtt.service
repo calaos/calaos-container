@@ -1,0 +1,31 @@
+[Unit]
+Description=Zigbee2mqtt container
+After=local-fs.target
+Requires=network.target
+After=network.target
+RequiresMountsFor=/mnt/calaos
+
+[Service]
+Restart=always
+ExecStartPre=/usr/sbin/init_calaosfs.sh
+ExecStartPre=/usr/sbin/zigbee2mqtt_pre.sh
+ExecStartPre=/usr/sbin/load_containers_cache.sh zigbee2mqtt docker.io/koenkk/zigbee2mqtt
+KillMode=mixed
+ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+ExecStopPost=-/bin/rm -f %t/%N.cid
+Delegate=yes
+Type=notify
+NotifyAccess=all
+SyslogIdentifier=%N
+ExecStart=/usr/bin/podman run \
+        --name=haproxy \
+        --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
+        --sdnotify=conmon -d \
+        -v /mnt/calaos/zigbee2mqtt:/app/data \
+        --network=host \
+        --publish 8080:8080/tcp \
+        docker.io/koenkk/zigbee2mqtt
+
+[Install]
+WantedBy=multi-user.target
