@@ -22,9 +22,12 @@ ExecStart=/usr/bin/podman run \
         --name=haproxy \
         --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
         --sdnotify=conmon -d \
-        -v /mnt/calaos/haproxy:/usr/local/etc/haproxy:ro
+        -v /mnt/calaos/haproxy:/usr/local/etc/haproxy:ro \
+        --network=host \
+        --cap-add=CAP_NET_BIND_SERVICE \
         --publish 443:443/tcp \
-        docker.io/haproxy:2.7.6-alpine
+        --publish 80:80/tcp \
+        docker.io/haproxy:2.8-alpine
 
 [Install]
 WantedBy=multi-user.target

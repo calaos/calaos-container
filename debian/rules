@@ -13,7 +13,6 @@ override_dh_installsystemd:
 	dh_installsystemd --name=calaos-container
 	dh_installsystemd --name=calaos-server
 	dh_installsystemd --name=calaos-home
-	dh_installsystemd --name=calaos-web-app
 	dh_installsystemd --name=haproxy
 
 override_dh_gencontrol:
