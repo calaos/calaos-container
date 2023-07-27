@@ -19,7 +19,7 @@ Type=notify
 NotifyAccess=all
 SyslogIdentifier=%N
 ExecStart=/usr/bin/podman run \
-        --name=haproxy \
+        --name=zigbee2mqtt \
         --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
         --sdnotify=conmon -d \
         -v /mnt/calaos/zigbee2mqtt:/app/data \

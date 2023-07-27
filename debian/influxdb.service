@@ -1,5 +1,5 @@
 [Unit]
-Description=mosquitto MQTT container
+Description=influxdb container
 After=local-fs.target
 Requires=network.target
 After=network.target
@@ -8,8 +8,7 @@ RequiresMountsFor=/mnt/calaos
 [Service]
 Restart=always
 ExecStartPre=/usr/sbin/init_calaosfs.sh
-ExecStartPre=/usr/sbin/mosquitto_pre.sh
-ExecStartPre=/usr/sbin/load_containers_cache.sh mosquitto docker.io/eclipse-mosquitto
+ExecStartPre=/usr/sbin/load_containers_cache.sh influxdb docker.io/influxdb
 KillMode=mixed
 ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
 ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
@@ -19,15 +18,14 @@ Type=notify
 NotifyAccess=all
 SyslogIdentifier=%N
 ExecStart=/usr/bin/podman run \
-        --name=mosquitto \
+        --name=influxdb \
         --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
         --sdnotify=conmon -d \
-        -v /mnt/calaos/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf \
-        -v /mnt/calaos/mosquitto/data:/mosquitto/data \
+        -v /mnt/calaos/influxdb/data:/var/lib/influxdb2 \
+        -v /mnt/calaos/influxdb/config:/etc/influxdb2 \
         --network=host \
-        --publish 1883:1883/tcp \
-        --publish 9001:9001/tcp \
-        docker.io/eclipse-mosquitto
+        --publish 8086:8086/tcp \
+        docker.io/influxdb
 
 [Install]
 WantedBy=multi-user.target
