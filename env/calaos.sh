@@ -3,7 +3,7 @@
 
 # calaos_ddns
 export CALAOS_HAPROXY_PATH="/mnt/calaos/haproxy"
-export CALAOS_CERT_FILE="CALAOS_CERT_FILE=/mnt/calaos/haproxy/server.pem"
+export CALAOS_CERT_FILE="/mnt/calaos/haproxy/server.pem"
 export CALAOS_CONFIG="/mnt/calaos/config"
 export CALAOS_HAPROXY_TEMPLATE_PATH="/usr/share/calaos-ddns"
 
