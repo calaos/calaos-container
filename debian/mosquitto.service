@@ -9,7 +9,7 @@ RequiresMountsFor=/mnt/calaos
 Restart=always
 ExecStartPre=/usr/sbin/init_calaosfs.sh
 ExecStartPre=/usr/sbin/mosquitto_pre.sh
-ExecStartPre=/usr/sbin/load_containers_cache.sh mosquitto docker.io/eclipse-mosquitto:2.0.15
+ExecStartPre=/usr/sbin/load_containers_cache.sh mosquitto docker.io/eclipse-mosquitto
 KillMode=mixed
 ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
 ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
@@ -27,7 +27,7 @@ ExecStart=/usr/bin/podman run \
         --network=host \
         --publish 1883:1883/tcp \
         --publish 9001:9001/tcp \
-        docker.io/eclipse-mosquitto:2.0.15
+        docker.io/eclipse-mosquitto
 
 [Install]
 WantedBy=multi-user.target

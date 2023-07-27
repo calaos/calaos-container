@@ -8,7 +8,7 @@ RequiresMountsFor=/mnt/calaos
 [Service]
 Restart=always
 ExecStartPre=/usr/sbin/init_calaosfs.sh
-ExecStartPre=/usr/sbin/load_containers_cache.sh calaos-server ghcr.io/calaos/calaos_base:latest
+ExecStartPre=/usr/sbin/load_containers_cache.sh calaos-server ghcr.io/calaos/calaos_base
 KillMode=mixed
 ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
 ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
@@ -25,7 +25,7 @@ ExecStart=/usr/bin/podman run \
         -v /mnt/calaos/config:/root/.config/calaos \
         --publish 5454:5454/tcp \
         --publish 4545:4545/udp \
-        ghcr.io/calaos/calaos_base:latest \
+        ghcr.io/calaos/calaos_base \
         /opt/bin/calaos_server
 
 [Install]

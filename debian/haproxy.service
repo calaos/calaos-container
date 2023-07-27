@@ -9,7 +9,7 @@ RequiresMountsFor=/mnt/calaos
 Restart=always
 ExecStartPre=/usr/sbin/init_calaosfs.sh
 ExecStartPre=/usr/sbin/haproxy_pre.sh
-ExecStartPre=/usr/sbin/load_containers_cache.sh haproxy docker.io/haproxy:2.7.6-alpine
+ExecStartPre=/usr/sbin/load_containers_cache.sh haproxy docker.io/haproxy
 KillMode=mixed
 ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
 ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
@@ -27,7 +27,7 @@ ExecStart=/usr/bin/podman run \
         --cap-add=CAP_NET_BIND_SERVICE \
         --publish 443:443/tcp \
         --publish 80:80/tcp \
-        docker.io/haproxy:2.8-alpine
+        docker.io/haproxy
 
 [Install]
 WantedBy=multi-user.target
