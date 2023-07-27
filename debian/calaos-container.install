@@ -6,4 +6,5 @@ scripts/calaos_install.sh usr/sbin
 scripts/calaos_rollback.sh usr/sbin
 scripts/init_calaosfs.sh usr/sbin
 scripts/haproxy_pre.sh usr/sbin
+scripts/mosquitto_pre.sh usr/sbin
 scripts/load_containers_cache.sh usr/sbin
