@@ -10,4 +10,4 @@ Description: Calaos-OS container service
 Depends: ${misc:Depends}, ${shlibs:Depends},
          bash, podman, openssl, coreutils, util-linux, gawk, bash,
          btrfs-progs, parted, dosfstools, snapper, mount, rsync,
-         sed
+         sed, inotify-tools
