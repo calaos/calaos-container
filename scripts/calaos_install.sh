@@ -260,12 +260,12 @@ sed -i 's/^GRUB_DISTRIBUTOR=.*$/GRUB_DISTRIBUTOR="Calaos OS"/g' ${dst}/etc/defau
 sed -i 's/^.*GRUB_COLOR_NORMAL=.*$/GRUB_COLOR_NORMAL="light-blue\/black"/g' ${dst}/etc/default/grub
 sed -i 's/^.*GRUB_COLOR_HIGHLIGHT=.*$/GRUB_COLOR_HIGHLIGHT="white\/blue"/g' ${dst}/etc/default/grub
 
-sed -i 's/^GRUB_BTRFS_DISABLE=.*$/GRUB_BTRFS_DISABLE="true"/g' ${dst}/etc/default/grub-btrfs
+sed -i 's/^#*GRUB_BTRFS_DISABLE=.*$/GRUB_BTRFS_DISABLE="true"/g' ${dst}/etc/default/grub-btrfs/config
 
 arch-chroot ${dst} update-grub
 
 #Only enable grub-btrfs after installation. It does not work in chroot
-sed -i 's/^GRUB_BTRFS_DISABLE=.*$/GRUB_BTRFS_DISABLE="false"/g' ${dst}/etc/default/grub-btrfs
+sed -i 's/^#*GRUB_BTRFS_DISABLE=.*$/GRUB_BTRFS_DISABLE="false"/g' ${dst}/etc/default/grub-btrfs/config
 
 info "--> Enable services"
 
