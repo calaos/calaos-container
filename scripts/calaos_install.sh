@@ -227,11 +227,8 @@ sed -i 's/rootflags=subvol=${rootsubvol}//g' ${dst}/etc/grub.d/10_linux
 # shellcheck disable=SC2016
 sed -i 's/rootflags=subvol=${rootsubvol}//g' ${dst}/etc/grub.d/20_linux_xen
 
-sed -i 's/^MODULES=(.*)/MODULES=(btrfs)/g' ${dst}/etc/mkinitcpio.conf
-sed -i 's/^HOOKS=(\(.*\))/HOOKS=(\1 grub-btrfs-overlayfs)/g' ${dst}/etc/mkinitcpio.conf
-
 #regen mkinitcpio in rootfs
-arch-chroot ${dst} mkinitcpio -P
+arch-chroot ${dst} update-initramfs -u
 
 #Initialize Snapper. Unmount our predefined .snapshot folder, let snapper recreate it (it fails otherwise)
 #remove the snapshot created by snapper, remount our .snapshot
@@ -263,7 +260,7 @@ sed -i 's/^GRUB_DISTRIBUTOR=.*$/GRUB_DISTRIBUTOR="Calaos OS"/g' ${dst}/etc/defau
 sed -i 's/^.*GRUB_COLOR_NORMAL=.*$/GRUB_COLOR_NORMAL="light-blue\/black"/g' ${dst}/etc/default/grub
 sed -i 's/^.*GRUB_COLOR_HIGHLIGHT=.*$/GRUB_COLOR_HIGHLIGHT="white\/blue"/g' ${dst}/etc/default/grub
 
-arch-chroot ${dst} grub-mkconfig -o /boot/grub/grub.cfg
+arch-chroot ${dst} update-grub -o /boot/grub/grub.cfg
 
 info "--> Enable services"
 

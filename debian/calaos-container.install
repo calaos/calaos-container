@@ -11,3 +11,8 @@ scripts/zigbee2mqtt_pre.sh usr/sbin
 scripts/load_containers_cache.sh usr/sbin
 scripts/arch-chroot usr/sbin
 scripts/genfstab usr/sbin
+initramfs/hooks/grub-btrfs-overlay usr/share/initramfs-tools/hooks/grub-btrfs-overlay
+initramfs/scripts/local-bottom/grub-btrfs-overlay usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay
+grub-btrfs/41_snapshots-btrfs etc/grub.d
+grub-btrfs/config etc/default/grub-btrfs
+grub-btrfs/grub-btrfsd usr/bin
