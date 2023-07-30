@@ -134,7 +134,7 @@ else
     mkfs.btrfs --force --label "calaos-os" ${destination_rootfs}
 fi
 
-uuid_rootfs=$(blkid -s UUID -o value ${destination_rootfs})
+uuid_rootfs=$(blkid -s PARTUUID -o value ${destination_rootfs})
 
 info "--> Create BTRFS filesystem"
 dst="/mnt/destination_rootfs"
@@ -271,7 +271,7 @@ info "--> Enable services"
 
 arch-chroot ${dst} systemctl enable \
         fstrim.timer \
-        $(systemd-escape --template btrfs-scrub@.timer --path /dev/disk/by-uuid/$uuid_rootfs) \
+        $(systemd-escape --template btrfs-scrub@.timer --path /dev/disk/by-partuuid/$uuid_rootfs) \
         snapper-timeline.timer \
         snapper-cleanup.timer \
         grub-btrfsd.service
