@@ -271,7 +271,7 @@ info "--> Enable services"
 
 arch-chroot ${dst} systemctl enable \
         fstrim.timer \
-        btrfs-scrub@$(systemd-escape --template btrfs-scrub@.timer --path /dev/disk/by-uuid/$uuid_rootfs).timer \
+        $(systemd-escape --template btrfs-scrub@.timer --path /dev/disk/by-uuid/$uuid_rootfs) \
         snapper-timeline.timer \
         snapper-cleanup.timer \
         grub-btrfsd.service
