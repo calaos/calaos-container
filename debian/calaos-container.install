@@ -9,3 +9,5 @@ scripts/haproxy_pre.sh usr/sbin
 scripts/mosquitto_pre.sh usr/sbin
 scripts/zigbee2mqtt_pre.sh usr/sbin
 scripts/load_containers_cache.sh usr/sbin
+scripts/arch-chroot usb/sbin
+scripts/genfstab usb/sbin
