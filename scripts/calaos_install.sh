@@ -229,6 +229,7 @@ rsync -avh ${src}/ ${dst} \
 
 #Cleanup initramfs scrits not needed for installed rootfs
 rm -rf ${dst}/.calaos-live \
+    ${dst}/etc/calaos-resize
     ${dst}/usr/share/initramfs-tools/hooks/resizeroot \
     ${dst}/usr/share/initramfs-tools/scripts/local-bottom/resizeroot
 
