@@ -16,3 +16,5 @@ initramfs/scripts/local-bottom/grub-btrfs-overlay usr/share/initramfs-tools/scri
 grub-btrfs/41_snapshots-btrfs etc/grub.d
 grub-btrfs/config etc/default/grub-btrfs
 grub-btrfs/grub-btrfsd usr/bin
+repository/calaos.gpg etc/apt/trusted.gpg.d
+repository/calaos.list etc/apt/sources.list.d
