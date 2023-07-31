@@ -19,7 +19,8 @@ override_dh_installsystemd:
 	dh_installsystemd --name=influxdb --no-enable
 	dh_installsystemd --name=grafana --no-enable
 	dh_installsystemd --name=grub-btrfsd --no-enable
-	dh_installsystemd --name=btrfs-scrub
+	dh_installsystemd --name=btrfs-scrub@.service
+	dh_installsystemd --name=btrfs-scrub@.timer
 
 override_dh_gencontrol:
 	dh_gencontrol -- -v$(PACKAGEVERSION)
