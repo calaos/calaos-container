@@ -10,7 +10,7 @@ WHITE  := $(shell tput -Txterm setaf 7)
 CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
-.PHONY: all test build install
+.PHONY: all test build
 
 all: build
 
@@ -35,9 +35,6 @@ clean: ## Remove build related file
 	rm -fr ./bin
 	rm -fr ./out
 	rm -f ./junit-report.xml checkstyle-report.xml ./coverage.xml ./profile.cov yamllint-checkstyle.xml
-
-install: ## Install
-	
 
 ## Test:
 test: ## Run the tests of the project
