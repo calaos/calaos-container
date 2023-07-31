@@ -18,3 +18,5 @@ grub-btrfs/config etc/default/grub-btrfs
 grub-btrfs/grub-btrfsd usr/bin
 repository/calaos.gpg etc/apt/trusted.gpg.d
 repository/calaos.list etc/apt/sources.list.d
+btrfs-scrub@.service lib/systemd/system
+btrfs-scrub@.timer lib/systemd/system
