@@ -215,9 +215,26 @@ src="/mnt/origin_rootfs"
 mkdir -p ${src}
 mount ${origin_rootfs} ${src}
 
-rsync -avh ${src}/ ${dst} --exclude /.calaos-live
-rm -rf ${dst}/.calaos-live ${dst}/mnt/destination_rootfs ${dst}/mnt/origin_rootfs
+rsync -avh ${src}/ ${dst} \
+    --exclude /.calaos-live \
+    --exclude /tmp \
+    --exclude /run \
+    --exclude /dev \
+    --exclude /proc \
+    --exclude /sys \
+    --exclude /var/run/containers \
+    --exclude /media \
+    --exclude /mnt/destination_rootfs \
+    --exclude /mnt/origin_rootfs
+
+#Cleanup initramfs scrits not needed for installed rootfs
+rm -rf ${dst}/.calaos-live \
+    ${dst}/usr/share/initramfs-tools/hooks/resizeroot \
+    ${dst}/usr/share/initramfs-tools/scripts/local-bottom/resizeroot
+
 genfstab -U ${dst} >> ${dst}/etc/fstab
+
+mkdir -p ${dst}/{tmp,run,dev,proc,sys,var/run/containers,media}
 
 cat ${dst}/etc/fstab
 
