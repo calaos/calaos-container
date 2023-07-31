@@ -1,2 +1,2 @@
 deb [signed-by=/etc/apt/trusted.gpg.d/calaos.gpg] https://deb.calaos.fr/calaos/calaos-container bookworm releases
-deb [signed-by=/etc/apt/trusted.gpg.d/calaos.gpg] https://deb.calaos.fr/calaos/calaos-ddns bookworm releases
+deb [signed-by=/etc/apt/trusted.gpg.d/calaos.gpg] https://deb.calaos.fr/calaos/calaos_ddns bookworm releases
