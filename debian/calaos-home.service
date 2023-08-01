@@ -6,25 +6,60 @@ After=network.target
 RequiresMountsFor=/mnt/calaos
 
 [Service]
+Restart=always
 ExecStartPre=/usr/sbin/init_calaosfs.sh
 ExecStartPre=/usr/sbin/load_containers_cache.sh calaos-home ghcr.io/calaos/calaos_home
-ExecStartPre=/usr/sbin/load_containers_cache.sh xserver ghcr.io/calaos/xserver
-ExecStart=/usr/bin/x11docker \
-    --backend=podman \
-    --gpu --xc --desktop \
-    -I \
-    --name=calaos_home \
-    --share=/mnt/calaos/config \
-    --xtest \
-    ghcr.io/calaos/calaos_home \
-    /usr/bin/start.sh
+KillMode=mixed
+ExecStop=/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+ExecStopPost=-/usr/bin/podman rm -f -i --cidfile=%t/%N.cid
+ExecStopPost=-/bin/rm -f %t/%N.cid
+Delegate=yes
+Type=notify
+NotifyAccess=all
+SyslogIdentifier=%N
 
-Restart=always
+ExecStart=/usr/bin/podman run \
+        --name=calaos-home \
+        --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
+        --sdnotify=conmon -d \
+        -v /mnt/calaos/cache:/root/.cache/calaos/ \
+        -v /mnt/calaos/config:/etc/calaos \
+        --tty \
+        --tmpfs /run:exec \
+        --tmpfs /run/lock \
+        --tmpfs /tmp \
+        --device '/dev/dri/card0':'/dev/dri/card0':rw \
+        --device '/dev/dri/renderD128':'/dev/dri/renderD128':rw \
+        --device '/dev/vga_arbiter':'/dev/vga_arbiter':rw \
+        --network=host \
+        --mount type=bind,source=/var/run/dbus,target=/var/run/dbus \
+        --mount type=bind,source=/run/udev/data,target=/run/udev/data,readonly \
+        --device=/dev/tty8 \
+        --device=/dev/input/event0 \
+        --device=/dev/input/event1 \
+        --device=/dev/input/event10 \
+        --device=/dev/input/event11 \
+        --device=/dev/input/event12 \
+        --device=/dev/input/event13 \
+        --device=/dev/input/event14 \
+        --device=/dev/input/event15 \
+        --device=/dev/input/event2 \
+        --device=/dev/input/event3 \
+        --device=/dev/input/event4 \
+        --device=/dev/input/event5 \
+        --device=/dev/input/event6 \
+        --device=/dev/input/event7 \
+        --device=/dev/input/event8 \
+        --device=/dev/input/event9 \
+        --device=/dev/input/js0 \
+        --device=/dev/input/mice \
+        --device=/dev/input/mouse0 \
+        --device=/dev/input/mouse1 \
+        ghcr.io/calaos/calaos_home \
+        /usr/bin/start.sh
+
 RestartSec=2
 KillMode=mixed
-SyslogIdentifier=%N
-Type=simple
-User=root
 
 TTYPath=/dev/tty8
 StandardInput=tty
