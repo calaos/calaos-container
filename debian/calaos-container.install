@@ -1,5 +1,5 @@
 bin/calaos-container usr/bin
-scripts/x11docker usr/bin
+scripts/start_calaos_home.sh usr/bin
 calaos-container.toml etc
 env/calaos.sh etc/profile.d
 scripts/calaos_install.sh usr/sbin
