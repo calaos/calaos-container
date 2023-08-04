@@ -24,7 +24,6 @@ ExecStart=/usr/bin/podman run \
         -v /mnt/calaos/influxdb/data:/var/lib/influxdb2 \
         -v /mnt/calaos/influxdb/config:/etc/influxdb2 \
         --network=host \
-        --publish 8086:8086/tcp \
         docker.io/influxdb
 
 [Install]

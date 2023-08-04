@@ -23,8 +23,7 @@ ExecStart=/usr/bin/podman run \
         --sdnotify=conmon -d \
         -v /mnt/calaos/cache:/root/.cache/calaos/ \
         -v /mnt/calaos/config:/root/.config/calaos \
-        --publish 5454:5454/tcp \
-        --publish 4545:4545/udp \
+        --network=host \
         ghcr.io/calaos/calaos_base \
         /opt/bin/calaos_server
 

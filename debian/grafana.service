@@ -23,7 +23,6 @@ ExecStart=/usr/bin/podman run \
         --sdnotify=conmon -d \
         -v /mnt/calaos/grafana/data:/var/lib/grafana \
         --network=host \
-        --publish 3000:3000/tcp \
         docker.io/grafana/grafana-oss
 
 [Install]

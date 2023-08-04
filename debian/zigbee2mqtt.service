@@ -24,7 +24,6 @@ ExecStart=/usr/bin/podman run \
         --sdnotify=conmon -d \
         -v /mnt/calaos/zigbee2mqtt:/app/data \
         --network=host \
-        --publish 8080:8080/tcp \
         docker.io/koenkk/zigbee2mqtt
 
 [Install]

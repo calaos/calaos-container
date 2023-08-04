@@ -25,8 +25,6 @@ ExecStart=/usr/bin/podman run \
         -v /mnt/calaos/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf \
         -v /mnt/calaos/mosquitto/data:/mosquitto/data \
         --network=host \
-        --publish 1883:1883/tcp \
-        --publish 9001:9001/tcp \
         docker.io/eclipse-mosquitto
 
 [Install]
