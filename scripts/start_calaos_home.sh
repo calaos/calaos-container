@@ -55,7 +55,5 @@ podman run \
         --mount type=bind,source=/run/udev/data,target=/run/udev/data,readonly \
         $(append_gpu_opts) \
         $(append_input_opts) \
-        -v /root/calaos_mobile/docker/xinitrc:/root/.xinitrc \
-        -v /root/calaos_mobile/docker/start.sh:/usr/bin/start.sh \
         ghcr.io/calaos/calaos_home:latest \
         /usr/bin/start.sh
