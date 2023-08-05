@@ -15,3 +15,8 @@ for d in cache \
 do
     mkdir -p ${fs}/${d}
 done
+
+#Create a unique token
+[ ! -e /run/calaos-ct.token ] && {
+    echo "$(date +%s-%N)-$RANDOM" > /run/calaos-ct.token
+}

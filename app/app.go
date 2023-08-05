@@ -48,7 +48,8 @@ func NewApp() (a *AppServer, err error) {
 	}
 
 	a.appFiber.
-		Use(fiberLog.New(fiberLog.Config{}))
+		Use(fiberLog.New(fiberLog.Config{})).
+		Use(NewTokenMiddleware())
 
 	a.appFiber.Use(cors.New(cors.Config{
 		AllowOrigins: "http://127.0.0.1",
@@ -60,7 +61,31 @@ func NewApp() (a *AppServer, err error) {
 	})
 
 	//API
-	//api := a.appFiber.Group("/api")
+	api := a.appFiber.Group("/api")
+
+	api.Post("/system/reboot", func(c *fiber.Ctx) error {
+		return a.apiSystemReboot(c)
+	})
+
+	api.Post("/system/restart", func(c *fiber.Ctx) error {
+		return a.apiSystemRestart(c)
+	})
+
+	api.Post("/system/is-ro", func(c *fiber.Ctx) error {
+		return a.apiSystemIsReadOnly(c)
+	})
+
+	api.Post("/system/rollback_snapshot", func(c *fiber.Ctx) error {
+		return a.apiSystemRollbackSnapshot(c)
+	})
+
+	api.Get("/system/install/list_devices", func(c *fiber.Ctx) error {
+		return a.apiSystemInstallListDevices(c)
+	})
+
+	api.Post("/system/install/start", func(c *fiber.Ctx) error {
+		return a.apiSystemInstallStart(c)
+	})
 
 	return
 }

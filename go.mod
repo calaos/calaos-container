@@ -7,6 +7,8 @@ require github.com/containers/podman/v4 v4.5.1
 require (
 	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/gofiber/fiber/v2 v2.47.0 // indirect
+	github.com/gofiber/utils v0.0.10 // indirect
+	github.com/gorilla/schema v1.2.0 // indirect
 	github.com/jawher/mow.cli v1.2.0 // indirect
 	github.com/knadh/koanf v1.5.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
@@ -66,6 +68,7 @@ require (
 	github.com/go-openapi/swag v0.22.3 // indirect
 	github.com/go-openapi/validate v0.22.1 // indirect
 	github.com/godbus/dbus/v5 v5.1.1-0.20221029134443-4b691ce883d5 // indirect
+	github.com/gofiber/fiber v1.14.6
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
