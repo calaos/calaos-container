@@ -39,7 +39,7 @@ func NewTokenMiddleware() fiber.Handler {
 					"msg":   err.Error(),
 				})
 			}
-			tokenStr = string(content)
+			tokenStr = strings.TrimSpace(string(content))
 		}
 
 		//Check token validity
