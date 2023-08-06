@@ -71,8 +71,8 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiSystemRestart(c)
 	})
 
-	api.Post("/system/is-ro", func(c *fiber.Ctx) error {
-		return a.apiSystemIsReadOnly(c)
+	api.Get("/system/fs_status", func(c *fiber.Ctx) error {
+		return a.apiSystemFsStatus(c)
 	})
 
 	api.Post("/system/rollback_snapshot", func(c *fiber.Ctx) error {

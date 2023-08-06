@@ -39,7 +39,7 @@ func (a *AppServer) apiSystemRestart(c *fiber.Ctx) (err error) {
 	})
 }
 
-func (a *AppServer) apiSystemIsReadOnly(c *fiber.Ctx) (err error) {
+func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) (err error) {
 
 	out, err := models.RunCommand("findmnt", "--json", "/")
 
