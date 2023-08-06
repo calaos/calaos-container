@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	TOKEN_FILE = "/run/calaos-ct.token"
+	TOKEN_FILE = "/run/calaos/calaos-ct.token"
 )
 
 var (

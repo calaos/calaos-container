@@ -46,8 +46,7 @@ podman run \
         --sdnotify=conmon -d \
         -v /mnt/calaos/cache:/root/.cache/calaos/ \
         -v /mnt/calaos/config:/etc/calaos \
-        -v /run/calaos-ct.token:/run/calaos-ct.token \
-        -v /calaos.live:/calaos.live \
+        -v /run/calaos:/run/calaos \
         --tty \
         --tmpfs /run:exec \
         --tmpfs /run/lock \

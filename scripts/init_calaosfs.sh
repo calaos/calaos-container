@@ -16,7 +16,15 @@ do
     mkdir -p ${fs}/${d}
 done
 
+mkdir -p /run/calaos
+
 #Create a unique token
-[ ! -e /run/calaos-ct.token ] && {
+if [ ! -e /run/calaos-ct.token ]
+then
     echo "$(date +%s-%N)-$RANDOM" > /run/calaos-ct.token
-}
+fi
+
+if [ -e /.calaos-live ]
+then
+    touch /run/calaos/calaos-live
+fi

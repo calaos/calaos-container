@@ -23,8 +23,7 @@ ExecStart=/usr/bin/podman run \
         --sdnotify=conmon -d \
         -v /mnt/calaos/cache:/root/.cache/calaos/ \
         -v /mnt/calaos/config:/root/.config/calaos \
-        -v /run/calaos-ct.token:/run/calaos-ct.token \
-        -v /calaos.live:/calaos.live \
+        -v /run/calaos:/run/calaos \
         --network=host \
         ghcr.io/calaos/calaos_base \
         /opt/bin/calaos_server
