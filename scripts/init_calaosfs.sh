@@ -3,6 +3,7 @@
 set -e
 
 fs="/mnt/calaos"
+rundir="/run/calaos"
 
 for d in cache \
     haproxy \
@@ -16,15 +17,15 @@ do
     mkdir -p ${fs}/${d}
 done
 
-mkdir -p /run/calaos
+mkdir -p $rundir
 
 #Create a unique token
-if [ ! -e /run/calaos/calaos-ct.token ]
+if [ ! -e $rundir/calaos-ct.token ]
 then
-    echo "$(date +%s-%N)-$RANDOM" > /run/calaos-ct.token
+    echo "$(date +%s-%N)-$RANDOM" > $rundir/calaos-ct.token
 fi
 
 if [ -e /.calaos-live ]
 then
-    touch /run/calaos/calaos-live
+    touch $rundir/calaos-live
 fi
