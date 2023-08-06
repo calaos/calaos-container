@@ -19,7 +19,7 @@ done
 mkdir -p /run/calaos
 
 #Create a unique token
-if [ ! -e /run/calaos-ct.token ]
+if [ ! -e /run/calaos/calaos-ct.token ]
 then
     echo "$(date +%s-%N)-$RANDOM" > /run/calaos-ct.token
 fi
