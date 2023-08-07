@@ -55,6 +55,9 @@ func Pull(image string) (err error) {
 
 func StopUnit(unit string) (err error) {
 	conn, err := dbus.NewWithContext(context.Background())
+	if err != nil {
+		return err
+	}
 	defer conn.Close()
 
 	_, err = conn.StopUnitContext(context.Background(), unit, "replace", nil)

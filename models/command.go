@@ -37,6 +37,8 @@ func RunCommandReader(command string, args ...string) (io.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
+	//Also writes stderr to stdout
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
 		return nil, err
