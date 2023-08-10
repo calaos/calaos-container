@@ -1,6 +1,10 @@
 package app
 
 import (
+	"os"
+	"strconv"
+	"strings"
+
 	"github.com/calaos/calaos-container/models"
 	"github.com/gofiber/fiber/v2"
 )
@@ -93,8 +97,8 @@ type InstallOpts struct {
 }
 
 const (
-	INSTALL_LOG_FILE       = "/run/calaos/install.log"
-	INSTALL_EXIT_CODE_FILE = "/run/calaos/install_exit_code.log"
+	INSTALL_LOG_FILE       = "/run/calaos/calaos_install.log"
+	INSTALL_EXIT_CODE_FILE = "/run/calaos/calaos_install.code"
 )
 
 func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
@@ -126,5 +130,34 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 }
 
 func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
+	data, err := os.ReadFile(INSTALL_EXIT_CODE_FILE)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
 
+	exitCode, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	data, err = os.ReadFile(INSTALL_LOG_FILE)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"error":     false,
+		"msg":       "ok",
+		"exit_code": exitCode,
+		"log":       string(data),
+	})
 }
