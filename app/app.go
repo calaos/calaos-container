@@ -87,6 +87,10 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiSystemInstallStart(c)
 	})
 
+	api.Get("/system/install/status", func(c *fiber.Ctx) error {
+		return a.apiSystemLastInstallStatus(c)
+	})
+
 	return
 }
 

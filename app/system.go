@@ -119,3 +119,7 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 
 	return c.SendStream(r)
 }
+
+func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
+
+}
