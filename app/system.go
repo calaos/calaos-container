@@ -92,6 +92,11 @@ type InstallOpts struct {
 	Device string `json:"device"`
 }
 
+const (
+	INSTALL_LOG_FILE       = "/run/calaos/install.log"
+	INSTALL_EXIT_CODE_FILE = "/run/calaos/install_exit_code.log"
+)
+
 func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 
 	n := new(InstallOpts)
@@ -109,7 +114,7 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	r, err := models.RunCommandReader("calaos_install.sh", n.Device)
+	r, err := models.RunCommandReader("calaos_install.sh", INSTALL_LOG_FILE, INSTALL_EXIT_CODE_FILE, n.Device)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
