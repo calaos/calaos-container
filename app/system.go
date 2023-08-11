@@ -161,3 +161,15 @@ func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
 		"log":       string(data),
 	})
 }
+
+func (a *AppServer) apiSystemInfo(c *fiber.Ctx) (err error) {
+	info, err := models.GetSystemInfo()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(info)
+}
