@@ -15,8 +15,8 @@ type SystemInfo struct {
 	MemoryUsagePercent int       `json:"mem_usage"`
 }
 
-func GetSystemInfo() (inf *SystemInfo, err error) {
-	info := &SystemInfo{}
+func GetSystemInfo() (info *SystemInfo, err error) {
+	info = &SystemInfo{}
 
 	// Get hostname
 	hostname, err := os.Hostname()
