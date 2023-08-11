@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -54,10 +55,18 @@ func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) (err error) {
 		})
 	}
 
+	var parsedData map[string]interface{}
+	if err = json.Unmarshal([]byte(out), &parsedData); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"error":  false,
 		"msg":    "ok",
-		"output": out,
+		"output": parsedData,
 	})
 }
 
@@ -85,10 +94,18 @@ func (a *AppServer) apiSystemInstallListDevices(c *fiber.Ctx) (err error) {
 		})
 	}
 
+	var parsedData map[string]interface{}
+	if err = json.Unmarshal([]byte(out), &parsedData); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"error":  false,
 		"msg":    "ok",
-		"output": out,
+		"output": parsedData,
 	})
 }
 
