@@ -5,14 +5,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 )
 
 type SystemInfo struct {
-	Hostname           string    `json:"hostname"`
-	Uptime             time.Time `json:"uptime"`
-	CPUUsagePercent    int       `json:"cpu_usage"`
-	MemoryUsagePercent int       `json:"mem_usage"`
+	Hostname           string `json:"hostname"`
+	Uptime             int64  `json:"uptime"`
+	CPUUsagePercent    int    `json:"cpu_usage"`
+	MemoryUsagePercent int    `json:"mem_usage"`
 }
 
 func GetSystemInfo() (info *SystemInfo, err error) {
@@ -27,7 +26,7 @@ func GetSystemInfo() (info *SystemInfo, err error) {
 	// Get uptime
 	uptimeDuration, err := getUptime()
 	if err == nil {
-		info.Uptime = time.Now().Add(-uptimeDuration)
+		info.Uptime = uptimeDuration
 	}
 
 	// Get CPU usage percentage
@@ -45,12 +44,12 @@ func GetSystemInfo() (info *SystemInfo, err error) {
 	return
 }
 
-func getUptime() (time.Duration, error) {
+func getUptime() (int64, error) {
 	var info syscall.Sysinfo_t
 	if err := syscall.Sysinfo(&info); err != nil {
 		return 0, err
 	}
-	return time.Duration(info.Uptime) * time.Second, nil
+	return info.Uptime, nil
 }
 
 func getCPUUsagePercent() (int, error) {

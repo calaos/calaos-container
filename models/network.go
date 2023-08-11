@@ -40,9 +40,9 @@ func GetAllNetInterfaces() (nets []*NetIntf, err error) {
 			} else if ipNet.IP.To16() != nil {
 				intf.IPv4 = ipNet.IP.String()
 			}
-
-			nets = append(nets, intf)
 		}
+
+		nets = append(nets, intf)
 	}
 
 	return

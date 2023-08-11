@@ -171,5 +171,9 @@ func (a *AppServer) apiSystemInfo(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(info)
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"error":  false,
+		"msg":    "ok",
+		"output": info,
+	})
 }

@@ -15,5 +15,9 @@ func (a *AppServer) apiNetIntfList(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(nets)
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"error":  false,
+		"msg":    "ok",
+		"output": nets,
+	})
 }
