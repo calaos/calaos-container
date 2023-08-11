@@ -14,16 +14,49 @@ jobs:
       - name: Checkout the repo
         uses: actions/checkout@v2
 
+      - name: Fetch latest release version
+        id: fetch-latest-release
+        uses: reloc8/action-latest-release-version@1.0.0
+
+      - name: Increment dev release version
+        id: bump_version
+        uses: christian-draeger/increment-semantic-version@1.1.0
+        with:
+          current-version: ${{ steps.fetch-latest-release.outputs.latest-release }}
+          version-fragment: 'alpha'
+
       - name: Build package
         uses: addnab/docker-run-action@v3
         with:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            /build-deb.sh
+            /build-deb.sh ${{ steps.bump_version.outputs.next-version }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
         with:
           name: deb
           path: pkg/*.deb
+
+      - name: Create Tag
+        uses: negz/create-tag@v1
+        with:
+          version: ${{ steps.bump_version.outputs.next-version }}
+          token: ${{ secrets.ACTION_DISPATCH }}
+  
+      - name: Create a Release
+        uses: meeDamian/github-release@2.0
+        with:
+          token: ${{ secrets.ACTION_DISPATCH }}
+          tag: ${{ steps.bump_version.outputs.next-version }}
+          name: ${{ steps.bump_version.outputs.next-version }}
+          files: pkg/*.deb
+          prerelease: true
+          gzip: false
+
+      - name: Update repo cache
+        uses: distributhor/workflow-webhook@v3
+        env:
+          webhook_url: ${{ secrets.WEBHOOK_URL }}
+          webhook_secret: ${{ secrets.WEBHOOK_SECRET }}
