@@ -91,6 +91,10 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiSystemLastInstallStatus(c)
 	})
 
+	api.Get("/network/list", func(c *fiber.Ctx) error {
+		return a.apiNetIntfList(c)
+	})
+
 	return
 }
 
