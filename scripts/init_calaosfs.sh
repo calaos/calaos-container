@@ -11,6 +11,7 @@ for d in cache \
     influxdb/config \
     zigbee2mqtt \
     mosquitto/data \
+    mosquitto/config \
     grafana/data \
     config
 do

@@ -22,7 +22,7 @@ ExecStart=/usr/bin/podman run \
         --name=mosquitto \
         --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
         --sdnotify=conmon -d \
-        -v /mnt/calaos/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf \
+        -v /mnt/calaos/mosquitto/config:/mosquitto/config \
         -v /mnt/calaos/mosquitto/data:/mosquitto/data \
         --network=host \
         docker.io/eclipse-mosquitto

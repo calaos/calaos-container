@@ -9,9 +9,14 @@ fs="/mnt/calaos/mosquitto"
 
 mkdir -p ${fs}
 
-if [ ! -e "${fs}/mosquitto.conf" ]
+if [ -e "${fs}/mosquitto.conf" ]
 then
-cat > ${fs}/mosquitto.conf <<- EOF
+    mv "${fs}/mosquitto.conf" "${fs}/config/mosquitto.conf"
+fi
+
+if [ ! -e "${fs}/config/mosquitto.conf" ]
+then
+cat > ${fs}/config/mosquitto.conf <<- EOF
 persistence true
 persistence_location /mosquitto/data/
 log_dest stdout
