@@ -8,9 +8,11 @@ cidfile=$1
     exit 1
 }
 
+fs="/mnt/calaos/zigbee2mqtt"
+
 devlist()
 {
-    grep '/dev/' configuration.yaml | awk '{print $2}'
+    grep '/dev/' ${fs}/configuration.yaml | awk '{print $2}'
 }
 
 append_dev_opts()
