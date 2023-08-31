@@ -18,13 +18,7 @@ Delegate=yes
 Type=notify
 NotifyAccess=all
 SyslogIdentifier=%N
-ExecStart=/usr/bin/podman run \
-        --name=zigbee2mqtt \
-        --cidfile=%t/%N.cid --replace --rm --cgroups=split --tz=local \
-        --sdnotify=conmon -d \
-        -v /mnt/calaos/zigbee2mqtt:/app/data \
-        --network=host \
-        docker.io/koenkk/zigbee2mqtt
+ExecStart=/usr/bin/start_z2mqtt %t/%N.cid
 
 [Install]
 WantedBy=multi-user.target
