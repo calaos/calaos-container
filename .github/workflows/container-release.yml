@@ -40,7 +40,7 @@ jobs:
       - name: update calaos release
         uses: fjogeleit/http-request-action@v1
         with:
-          url: "${{ env.CALAOS_REL_URL }}${{ github.event.inputs.rel && '' || '-dev' }}/${{ github.event.inputs.imagename }}"
+          url: "${{ env.CALAOS_REL_URL }}${{ (github.event.inputs.rel && '') || '-dev' }}/${{ github.event.inputs.imagename }}"
           method: 'POST'
           customHeaders: '{"Content-Type": "application/json"}'
           bearerToken: ${{ secrets.CALAOS_REL_TOKEN }}
