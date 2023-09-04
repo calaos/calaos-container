@@ -38,9 +38,9 @@ func NewApp() (a *AppServer, err error) {
 	a = &AppServer{
 		quitHeartbeat: make(chan interface{}),
 		appFiber: fiber.New(fiber.Config{
-			ServerHeader:          "Greenhouse (Linux)",
+			ServerHeader:          "Calaos Container (Linux)",
 			ReadTimeout:           time.Second * 20,
-			AppName:               "Greenhouse",
+			AppName:               "Calaos Container",
 			DisableStartupMessage: true,
 			EnablePrintRoutes:     false,
 			BodyLimit:             maxFileSize,
