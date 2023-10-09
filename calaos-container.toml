@@ -2,3 +2,12 @@
 #Port to listen for Web
 port = 8000
 address = "127.0.0.1"
+
+# URL for releases
+url_releases = "https://releases.calaos.fr/v4/images"
+#url_releases = "https://releases.calaos.fr/v4/images-dev"
+
+version_file = "/etc/calaos-os.releases"
+
+#duration between update checks
+update_time = "12h"

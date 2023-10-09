@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	logger "github.com/calaos/calaos-container/log"
+	cimg "github.com/calaos/calaos-container/models/images"
 
 	"github.com/sirupsen/logrus"
 
@@ -16,6 +18,13 @@ import (
 
 var (
 	logging *logrus.Entry
+
+	quitCheckUpdate chan interface{}
+	wgDone          sync.WaitGroup
+	muCheck         sync.Mutex
+
+	//Stored new available versions
+	NewVersions cimg.ImageMap
 )
 
 func init() {
@@ -25,12 +34,17 @@ func init() {
 // Init models
 func Init() (err error) {
 
+	quitCheckUpdate = make(chan interface{})
+	go checkForUpdatesLoop()
+	wgDone.Add(1)
+
 	return
 }
 
 // Shutdown models
 func Shutdown() {
-
+	close(quitCheckUpdate)
+	wgDone.Wait()
 }
 
 /*

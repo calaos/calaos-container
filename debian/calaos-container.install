@@ -1,4 +1,5 @@
 bin/calaos-container usr/bin
+bin/calaos-os usr/bin
 scripts/start_calaos_home.sh usr/bin
 calaos-container.toml etc
 env/calaos.sh etc/profile.d

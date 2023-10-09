@@ -29,3 +29,5 @@ debian/calaos-container.postrm.debhelper
 debian/calaos-container.substvars
 debian/debhelper-build-stamp
 debian/files
+calaos-os.releases
+calaos-container.dev.toml

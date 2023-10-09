@@ -2,7 +2,10 @@ GOCMD=go
 GOTEST=$(GOCMD) test
 GOVET=$(GOCMD) vet
 BINARY_NAME=calaos-container
+BINARY_NAME_TOOL=calaos-os
 VERSION?=1.0.0
+
+TOP_DIR := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
 
 GREEN  := $(shell tput -Txterm setaf 2)
 YELLOW := $(shell tput -Txterm setaf 3)
@@ -11,6 +14,7 @@ CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
 .PHONY: all test build
+.ONESHELL:
 
 all: build
 
@@ -27,7 +31,16 @@ help: ## Show this help.
 		}' $(MAKEFILE_LIST)
 
 ## Build:
-build: ## Build the project and put the output binary in bin/
+build: build-server build-tools ## Build the project and put the output binary in bin/
+	@mkdir -p bin
+
+build-tools:
+	@mkdir -p bin
+	@cd cmd/calaos-os
+	$(GOCMD) build -v -o $(TOP_DIR)/bin/$(BINARY_NAME_TOOL) .
+	@cd $(TOP_DIR)
+
+build-server:
 	@mkdir -p bin
 	$(GOCMD) build -v -o bin/$(BINARY_NAME) .
 
