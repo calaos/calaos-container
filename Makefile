@@ -6,6 +6,9 @@ BINARY_NAME_TOOL=calaos-os
 VERSION?=1.0.0
 
 TOP_DIR := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
+SUBDIRS := apt
+
+SERVER_LDFLAGS := -L$(pwd)/bin -L. -L./bin -lcalaos-apt
 
 GREEN  := $(shell tput -Txterm setaf 2)
 YELLOW := $(shell tput -Txterm setaf 3)
@@ -13,7 +16,7 @@ WHITE  := $(shell tput -Txterm setaf 7)
 CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
-.PHONY: all test build
+.PHONY: all test build $(SUBDIRS)
 .ONESHELL:
 
 all: build
@@ -31,7 +34,7 @@ help: ## Show this help.
 		}' $(MAKEFILE_LIST)
 
 ## Build:
-build: build-server build-tools ## Build the project and put the output binary in bin/
+build: build-lib build-server build-tools ## Build the project and put the output binary in bin/
 	@mkdir -p bin
 
 build-tools:
@@ -40,9 +43,16 @@ build-tools:
 	$(GOCMD) build -v -o $(TOP_DIR)/bin/$(BINARY_NAME_TOOL) .
 	@cd $(TOP_DIR)
 
-build-server:
+build-server: build-lib
 	@mkdir -p bin
-	$(GOCMD) build -v -o bin/$(BINARY_NAME) .
+	CGO_LDFLAGS="$(SERVER_LDFLAGS)" $(GOCMD) build -v -o bin/$(BINARY_NAME) .
+
+build-lib: $(SUBDIRS)
+	@mkdir -p bin
+	@mv apt/libcalaos-apt.so bin/
+
+$(SUBDIRS):
+	$(MAKE) -C $@
 
 clean: ## Remove build related file
 	rm -fr ./bin

@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/calaos/calaos-container/apt"
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/models/images"
 )
@@ -65,6 +66,7 @@ func CheckUpdates() error {
 func checkForUpdates() error {
 	logging.Infoln("Checking for updates")
 
+	logging.Infoln("Checking container images")
 	localImageMap, err := LoadFromDisk(config.Config.String("general.version_file"))
 	if err != nil {
 		logging.Errorln("Error loading local JSON:", err)
@@ -87,6 +89,19 @@ func checkForUpdates() error {
 			localVersion = v.Version
 		}
 		logging.Infof("%s: %s  -->  %s\n", name, localVersion, newVersion.Version)
+	}
+
+	logging.Infoln("Checking dpkg updates")
+	pkgs := apt.GetCachePackages()
+	for _, p := range pkgs {
+		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
+
+		NewVersions[p.Name] = images.Image{
+			Name:          p.Name,
+			Source:        "dpkg",
+			Version:       p.VersionNew,
+			CurrentVerion: p.VersionCurrent,
+		}
 	}
 
 	return nil
