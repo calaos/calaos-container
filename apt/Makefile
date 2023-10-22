@@ -2,5 +2,5 @@
 
 all:
 	meson setup build --prefix=/usr
-	meson -C build compile
-	meson -C build install
+	meson compile -C build
+	meson install -C build
