@@ -19,7 +19,6 @@ libcalaos_apt = shared_library(
     ],
     install: true,
     version: version,
-    cpp_std: cpp_std,
 )
 
 # Install the library
