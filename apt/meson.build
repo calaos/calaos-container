@@ -20,7 +20,3 @@ libcalaos_apt = shared_library(
     install: true,
     version: version,
 )
-
-# Install the library
-install_dir = join_paths(get_option('prefix'), 'lib')
-install_targets(libcalaos_apt, install_dir: install_dir)
