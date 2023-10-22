@@ -2,7 +2,7 @@ Source: calaos-container
 Maintainer: Calaos Team <team@calaos.fr>
 Build-Depends: debhelper (>= 11),
                pkgconf, golang,
-               libbtrfs-dev, libdevmapper-dev, libgpgme-dev
+               libbtrfs-dev, libdevmapper-dev, libgpgme-dev, libglib2.0-dev, libapt-pkg-dev
 
 Package: calaos-container
 Architecture: any
