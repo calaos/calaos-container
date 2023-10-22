@@ -2,4 +2,4 @@
 
 all:
 	meson build .
-	ninja -C build install DESTDIR=${DESTDIR}
+	DESTDIR=${DESTDIR} meson install 
