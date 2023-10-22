@@ -1,5 +1,5 @@
 .PHONY: libcalaos-apt.so
 
 all:
-	meson build .
-	DESTDIR=${DESTDIR} meson install 
+	meson setup build
+	cd build && meson compile && meson install
