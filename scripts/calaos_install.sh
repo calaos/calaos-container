@@ -263,10 +263,11 @@ chmod 750 ${dst}/.snapshots
 info "--> Install Bootloader"
 
 if [ $LABEL == "live-efi" ]; then
-
+    # --removable Needed to install uefi payload in /EFI/BOOT/BOOTX64.EFI for buggy bios
     arch-chroot ${dst} grub-install --target=x86_64-efi \
                                     --efi-directory=/efi \
                                     --bootloader-id=Calaos-OS \
+                                    --removable \
                                     --modules="normal test efi_gop efi_uga search echo linux all_video gfxmenu gfxterm_background gfxterm_menu gfxterm loadenv configfile gzio part_gpt btrfs"
 else
     arch-chroot ${dst} grub-install --target=i386-pc ${destination}
