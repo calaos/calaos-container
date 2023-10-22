@@ -48,8 +48,6 @@ build-server: build-lib
 	CGO_LDFLAGS="$(SERVER_LDFLAGS)" $(GOCMD) build -v -o bin/$(BINARY_NAME) .
 
 build-lib: $(SUBDIRS)
-	@mkdir -p bin
-	@mv apt/libcalaos-apt.so bin/
 
 $(SUBDIRS):
 	$(MAKE) -C $@
