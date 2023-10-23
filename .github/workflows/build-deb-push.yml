@@ -43,15 +43,15 @@ jobs:
       - name: Create Tag
         uses: negz/create-tag@v1
         with:
-          version: ${{ steps.bump_version.outputs.next-version }}
+          version: ${{ steps.bump_version.outputs.release }}
           token: ${{ secrets.ACTION_DISPATCH }}
   
       - name: Create a Release
         uses: meeDamian/github-release@2.0
         with:
           token: ${{ secrets.ACTION_DISPATCH }}
-          tag: ${{ steps.bump_version.outputs.next-version }}
-          name: ${{ steps.bump_version.outputs.next-version }}
+          tag: ${{ steps.bump_version.outputs.release }}
+          name: ${{ steps.bump_version.outputs.release }}
           files: pkg/*.deb
           prerelease: true
           gzip: false
