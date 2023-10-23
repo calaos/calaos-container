@@ -22,7 +22,6 @@ jobs:
         id: bump_version
         uses: actionsdesk/semver@0.6.0-rc.10
         with:
-          bump: patch
           prerelease: withBuildNumber
           prelabel: alpha
           initial_version: ${{ steps.fetch-latest-release.outputs.latest-release }}
