@@ -19,11 +19,12 @@ jobs:
         uses: reloc8/action-latest-release-version@1.0.0
 
       - name: Increment dev release version
-        id: bump_version
-        uses: christian-draeger/increment-semantic-version@1.1.0
+        uses: actionsdesk/semver
         with:
-          current-version: ${{ steps.fetch-latest-release.outputs.latest-release }}
-          version-fragment: 'alpha'
+          bump: patch
+          prerelease: withBuildNumber
+          prelabel: alpha
+          initial_version: ${{ steps.fetch-latest-release.outputs.latest-release }}
 
       - name: Build package
         uses: addnab/docker-run-action@v3
