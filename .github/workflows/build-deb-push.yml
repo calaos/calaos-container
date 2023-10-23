@@ -19,7 +19,7 @@ jobs:
         uses: reloc8/action-latest-release-version@1.0.0
 
       - name: Increment dev release version
-        uses: actionsdesk/semver
+        uses: actionsdesk/semver@0.6.0-rc.10
         with:
           bump: patch
           prerelease: withBuildNumber
