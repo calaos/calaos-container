@@ -19,6 +19,7 @@ jobs:
         uses: reloc8/action-latest-release-version@1.0.0
 
       - name: Increment dev release version
+        id: bump_version
         uses: actionsdesk/semver@0.6.0-rc.10
         with:
           bump: patch
@@ -32,7 +33,7 @@ jobs:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            /build-deb.sh ${{ steps.bump_version.outputs.next-version }}
+            /build-deb.sh ${{ steps.bump_version.outputs.release }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
