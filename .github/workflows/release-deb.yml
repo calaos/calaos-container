@@ -28,10 +28,11 @@ jobs:
 
       - name: Increment dev release version
         id: bump_version
-        uses: christian-draeger/increment-semantic-version@1.1.0
+        uses: actionsdesk/semver@0.6.0-rc.10
         with:
-          current-version: ${{ steps.fetch-latest-release.outputs.latest-release }}
-          version-fragment: ${{ github.event.inputs.vincrement }}
+          prerelease: withBuildNumber
+          prelabel: alpha
+          initial_version: ${{ steps.fetch-latest-release.outputs.latest-release }}
 
       - name: Build package
         uses: addnab/docker-run-action@v3
@@ -39,7 +40,7 @@ jobs:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            /build-deb.sh ${{ steps.bump_version.outputs.next-version }}
+            /build-deb.sh ${{ steps.bump_version.outputs.release }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
@@ -50,15 +51,15 @@ jobs:
       - name: Create Tag
         uses: negz/create-tag@v1
         with:
-          version: ${{ steps.bump_version.outputs.next-version }}
+          version: ${{ steps.bump_version.outputs.release }}
           token: ${{ secrets.ACTION_DISPATCH }}
 
       - name: Create a Release
         uses: meeDamian/github-release@2.0
         with:
           token: ${{ secrets.ACTION_DISPATCH }}
-          tag: ${{ steps.bump_version.outputs.next-version }}
-          name: ${{ steps.bump_version.outputs.next-version }}
+          tag: ${{ steps.bump_version.outputs.release }}
+          name: ${{ steps.bump_version.outputs.release }}
           files: pkg/*.deb
           gzip: false
 
