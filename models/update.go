@@ -92,6 +92,11 @@ func checkForUpdates() error {
 	}
 
 	logging.Infoln("Checking dpkg updates")
+
+	//Update apt cache without interaction
+	out, _ := RunCommand("apt-get", "update", "-qq")
+	logging.Debugln("apt-get update output:", out)
+
 	pkgs := apt.GetCachePackages()
 	for _, p := range pkgs {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
