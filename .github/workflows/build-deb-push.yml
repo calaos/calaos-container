@@ -15,13 +15,13 @@ jobs:
           - linux/arm64
     container: 
       image: ghcr.io/calaos/debian_deb_build_base
-      options: -v ${{ github.workspace }}:/work --user 1001 
+      options: -v ${{ github.workspace }}:/work 
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v2
 
       - name: Fetch latest release version
         id: fetch-latest-release
@@ -37,7 +37,7 @@ jobs:
 
       - name: Build package
         run: |
-          sudo /build-deb.sh ${{ steps.bump_version.outputs.release }}
+          /build-deb.sh ${{ steps.bump_version.outputs.release }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
