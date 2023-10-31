@@ -22,7 +22,11 @@ jobs:
     steps:
       - name: Checkout the repo
         uses: actions/checkout@v4.1.1
-
+      - name: Set ownership
+        run: |
+          # this is to fix GIT not liking owner of the checkout dir
+          chown -R $(id -u):$(id -g) $PWD
+          
       - name: Fetch latest release version
         id: fetch-latest-release
         uses: reloc8/action-latest-release-version@1.0.0
