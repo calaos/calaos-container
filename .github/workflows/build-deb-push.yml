@@ -15,7 +15,7 @@ jobs:
           - linux/arm64
     container: 
       image: ghcr.io/calaos/debian_deb_build_base
-      options: -v ${{ github.workspace }}:/work
+      options: -v ${{ github.workspace }}:/work --user 1001 
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
