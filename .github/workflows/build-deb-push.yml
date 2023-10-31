@@ -37,7 +37,7 @@ jobs:
 
       - name: Build package
         run: |
-          /build-deb.sh ${{ steps.bump_version.outputs.release }}
+          sudo /build-deb.sh ${{ steps.bump_version.outputs.release }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
