@@ -55,10 +55,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          # Note: tags has to be all lower-case
-          tags: |
-            ghcr.io/calaos/debian_deb_build_base:latest
-            ghcr.io/calaos/debian_deb_build_base:${{ github.sha }}
           push: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Export digest
