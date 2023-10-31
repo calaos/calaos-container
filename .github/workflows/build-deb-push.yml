@@ -10,15 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
-    container: 
-      image: ghcr.io/calaos/debian_deb_build_base
-      options: -v ${{ github.workspace }}:/work 
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        arch:
+          - docker: amd64
+          - docker: arm64
+
     steps:
       - name: Checkout the repo
         uses: actions/checkout@v4.1.1
@@ -38,10 +33,30 @@ jobs:
           prerelease: withBuildNumber
           prelabel: alpha
           initial_version: ${{ steps.fetch-latest-release.outputs.latest-release }}
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+        with:
+          platforms: ${{ matrix.arch }}
+
+      - name: Login to Github Packages
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build package
         run: |
-          /build-deb.sh ${{ steps.bump_version.outputs.release }}
+          docker run \
+              --rm \
+              -v ${{ github.workspace }}:/work \
+              -v $(pwd):/${{ github.workspace }} \
+              -w ${{ github.workspace }} \
+              --platform linux/${{ matrix.arch }} \
+              ghcr.io/calaos/debian_deb_build_base \
+              /build-deb.sh ${{ steps.bump_version.outputs.release }}
+          
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
