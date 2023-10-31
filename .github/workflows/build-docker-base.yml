@@ -9,7 +9,7 @@ env:
   REGISTRY: ghcr.io
   # github.repository as <account>/<repo>
   IMAGE_NAME: ${{ github.repository }}
-  REGISTRY_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
 
 
 jobs:
