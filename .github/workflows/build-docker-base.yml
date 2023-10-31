@@ -60,7 +60,6 @@ jobs:
             ghcr.io/calaos/debian_deb_build_base:latest
             ghcr.io/calaos/debian_deb_build_base:${{ github.sha }}
           push: ${{ github.ref == 'refs/heads/main' }}
-          platforms: linux/amd64, linux/arm64, linux/arm/v7
 
       - name: Export digest
         run: |
