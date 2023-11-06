@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	logger "github.com/calaos/calaos-container/log"
-	cimg "github.com/calaos/calaos-container/models/images"
+	cimg "github.com/calaos/calaos-container/models/structs"
 
 	"github.com/sirupsen/logrus"
 
@@ -75,6 +75,18 @@ func StopUnit(unit string) (err error) {
 	defer conn.Close()
 
 	_, err = conn.StopUnitContext(context.Background(), unit, "replace", nil)
+
+	return err
+}
+
+func StartUnit(unit string) (err error) {
+	conn, err := dbus.NewWithContext(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	_, err = conn.StartUnitContext(context.Background(), unit, "replace", nil)
 
 	return err
 }

@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/calaos/calaos-container/models/images"
+	"github.com/calaos/calaos-container/models/structs"
 )
 
 const (
@@ -182,14 +182,14 @@ func (capi *CalaosApi) makeHttpCall(
 }
 
 // UpdateCheck forces an update check
-func (capi *CalaosApi) UpdateCheck(token string) (imgs *images.ImageMap, err error) {
+func (capi *CalaosApi) UpdateCheck(token string) (imgs *structs.ImageMap, err error) {
 
 	_, body, err := capi.callWithToken("GET", "/api/update/check", token, nil, nil)
 	if err != nil {
 		return
 	}
 
-	imgs = &images.ImageMap{}
+	imgs = &structs.ImageMap{}
 	if err = json.Unmarshal(body, imgs); err != nil {
 		return nil, fmt.Errorf("UpdateCheck failed: %v", err)
 	}
@@ -198,14 +198,14 @@ func (capi *CalaosApi) UpdateCheck(token string) (imgs *images.ImageMap, err err
 }
 
 // UpdateAvailable returns available updates
-func (capi *CalaosApi) UpdateAvailable(token string) (imgs *images.ImageMap, err error) {
+func (capi *CalaosApi) UpdateAvailable(token string) (imgs *structs.ImageMap, err error) {
 
 	_, body, err := capi.callWithToken("GET", "/api/update/available", token, nil, nil)
 	if err != nil {
 		return
 	}
 
-	imgs = &images.ImageMap{}
+	imgs = &structs.ImageMap{}
 	if err = json.Unmarshal(body, imgs); err != nil {
 		return nil, fmt.Errorf("UpdateAvailable failed: %v", err)
 	}
@@ -214,16 +214,58 @@ func (capi *CalaosApi) UpdateAvailable(token string) (imgs *images.ImageMap, err
 }
 
 // UpdateImages returns currently installed images
-func (capi *CalaosApi) UpdateImages(token string) (imgs *images.ImageMap, err error) {
+func (capi *CalaosApi) UpdateImages(token string) (imgs *structs.ImageMap, err error) {
 
 	_, body, err := capi.callWithToken("GET", "/api/update/images", token, nil, nil)
 	if err != nil {
 		return
 	}
 
-	imgs = &images.ImageMap{}
+	imgs = &structs.ImageMap{}
 	if err = json.Unmarshal(body, imgs); err != nil {
 		return nil, fmt.Errorf("UpdateImages failed: %v", err)
+	}
+
+	return
+}
+
+// UpgradePackages upgrades all packages
+func (capi *CalaosApi) UpgradePackages(token string) (err error) {
+
+	_, _, err = capi.callWithToken("POST", "/api/update/upgrade-all", token, nil, nil)
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+// UpdatePackage upgrades a single package
+func (capi *CalaosApi) UpdatePackage(token string, pkg string) (err error) {
+
+	params := url.Values{
+		"package": []string{pkg},
+	}
+
+	_, _, err = capi.callWithToken("POST", "/api/update/upgrade", token, params, nil)
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+// UpgradeStatus returns the status of the upgrade
+func (capi *CalaosApi) UpgradeStatus(token string) (status *structs.Status, err error) {
+
+	_, body, err := capi.callWithToken("GET", "/api/update/status", token, nil, nil)
+	if err != nil {
+		return
+	}
+
+	status = &structs.Status{}
+	if err = json.Unmarshal(body, status); err != nil {
+		return nil, fmt.Errorf("UpgradeStatus failed: %v", err)
 	}
 
 	return

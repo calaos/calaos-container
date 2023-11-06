@@ -2,14 +2,16 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/calaos/calaos-container/apt"
 	"github.com/calaos/calaos-container/config"
-	"github.com/calaos/calaos-container/models/images"
+	"github.com/calaos/calaos-container/models/structs"
 )
 
 func checkForUpdatesLoop() {
@@ -79,7 +81,7 @@ func checkForUpdates() error {
 		return err
 	}
 
-	NewVersions = compareVersions(localImageMap, urlImageMap)
+	NewVersions = compareCtVersions(localImageMap, urlImageMap)
 
 	logging.Info("New Versions:")
 	for name, newVersion := range NewVersions {
@@ -101,7 +103,7 @@ func checkForUpdates() error {
 	for _, p := range pkgs {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
-		NewVersions[p.Name] = images.Image{
+		NewVersions["dpkg/"+p.Name] = structs.Image{
 			Name:          p.Name,
 			Source:        "dpkg",
 			Version:       p.VersionNew,
@@ -112,11 +114,11 @@ func checkForUpdates() error {
 	return nil
 }
 
-func LoadFromDisk(filePath string) (images.ImageMap, error) {
+func LoadFromDisk(filePath string) (structs.ImageMap, error) {
 	_, err := os.Stat(filePath)
 	if err != nil {
 		// File does not exist, return an empty ImageMap without error
-		return make(images.ImageMap), nil
+		return make(structs.ImageMap), nil
 	}
 
 	data, err := os.ReadFile(filePath)
@@ -124,12 +126,12 @@ func LoadFromDisk(filePath string) (images.ImageMap, error) {
 		return nil, err
 	}
 
-	var imageList images.ImageList
+	var imageList structs.ImageList
 	if err := json.Unmarshal(data, &imageList); err != nil {
 		return nil, err
 	}
 
-	imageMap := make(images.ImageMap)
+	imageMap := make(structs.ImageMap)
 	for _, img := range imageList.Images {
 		imageMap[img.Name] = img
 	}
@@ -137,7 +139,7 @@ func LoadFromDisk(filePath string) (images.ImageMap, error) {
 	return imageMap, nil
 }
 
-func downloadFromURL(url string) (images.ImageMap, error) {
+func downloadFromURL(url string) (structs.ImageMap, error) {
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
@@ -149,12 +151,12 @@ func downloadFromURL(url string) (images.ImageMap, error) {
 		return nil, err
 	}
 
-	var imageList images.ImageList
+	var imageList structs.ImageList
 	if err := json.Unmarshal(data, &imageList); err != nil {
 		return nil, err
 	}
 
-	imageMap := make(images.ImageMap)
+	imageMap := make(structs.ImageMap)
 	for _, img := range imageList.Images {
 		imageMap[img.Name] = img
 	}
@@ -162,17 +164,125 @@ func downloadFromURL(url string) (images.ImageMap, error) {
 	return imageMap, nil
 }
 
-func compareVersions(localMap, urlMap images.ImageMap) images.ImageMap {
-	newVersions := make(images.ImageMap)
+func compareCtVersions(localMap, urlMap structs.ImageMap) structs.ImageMap {
+	newVersions := make(structs.ImageMap)
 
 	for name, urlImage := range urlMap {
 		localImage, found := localMap[name]
 		if !found || localImage.Version != urlImage.Version {
 			img := urlImage
 			img.CurrentVerion = localImage.Version
-			newVersions[name] = img
+			newVersions["docker/"+name] = img
 		}
 	}
 
 	return newVersions
+}
+
+func upgradeDpkg(pkg string) error {
+	logging.Debugln("Running: apt-get -qq install", pkg)
+	out, err := RunCommand("apt-get", "-qq", "install", pkg)
+	logging.Debugln(out)
+	return err
+}
+
+func upgradeDocker(pkg string) error {
+	logging.Debugln("Running: podman pull", pkg)
+	err := Pull(pkg)
+	if err != nil {
+		logging.Errorln("Error pulling image:", err)
+	}
+
+	//Stop container
+	logging.Debugln("Stopping container", pkg)
+	err = StopUnit(pkg)
+	if err != nil {
+		logging.Errorln("Error stopping container:", err)
+	}
+
+	//Start container again
+	logging.Debugln("Starting container", pkg)
+	err = StartUnit(pkg)
+	if err != nil {
+		logging.Errorln("Error starting container:", err)
+	}
+
+	return err
+}
+
+type MultiError struct {
+	Errors []error
+}
+
+func (m *MultiError) Error() string {
+	var errs []string
+	for _, err := range m.Errors {
+		errs = append(errs, err.Error())
+	}
+	return strings.Join(errs, ", ")
+}
+
+func Upgrade(pkg string) error {
+	found := false
+	//search for package in cache
+	for name := range NewVersions {
+		if name == pkg {
+			//found package, upgrade it
+			found = true
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("package not found")
+	}
+
+	img := NewVersions[pkg]
+
+	snapperNum := createSnapperPreSnapshot("Calaos upgrade " + pkg + " " + img.Version)
+	defer createSnapperPostSnapshot(snapperNum, "Calaos upgrade "+pkg+" "+img.Version)
+
+	if img.Source == "dpkg" {
+		return upgradeDpkg(img.Name)
+	} else { //docker image
+		return upgradeDocker(img.Name)
+	}
+}
+
+func UpgradeAll() error {
+	//For full upgrade, first update all dkpg packages before containers.
+	//This is done to upgrade first calaos-container package that includes all services units
+
+	snapperNum := createSnapperPreSnapshot("Calaos upgrade all")
+	defer createSnapperPostSnapshot(snapperNum, "Calaos upgrade all")
+
+	//Upgrade dpkg packages
+	out, err := RunCommand("apt-get", "-qq", "dist-upgrade")
+	logging.Debugln(out)
+
+	if err != nil {
+		return err
+	}
+
+	var multiErr MultiError
+
+	//Upgrade all docker images
+	for name, img := range NewVersions {
+		if img.Source == "docker" {
+			err = upgradeDocker(name)
+			if err != nil {
+				multiErr.Errors = append(multiErr.Errors, fmt.Errorf("error upgrading %s: %v", name, err))
+			}
+		}
+	}
+
+	if len(multiErr.Errors) > 0 {
+		return &multiErr
+	}
+
+	return nil
+}
+
+func UpdateStatus() (st *structs.Status, err error) {
+	st = &structs.Status{}
+	return st, nil
 }
