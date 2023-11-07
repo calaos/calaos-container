@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -66,6 +67,12 @@ func CheckUpdates() error {
 */
 
 func checkForUpdates() error {
+	if !upgradeLock.TryAcquire(1) {
+		logging.Debugln("checkForUpdates(): Upgrade already in progress")
+		return errors.New("upgrade already in progress")
+	}
+	defer upgradeLock.Release(1)
+
 	logging.Infoln("Checking for updates")
 
 	logging.Infoln("Checking container images")
@@ -223,6 +230,12 @@ func (m *MultiError) Error() string {
 }
 
 func Upgrade(pkg string) error {
+	if !upgradeLock.TryAcquire(1) {
+		logging.Debugln("Upgrade(): Upgrade already in progress")
+		return errors.New("upgrade already in progress")
+	}
+	defer upgradeLock.Release(1)
+
 	found := false
 	//search for package in cache
 	for name := range NewVersions {
@@ -238,6 +251,15 @@ func Upgrade(pkg string) error {
 
 	img := NewVersions[pkg]
 
+	status := structs.Status{
+		Status:        "upgrading",
+		CurrentPkg:    img.Name,
+		Progress:      0,
+		ProgressTotal: 100,
+	}
+	upgradeStatus.SetStatus(status)
+	defer resetStatus()
+
 	snapperNum := createSnapperPreSnapshot("Calaos upgrade " + pkg + " " + img.Version)
 	defer createSnapperPostSnapshot(snapperNum, "Calaos upgrade "+pkg+" "+img.Version)
 
@@ -249,8 +271,22 @@ func Upgrade(pkg string) error {
 }
 
 func UpgradeAll() error {
+	if !upgradeLock.TryAcquire(1) {
+		logging.Debugln("UpgradeAll(): Upgrade already in progress")
+		return errors.New("upgrade already in progress")
+	}
+	defer upgradeLock.Release(1)
+
 	//For full upgrade, first update all dkpg packages before containers.
 	//This is done to upgrade first calaos-container package that includes all services units
+
+	status := structs.Status{
+		Status:        "upgrading",
+		Progress:      0,
+		ProgressTotal: len(NewVersions),
+	}
+	upgradeStatus.SetStatus(status)
+	defer resetStatus()
 
 	snapperNum := createSnapperPreSnapshot("Calaos upgrade all")
 	defer createSnapperPostSnapshot(snapperNum, "Calaos upgrade all")
@@ -265,9 +301,23 @@ func UpgradeAll() error {
 
 	var multiErr MultiError
 
+	status = upgradeStatus.GetStatus()
+	for _, img := range NewVersions {
+		if img.Source == "dpkg" {
+			status.Progress++
+		}
+	}
+	upgradeStatus.SetStatus(status)
+
 	//Upgrade all docker images
 	for name, img := range NewVersions {
 		if img.Source == "docker" {
+
+			status = upgradeStatus.GetStatus()
+			status.CurrentPkg = name
+			status.Progress++
+			upgradeStatus.SetStatus(status)
+
 			err = upgradeDocker(name)
 			if err != nil {
 				multiErr.Errors = append(multiErr.Errors, fmt.Errorf("error upgrading %s: %v", name, err))
@@ -280,9 +330,4 @@ func UpgradeAll() error {
 	}
 
 	return nil
-}
-
-func UpdateStatus() (st *structs.Status, err error) {
-	st = &structs.Status{}
-	return st, nil
 }

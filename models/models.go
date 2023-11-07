@@ -8,6 +8,7 @@ import (
 
 	logger "github.com/calaos/calaos-container/log"
 	cimg "github.com/calaos/calaos-container/models/structs"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/sirupsen/logrus"
 
@@ -22,6 +23,7 @@ var (
 	quitCheckUpdate chan interface{}
 	wgDone          sync.WaitGroup
 	muCheck         sync.Mutex
+	upgradeLock     = semaphore.NewWeighted(1)
 
 	//Stored new available versions
 	NewVersions cimg.ImageMap
