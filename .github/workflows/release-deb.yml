@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       vincrement:
-        description: 'Package version increment (major.feature.bug)'
+        description: 'Package version increment (major.minor.patch)'
         required: true
-        default: 'bug'
+        default: 'release'
         type: choice
         options:
           - major
-          - feature
-          - bug
+          - minor
+          - patch
 
 jobs:
   build-and-push-deb-pkg:
@@ -40,7 +40,7 @@ jobs:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            /build-deb.sh ${{ steps.bump_version.outputs.release }}
+            /work/build-deb.sh ${{ steps.bump_version.outputs.release }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
