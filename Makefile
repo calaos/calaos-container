@@ -66,10 +66,10 @@ coverage: ## Run the tests of the project and export the coverage
 	$(GOTEST) -cover -covermode=count -coverprofile=profile.cov ./...
 	$(GOCMD) tool cover -func profile.cov
 
-install-lib: $(SUBDIRS)-install
+install-lib: apt-install
 
-$(SUBDIRS)-install:
-	$(MAKE) -C $(@:-install=) install
+apt-install:
+	$(MAKE) -C apt install
 
 install: install-lib ## Install the binaries
 	install -Dm755 bin/$(BINARY_NAME) $(DESTDIR)$(PREFIX)/bin/$(BINARY_NAME)
