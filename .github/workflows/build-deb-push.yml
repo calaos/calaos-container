@@ -18,21 +18,15 @@ jobs:
         id: fetch-latest-release
         uses: reloc8/action-latest-release-version@1.0.0
 
-      - name: Increment dev release version
-        id: bump_version
-        uses: actionsdesk/semver@0.6.0-rc.10
-        with:
-          prerelease: withBuildNumber
-          prelabel: alpha
-          initial_version: ${{ steps.fetch-latest-release.outputs.latest-release }}
-
       - name: Build package
+        id: build
         uses: addnab/docker-run-action@v3
         with:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            /build-deb.sh ${{ steps.bump_version.outputs.release }}
+            release=$(semver-cli   ${{ steps.fetch-latest-release.outputs.latest-release }})
+            /build-deb.sh $release && echo release=$release >> $GITHUB_OUTPUT
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
@@ -44,8 +38,8 @@ jobs:
         uses: meeDamian/github-release@2.0
         with:
           token: ${{ secrets.ACTION_DISPATCH }}
-          tag: ${{ steps.bump_version.outputs.release }}
-          name: ${{ steps.bump_version.outputs.release }}
+          tag: ${{ steps.bump_version.build.release }}
+          name: ${{ steps.bump_version.build.release }}
           files: pkg/*.deb
           prerelease: true
           allow_override: true
