@@ -48,6 +48,7 @@ jobs:
           name: ${{ steps.bump_version.outputs.release }}
           files: pkg/*.deb
           prerelease: true
+          allow_override: true
           gzip: false
 
       - name: Update repo cache
