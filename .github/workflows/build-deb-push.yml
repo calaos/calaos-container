@@ -31,7 +31,6 @@ jobs:
           run: |
             pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }}
             export release=$(pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }})
-            echo "release=$release"
             /work/build-deb.sh $release && echo "::set-output name=release::$release"
 
       - name: Upload artifacts
@@ -40,6 +39,12 @@ jobs:
           name: deb
           path: pkg/*.deb
   
+      - name: Create Tag
+        uses: negz/create-tag@v1
+        with:
+          version: ${{ steps.build.outputs.release }}
+          token: ${{ secrets.ACTION_DISPATCH }}
+
       - name: Create a Release
         uses: meeDamian/github-release@2.0
         with:
