@@ -28,6 +28,7 @@ jobs:
 
       - name: Build package
         uses: addnab/docker-run-action@v3
+        id: build
         with:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
