@@ -6,7 +6,7 @@ on:
       vincrement:
         description: 'Package version increment (major.minor.patch)'
         required: true
-        default: 'release'
+        default: 'patch'
         type: choice
         options:
           - major
@@ -32,8 +32,7 @@ jobs:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            pysemver bump ${{ github.event.inputs.vincrement }} ${{ steps.fetch-latest-release.outputs.latest-release }}
-            export release=$(pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }})
+            export release=$(pysemver bump ${{ github.event.inputs.vincrement }} ${{ steps.fetch-latest-release.outputs.latest-release }})
             echo Build version: $release
             /work/build-deb.sh $release && echo "::set-output name=release::$release"
 
