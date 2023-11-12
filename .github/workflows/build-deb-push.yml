@@ -25,7 +25,7 @@ jobs:
         uses: addnab/docker-run-action@v3
         with:
           image: ghcr.io/calaos/debian_deb_build_base
-          options: -v ${{ github.workspace }}:/work  -e "GITHUB_OUTPUT=/github-output"  -v "$GITHUB_OUTPUT:/github-output"
+          options: -v ${{ github.workspace }}:/work  -e "GITHUB_OUTPUT"  -v "${GITHUB_OUTPUT}:${GITHUB_OUTPUT}"
           run: |
             pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }}
             export release=$(pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }})
