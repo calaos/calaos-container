@@ -9,8 +9,10 @@ jobs:
   build-and-push-deb-pkg:
     name: Build deb package and push to repositories
     runs-on: ubuntu-latest
-  
     steps:
+      - id: debug
+        run: echo $GITHUB_OUTPUT
+
       - name: Checkout the repo
         uses: actions/checkout@v2
 
