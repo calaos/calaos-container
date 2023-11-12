@@ -44,8 +44,8 @@ jobs:
         uses: meeDamian/github-release@2.0
         with:
           token: ${{ secrets.ACTION_DISPATCH }}
-          tag: ${{ steps.bump_version.build.release }}
-          name: ${{ steps.bump_version.build.release }}
+          tag: ${{ steps.build.outputs.release }}
+          name: ${{ steps.build.outputs.release }}
           files: pkg/*.deb
           prerelease: true
           allow_override: true
