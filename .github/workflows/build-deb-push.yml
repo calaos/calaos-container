@@ -32,7 +32,7 @@ jobs:
             pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }}
             export release=$(pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }})
             echo "release=$release"
-            /work/build-deb.sh $release &&  echo "::set-output name={release}::{$release}"
+            /work/build-deb.sh $release && echo "::set-output name=release::$release"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
