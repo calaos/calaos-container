@@ -1,20 +1,27 @@
-name: Build deb package
+name: Build et release debian package
 
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      vincrement:
+        description: 'Package version increment (major.minor.patch)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+          - prerelease
 
-    
 jobs:
   build-and-push-deb-pkg:
     name: Build deb package and push to repositories
     runs-on: ubuntu-latest
+  
     steps:
-      - id: debug
-        run: |
-          echo $GITHUB_OUTPUT
-          ls -la $GITHUB_OUTPUT
-
       - name: Checkout the repo
         uses: actions/checkout@v2
 
@@ -23,13 +30,13 @@ jobs:
         uses: reloc8/action-latest-release-version@1.0.0
 
       - name: Build package
-        id: build
         uses: addnab/docker-run-action@v3
+        id: build
         with:
           image: ghcr.io/calaos/debian_deb_build_base
-          options: -v ${{ github.workspace }}:/work 
+          options: -v ${{ github.workspace }}:/work
           run: |
-            export release=$(pysemver bump prerelease ${{ steps.fetch-latest-release.outputs.latest-release }})
+            export release=$(pysemver bump ${{ github.event.inputs.vincrement || 'prerelease' }} ${{ steps.fetch-latest-release.outputs.latest-release }})
             echo Build version: $release
             /work/build-deb.sh $release && echo "::set-output name=release::$release"
 
@@ -45,9 +52,8 @@ jobs:
           token: ${{ secrets.ACTION_DISPATCH }}
           tag: ${{ steps.build.outputs.release }}
           name: ${{ steps.build.outputs.release }}
+          prerelease: false
           files: pkg/*.deb
-          prerelease: true
-          allow_override: true
           gzip: false
 
       - name: Update repo cache
