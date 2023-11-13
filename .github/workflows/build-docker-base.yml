@@ -1,7 +1,10 @@
 name: Docker image build and push
 
 on:
-    workflow_dispatch:
+  push:
+    paths:
+      - docker/**
+
 
 env:
   # Use docker.io for Docker Hub if empty
