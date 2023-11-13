@@ -13,6 +13,7 @@ import (
 	"github.com/calaos/calaos-container/apt"
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/models/structs"
+	"github.com/sirupsen/logrus"
 )
 
 func checkForUpdatesLoop() {
@@ -246,6 +247,9 @@ func Upgrade(pkg string) error {
 	}
 
 	if !found {
+		logging.WithFields(logrus.Fields{
+			"pkg": pkg,
+		}).Errorln("Package not found")
 		return fmt.Errorf("package not found")
 	}
 
