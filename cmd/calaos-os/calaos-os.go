@@ -85,7 +85,7 @@ func cmdList(cmd *cli.Cmd) {
 		for _, e := range *imgs {
 			t.AppendRow(table.Row{
 				e.Name,
-				e.CurrentVerion,
+				e.Version,
 				e.Source,
 			})
 		}
