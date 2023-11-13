@@ -38,7 +38,7 @@ jobs:
           run: |
             export release=$(pysemver bump ${{ github.event.inputs.vincrement || 'prerelease' }} ${{ steps.fetch-latest-release.outputs.tag }})
             echo Build version: $release
-            /work/build-deb.sh $release && echo "::set-output name=release::$release"
+            /build-deb.sh $release && echo "::set-output name=release::$release"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
