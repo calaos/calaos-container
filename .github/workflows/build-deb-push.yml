@@ -37,7 +37,7 @@ jobs:
           options: -v ${{ github.workspace }}:/work
           run: |
             git config --global --add safe.directory /work
-            last_tag=$(python3 /get_last_tag.py)
+            last_tag=$(python3 /get_last_tag.py $(pwd))
             export release=$(pysemver bump ${{ github.event.inputs.vincrement || 'prerelease' }} ${last_tag})
             echo Build version: $release
             /build-deb.sh $release && echo "::set-output name=release::$release"
