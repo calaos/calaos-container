@@ -36,7 +36,7 @@ jobs:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            git config --global --add safe.directory *
+            git config --global --add safe.directory "*"
             last_tag=$(python3 /get_last_tag.py $(pwd))
             export release=$(pysemver bump ${{ github.event.inputs.vincrement || 'prerelease' }} ${last_tag})
             echo Build version: $release
