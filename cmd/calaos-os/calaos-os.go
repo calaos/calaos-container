@@ -186,7 +186,11 @@ func cmdUpgrade(cmd *cli.Cmd) {
 			}
 
 			bar.SetTextSuffix(fmt.Sprintf("\t Installing %s", status.CurrentPkg))
-			bar.Set(status.Progress * 100 / status.ProgressTotal)
+			if status.ProgressTotal < 1 {
+				bar.Set(0)
+			} else {
+				bar.Set(status.Progress * 100 / status.ProgressTotal)
+			}
 
 			time.Sleep(500 * time.Millisecond)
 		}
