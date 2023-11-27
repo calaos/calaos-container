@@ -114,6 +114,18 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiUpdateImages(c)
 	})
 
+	api.Post("/update/upgrade-all", func(c *fiber.Ctx) error {
+		return a.apiUpdateUpgradeAll(c)
+	})
+
+	api.Post("/update/upgrade", func(c *fiber.Ctx) error {
+		return a.apiUpdateUpgrade(c)
+	})
+
+	api.Get("/update/status", func(c *fiber.Ctx) error {
+		return a.apiUpdateStatus(c)
+	})
+
 	return
 }
 

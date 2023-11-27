@@ -35,3 +35,45 @@ func (a *AppServer) apiUpdateImages(c *fiber.Ctx) (err error) {
 
 	return c.Status(fiber.StatusOK).JSON(m)
 }
+
+func (a *AppServer) apiUpdateUpgradeAll(c *fiber.Ctx) (err error) {
+
+	err = models.UpgradeAll()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"msg": "Upgrade done",
+	})
+}
+
+func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) (err error) {
+
+	err = models.Upgrade(c.Query("package"))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"msg": "Upgrade done",
+	})
+}
+
+func (a *AppServer) apiUpdateStatus(c *fiber.Ctx) (err error) {
+	s, err := models.UpdateStatus()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(s)
+}

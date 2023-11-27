@@ -1,4 +1,4 @@
-package images
+package structs
 
 type Image struct {
 	Name          string `json:"name"`

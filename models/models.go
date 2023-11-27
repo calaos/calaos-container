@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	logger "github.com/calaos/calaos-container/log"
-	cimg "github.com/calaos/calaos-container/models/images"
+	cimg "github.com/calaos/calaos-container/models/structs"
 
 	"github.com/sirupsen/logrus"
 

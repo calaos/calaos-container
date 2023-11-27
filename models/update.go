@@ -9,7 +9,7 @@ import (
 
 	"github.com/calaos/calaos-container/apt"
 	"github.com/calaos/calaos-container/config"
-	"github.com/calaos/calaos-container/models/images"
+	"github.com/calaos/calaos-container/models/structs"
 )
 
 func checkForUpdatesLoop() {
@@ -101,7 +101,7 @@ func checkForUpdates() error {
 	for _, p := range pkgs {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
-		NewVersions[p.Name] = images.Image{
+		NewVersions[p.Name] = structs.Image{
 			Name:          p.Name,
 			Source:        "dpkg",
 			Version:       p.VersionNew,
@@ -112,11 +112,11 @@ func checkForUpdates() error {
 	return nil
 }
 
-func LoadFromDisk(filePath string) (images.ImageMap, error) {
+func LoadFromDisk(filePath string) (structs.ImageMap, error) {
 	_, err := os.Stat(filePath)
 	if err != nil {
 		// File does not exist, return an empty ImageMap without error
-		return make(images.ImageMap), nil
+		return make(structs.ImageMap), nil
 	}
 
 	data, err := os.ReadFile(filePath)
@@ -124,12 +124,12 @@ func LoadFromDisk(filePath string) (images.ImageMap, error) {
 		return nil, err
 	}
 
-	var imageList images.ImageList
+	var imageList structs.ImageList
 	if err := json.Unmarshal(data, &imageList); err != nil {
 		return nil, err
 	}
 
-	imageMap := make(images.ImageMap)
+	imageMap := make(structs.ImageMap)
 	for _, img := range imageList.Images {
 		imageMap[img.Name] = img
 	}
@@ -137,7 +137,7 @@ func LoadFromDisk(filePath string) (images.ImageMap, error) {
 	return imageMap, nil
 }
 
-func downloadFromURL(url string) (images.ImageMap, error) {
+func downloadFromURL(url string) (structs.ImageMap, error) {
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
@@ -149,12 +149,12 @@ func downloadFromURL(url string) (images.ImageMap, error) {
 		return nil, err
 	}
 
-	var imageList images.ImageList
+	var imageList structs.ImageList
 	if err := json.Unmarshal(data, &imageList); err != nil {
 		return nil, err
 	}
 
-	imageMap := make(images.ImageMap)
+	imageMap := make(structs.ImageMap)
 	for _, img := range imageList.Images {
 		imageMap[img.Name] = img
 	}
@@ -162,8 +162,8 @@ func downloadFromURL(url string) (images.ImageMap, error) {
 	return imageMap, nil
 }
 
-func compareVersions(localMap, urlMap images.ImageMap) images.ImageMap {
-	newVersions := make(images.ImageMap)
+func compareVersions(localMap, urlMap structs.ImageMap) structs.ImageMap {
+	newVersions := make(structs.ImageMap)
 
 	for name, urlImage := range urlMap {
 		localImage, found := localMap[name]
@@ -175,4 +175,19 @@ func compareVersions(localMap, urlMap images.ImageMap) images.ImageMap {
 	}
 
 	return newVersions
+}
+
+func Upgrade(pkg string) error {
+	_, err := RunCommand("apt-get", "install", "-y", pkg)
+	return err
+}
+
+func UpgradeAll() error {
+	_, err := RunCommand("apt-get", "upgrade", "-y")
+	return err
+}
+
+func UpdateStatus() (st *structs.Status, err error) {
+	st = &structs.Status{}
+	return st, nil
 }
