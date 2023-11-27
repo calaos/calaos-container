@@ -2,7 +2,6 @@ package structs
 
 type Image struct {
 	Name          string `json:"name"`
-	Source        string `json:"source"`
 	Version       string `json:"version"`
 	CurrentVerion string `json:"current_version"`
 }

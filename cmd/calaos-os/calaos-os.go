@@ -86,7 +86,6 @@ func cmdList(cmd *cli.Cmd) {
 			t.AppendRow(table.Row{
 				e.Name,
 				e.Version,
-				e.Source,
 			})
 		}
 
@@ -127,7 +126,6 @@ func cmdCheck(cmd *cli.Cmd) {
 				e.Name,
 				e.CurrentVerion,
 				e.Version,
-				e.Source,
 			})
 		}
 

@@ -1,12 +1,8 @@
 package models
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -50,23 +46,6 @@ func CheckUpdates() error {
 	return checkForUpdates()
 }
 
-/*
-{
-    "images": [
-        {
-            "name": "calaos_home",
-            "image": "ghcr.io/calaos/calaos_home:4.2.6",
-            "version": "4.2.6"
-        },
-        {
-            "name": "calaos_base",
-            "image": "ghcr.io/calaos/calaos_base:4.8.1",
-            "version": "4.8.1"
-        }
-    ]
-}
-*/
-
 func checkForUpdates() error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("checkForUpdates(): Upgrade already in progress")
@@ -76,30 +55,7 @@ func checkForUpdates() error {
 
 	logging.Infoln("Checking for updates")
 
-	logging.Infoln("Checking container images")
-	localImageMap, err := LoadFromDisk(config.Config.String("general.version_file"))
-	if err != nil {
-		logging.Errorln("Error loading local JSON:", err)
-		return err
-	}
-
-	urlImageMap, err := downloadFromURL(config.Config.String("general.url_releases"))
-	if err != nil {
-		logging.Errorln("Error downloading JSON from URL:", err)
-		return err
-	}
-
-	NewVersions = compareCtVersions(localImageMap, urlImageMap)
-
-	logging.Info("New Versions:")
-	for name, newVersion := range NewVersions {
-		v, found := localImageMap[name]
-		localVersion := "N/A"
-		if found {
-			localVersion = v.Version
-		}
-		logging.Infof("%s: %s  -->  %s\n", name, localVersion, newVersion.Version)
-	}
+	NewVersions = structs.ImageMap{}
 
 	logging.Infoln("Checking dpkg updates")
 
@@ -111,9 +67,8 @@ func checkForUpdates() error {
 	for _, p := range pkgs {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
-		NewVersions["dpkg/"+p.Name] = structs.Image{
+		NewVersions[p.Name] = structs.Image{
 			Name:          p.Name,
-			Source:        "dpkg",
 			Version:       p.VersionNew,
 			CurrentVerion: p.VersionCurrent,
 		}
@@ -123,98 +78,14 @@ func checkForUpdates() error {
 }
 
 func LoadFromDisk(filePath string) (structs.ImageMap, error) {
-	_, err := os.Stat(filePath)
-	if err != nil {
-		// File does not exist, return an empty ImageMap without error
-		return make(structs.ImageMap), nil
-	}
-
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	var imageList structs.ImageList
-	if err := json.Unmarshal(data, &imageList); err != nil {
-		return nil, err
-	}
-
 	imageMap := make(structs.ImageMap)
-	for _, img := range imageList.Images {
-		imageMap[img.Name] = img
-	}
-
 	return imageMap, nil
-}
-
-func downloadFromURL(url string) (structs.ImageMap, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var imageList structs.ImageList
-	if err := json.Unmarshal(data, &imageList); err != nil {
-		return nil, err
-	}
-
-	imageMap := make(structs.ImageMap)
-	for _, img := range imageList.Images {
-		imageMap[img.Name] = img
-	}
-
-	return imageMap, nil
-}
-
-func compareCtVersions(localMap, urlMap structs.ImageMap) structs.ImageMap {
-	newVersions := make(structs.ImageMap)
-
-	for name, urlImage := range urlMap {
-		localImage, found := localMap[name]
-		if !found || localImage.Version != urlImage.Version {
-			img := urlImage
-			img.CurrentVerion = localImage.Version
-			newVersions["docker/"+name] = img
-		}
-	}
-
-	return newVersions
 }
 
 func upgradeDpkg(pkg string) error {
 	logging.Debugln("Running: apt-get -qq install", pkg)
 	out, err := RunCommand("apt-get", "-qq", "install", pkg)
 	logging.Debugln(out)
-	return err
-}
-
-func upgradeDocker(pkg string) error {
-	logging.Debugln("Running: podman pull", pkg)
-	err := Pull(pkg)
-	if err != nil {
-		logging.Errorln("Error pulling image:", err)
-	}
-
-	//Stop container
-	logging.Debugln("Stopping container", pkg)
-	err = StopUnit(pkg)
-	if err != nil {
-		logging.Errorln("Error stopping container:", err)
-	}
-
-	//Start container again
-	logging.Debugln("Starting container", pkg)
-	err = StartUnit(pkg)
-	if err != nil {
-		logging.Errorln("Error starting container:", err)
-	}
-
 	return err
 }
 
@@ -267,11 +138,7 @@ func Upgrade(pkg string) error {
 	snapperNum := createSnapperPreSnapshot("Calaos upgrade " + pkg + " " + img.Version)
 	defer createSnapperPostSnapshot(snapperNum, "Calaos upgrade "+pkg+" "+img.Version)
 
-	if img.Source == "dpkg" {
-		return upgradeDpkg(img.Name)
-	} else { //docker image
-		return upgradeDocker(img.Name)
-	}
+	return upgradeDpkg(img.Name)
 }
 
 func UpgradeAll() error {
@@ -303,35 +170,11 @@ func UpgradeAll() error {
 		return err
 	}
 
-	var multiErr MultiError
-
 	status = upgradeStatus.GetStatus()
-	for _, img := range NewVersions {
-		if img.Source == "dpkg" {
-			status.Progress++
-		}
+	for range NewVersions {
+		status.Progress++
 	}
 	upgradeStatus.SetStatus(status)
-
-	//Upgrade all docker images
-	for name, img := range NewVersions {
-		if img.Source == "docker" {
-
-			status = upgradeStatus.GetStatus()
-			status.CurrentPkg = name
-			status.Progress++
-			upgradeStatus.SetStatus(status)
-
-			err = upgradeDocker(name)
-			if err != nil {
-				multiErr.Errors = append(multiErr.Errors, fmt.Errorf("error upgrading %s: %v", name, err))
-			}
-		}
-	}
-
-	if len(multiErr.Errors) > 0 {
-		return &multiErr
-	}
 
 	return nil
 }
