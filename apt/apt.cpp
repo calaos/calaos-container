@@ -90,6 +90,8 @@ void *aptCacheGetArray()
         }
     }
 
+    delete cache;
+
     return plist;
 }
 
