@@ -20,6 +20,10 @@ func RunCommand(command string, args ...string) (string, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
+	//add environment variables DEBIAN_FRONTEND="noninteractive" for apt-get
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, "DEBIAN_FRONTEND=noninteractive")
+
 	err := cmd.Run()
 
 	if err != nil {

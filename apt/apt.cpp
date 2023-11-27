@@ -106,7 +106,7 @@ Pkg *aptCacheArrayGet(void *arr, int idx)
     PkgList *plist = reinterpret_cast<PkgList *>(arr);
     if (!plist) return nullptr;
 
-    if (idx < 0 || idx > plist->size())
+    if (idx < 0 || (size_t)idx > plist->size())
        return nullptr;
 
     return &plist->at(idx);
@@ -117,7 +117,7 @@ void aptCacheArrayFree(void *arr)
     PkgList *plist = reinterpret_cast<PkgList *>(arr);
     if (!plist) return;
 
-    for (int i = 0;i < plist->size();i++)
+    for (size_t i = 0;i < plist->size();i++)
     {
         free((*plist)[i].name);
         free((*plist)[i].version_current);

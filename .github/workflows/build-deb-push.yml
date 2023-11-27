@@ -1,10 +1,21 @@
-name: Build deb package
+name: Build et release debian package
 
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      vincrement:
+        description: 'Package version increment (major.minor.patch)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+          - prerelease
 
-    
 jobs:
   build-and-push-deb-pkg:
     name: Build deb package and push to repositories
@@ -16,23 +27,20 @@ jobs:
 
       - name: Fetch latest release version
         id: fetch-latest-release
-        uses: reloc8/action-latest-release-version@1.0.0
-
-      - name: Increment dev release version
-        id: bump_version
-        uses: actionsdesk/semver@0.6.0-rc.10
-        with:
-          prerelease: withBuildNumber
-          prelabel: alpha
-          initial_version: ${{ steps.fetch-latest-release.outputs.latest-release }}
+        uses: actions-ecosystem/action-get-latest-tag@v1
 
       - name: Build package
         uses: addnab/docker-run-action@v3
+        id: build
         with:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
           run: |
-            /build-deb.sh ${{ steps.bump_version.outputs.release }}
+            git config --global --add safe.directory /work
+            last_tag=$(python3 /get_last_tag.py /work)
+            export release=$(pysemver bump ${{ github.event.inputs.vincrement || 'prerelease' }} ${last_tag})
+            echo Build version: $release
+            /build-deb.sh $release && echo "::set-output name=release::$release"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
@@ -40,20 +48,14 @@ jobs:
           name: deb
           path: pkg/*.deb
 
-      - name: Create Tag
-        uses: negz/create-tag@v1
-        with:
-          version: ${{ steps.bump_version.outputs.release }}
-          token: ${{ secrets.ACTION_DISPATCH }}
-  
       - name: Create a Release
         uses: meeDamian/github-release@2.0
         with:
           token: ${{ secrets.ACTION_DISPATCH }}
-          tag: ${{ steps.bump_version.outputs.release }}
-          name: ${{ steps.bump_version.outputs.release }}
+          tag: ${{ steps.build.outputs.release }}
+          name: ${{ steps.build.outputs.release }}
+          prerelease: false
           files: pkg/*.deb
-          prerelease: true
           gzip: false
 
       - name: Update repo cache

@@ -8,6 +8,7 @@ import (
 
 	logger "github.com/calaos/calaos-container/log"
 	cimg "github.com/calaos/calaos-container/models/structs"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/sirupsen/logrus"
 
@@ -22,6 +23,7 @@ var (
 	quitCheckUpdate chan interface{}
 	wgDone          sync.WaitGroup
 	muCheck         sync.Mutex
+	upgradeLock     = semaphore.NewWeighted(1)
 
 	//Stored new available versions
 	NewVersions cimg.ImageMap
@@ -75,6 +77,18 @@ func StopUnit(unit string) (err error) {
 	defer conn.Close()
 
 	_, err = conn.StopUnitContext(context.Background(), unit, "replace", nil)
+
+	return err
+}
+
+func StartUnit(unit string) (err error) {
+	conn, err := dbus.NewWithContext(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	_, err = conn.StartUnitContext(context.Background(), unit, "replace", nil)
 
 	return err
 }

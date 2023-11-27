@@ -2,14 +2,18 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/calaos/calaos-container/apt"
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/models/structs"
+	"github.com/sirupsen/logrus"
 )
 
 func checkForUpdatesLoop() {
@@ -64,6 +68,12 @@ func CheckUpdates() error {
 */
 
 func checkForUpdates() error {
+	if !upgradeLock.TryAcquire(1) {
+		logging.Debugln("checkForUpdates(): Upgrade already in progress")
+		return errors.New("upgrade already in progress")
+	}
+	defer upgradeLock.Release(1)
+
 	logging.Infoln("Checking for updates")
 
 	logging.Infoln("Checking container images")
@@ -79,7 +89,7 @@ func checkForUpdates() error {
 		return err
 	}
 
-	NewVersions = compareVersions(localImageMap, urlImageMap)
+	NewVersions = compareCtVersions(localImageMap, urlImageMap)
 
 	logging.Info("New Versions:")
 	for name, newVersion := range NewVersions {
@@ -101,7 +111,7 @@ func checkForUpdates() error {
 	for _, p := range pkgs {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
-		NewVersions[p.Name] = structs.Image{
+		NewVersions["dpkg/"+p.Name] = structs.Image{
 			Name:          p.Name,
 			Source:        "dpkg",
 			Version:       p.VersionNew,
@@ -162,7 +172,7 @@ func downloadFromURL(url string) (structs.ImageMap, error) {
 	return imageMap, nil
 }
 
-func compareVersions(localMap, urlMap structs.ImageMap) structs.ImageMap {
+func compareCtVersions(localMap, urlMap structs.ImageMap) structs.ImageMap {
 	newVersions := make(structs.ImageMap)
 
 	for name, urlImage := range urlMap {
@@ -170,24 +180,158 @@ func compareVersions(localMap, urlMap structs.ImageMap) structs.ImageMap {
 		if !found || localImage.Version != urlImage.Version {
 			img := urlImage
 			img.CurrentVerion = localImage.Version
-			newVersions[name] = img
+			newVersions["docker/"+name] = img
 		}
 	}
 
 	return newVersions
 }
 
-func Upgrade(pkg string) error {
-	_, err := RunCommand("apt-get", "install", "-y", pkg)
+func upgradeDpkg(pkg string) error {
+	logging.Debugln("Running: apt-get -qq install", pkg)
+	out, err := RunCommand("apt-get", "-qq", "install", pkg)
+	logging.Debugln(out)
 	return err
+}
+
+func upgradeDocker(pkg string) error {
+	logging.Debugln("Running: podman pull", pkg)
+	err := Pull(pkg)
+	if err != nil {
+		logging.Errorln("Error pulling image:", err)
+	}
+
+	//Stop container
+	logging.Debugln("Stopping container", pkg)
+	err = StopUnit(pkg)
+	if err != nil {
+		logging.Errorln("Error stopping container:", err)
+	}
+
+	//Start container again
+	logging.Debugln("Starting container", pkg)
+	err = StartUnit(pkg)
+	if err != nil {
+		logging.Errorln("Error starting container:", err)
+	}
+
+	return err
+}
+
+type MultiError struct {
+	Errors []error
+}
+
+func (m *MultiError) Error() string {
+	var errs []string
+	for _, err := range m.Errors {
+		errs = append(errs, err.Error())
+	}
+	return strings.Join(errs, ", ")
+}
+
+func Upgrade(pkg string) error {
+	if !upgradeLock.TryAcquire(1) {
+		logging.Debugln("Upgrade(): Upgrade already in progress")
+		return errors.New("upgrade already in progress")
+	}
+	defer upgradeLock.Release(1)
+
+	found := false
+	//search for package in cache
+	for name := range NewVersions {
+		if name == pkg {
+			//found package, upgrade it
+			found = true
+		}
+	}
+
+	if !found {
+		logging.WithFields(logrus.Fields{
+			"pkg": pkg,
+		}).Errorln("Package not found")
+		return fmt.Errorf("package not found")
+	}
+
+	img := NewVersions[pkg]
+
+	status := structs.Status{
+		Status:        "upgrading",
+		CurrentPkg:    img.Name,
+		Progress:      0,
+		ProgressTotal: 100,
+	}
+	upgradeStatus.SetStatus(status)
+	defer resetStatus()
+
+	snapperNum := createSnapperPreSnapshot("Calaos upgrade " + pkg + " " + img.Version)
+	defer createSnapperPostSnapshot(snapperNum, "Calaos upgrade "+pkg+" "+img.Version)
+
+	if img.Source == "dpkg" {
+		return upgradeDpkg(img.Name)
+	} else { //docker image
+		return upgradeDocker(img.Name)
+	}
 }
 
 func UpgradeAll() error {
-	_, err := RunCommand("apt-get", "upgrade", "-y")
-	return err
-}
+	if !upgradeLock.TryAcquire(1) {
+		logging.Debugln("UpgradeAll(): Upgrade already in progress")
+		return errors.New("upgrade already in progress")
+	}
+	defer upgradeLock.Release(1)
 
-func UpdateStatus() (st *structs.Status, err error) {
-	st = &structs.Status{}
-	return st, nil
+	//For full upgrade, first update all dkpg packages before containers.
+	//This is done to upgrade first calaos-container package that includes all services units
+
+	status := structs.Status{
+		Status:        "upgrading",
+		Progress:      0,
+		ProgressTotal: len(NewVersions),
+	}
+	upgradeStatus.SetStatus(status)
+	defer resetStatus()
+
+	snapperNum := createSnapperPreSnapshot("Calaos upgrade all")
+	defer createSnapperPostSnapshot(snapperNum, "Calaos upgrade all")
+
+	//Upgrade dpkg packages
+	out, err := RunCommand("apt-get", "-qq", "dist-upgrade")
+	logging.Debugln(out)
+
+	if err != nil {
+		return err
+	}
+
+	var multiErr MultiError
+
+	status = upgradeStatus.GetStatus()
+	for _, img := range NewVersions {
+		if img.Source == "dpkg" {
+			status.Progress++
+		}
+	}
+	upgradeStatus.SetStatus(status)
+
+	//Upgrade all docker images
+	for name, img := range NewVersions {
+		if img.Source == "docker" {
+
+			status = upgradeStatus.GetStatus()
+			status.CurrentPkg = name
+			status.Progress++
+			upgradeStatus.SetStatus(status)
+
+			err = upgradeDocker(name)
+			if err != nil {
+				multiErr.Errors = append(multiErr.Errors, fmt.Errorf("error upgrading %s: %v", name, err))
+			}
+		}
+	}
+
+	if len(multiErr.Errors) > 0 {
+		return &multiErr
+	}
+
+	return nil
 }

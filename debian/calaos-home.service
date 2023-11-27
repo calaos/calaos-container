@@ -18,7 +18,7 @@ Type=notify
 NotifyAccess=all
 SyslogIdentifier=%N
 
-ExecStart=/usr/bin/start_calaos_home.sh %t/%N.cid
+ExecStart=/usr/sbin/start_calaos_home.sh %t/%N.cid
 
 RestartSec=2
 

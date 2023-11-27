@@ -22,5 +22,5 @@ pkg_name=$(grep "Package: " debian/control | sed 's/Package: //')
 apt-get build-dep -y .
 dpkg-buildpackage -us -uc -b
 
-mkdir $workdir/pkg
+mkdir -p $workdir/pkg
 mv ../"${pkg_name}"_*.deb $workdir/pkg
