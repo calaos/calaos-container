@@ -13,7 +13,8 @@ for d in cache \
     mosquitto/data \
     mosquitto/config \
     grafana/data \
-    config
+    config \
+    ola
 do
     mkdir -p ${fs}/${d}
 done
@@ -30,3 +31,10 @@ if [ -e /.calaos-live ]
 then
     touch $rundir/calaos-live
 fi
+
+#For OLA we need to bind mount the original /etc/ola to /mnt
+#It saves the ola config on the dedicated /mnt/calaos folder
+#This script has to be started once before olad service is started
+mkdir -p /etc/ola
+chown -R olad:olad /etc/ola ${fs}/ola
+mount -o bind /etc/ola ${fs}/ola
