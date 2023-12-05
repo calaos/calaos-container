@@ -80,8 +80,6 @@ install: install-lib ## Install the binaries
 	install -Dm755 scripts/init_calaosfs.sh $(DESTDIR)$(PREFIX)/sbin/init_calaosfs.sh
 	install -Dm755 scripts/haproxy_pre.sh $(DESTDIR)$(PREFIX)/sbin/haproxy_pre.sh
 	install -Dm755 scripts/mosquitto_pre.sh $(DESTDIR)$(PREFIX)/sbin/mosquitto_pre.sh
-	install -Dm755 scripts/zigbee2mqtt_pre.sh $(DESTDIR)$(PREFIX)/sbin/zigbee2mqtt_pre.sh
 	install -Dm755 scripts/load_containers_cache.sh $(DESTDIR)$(PREFIX)/sbin/load_containers_cache.sh
 	install -Dm755 scripts/arch-chroot $(DESTDIR)$(PREFIX)/sbin/arch-chroot
 	install -Dm755 scripts/genfstab $(DESTDIR)$(PREFIX)/sbin/genfstab
-	install -Dm755 scripts/start_z2mqtt.sh $(DESTDIR)$(PREFIX)/sbin/start_z2mqtt.sh

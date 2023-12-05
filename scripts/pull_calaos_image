@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Check if pkgname parameter is provided
+if [ -z "$1" ]; then
+    echo "Please provide the pkgname parameter."
+    exit 1
+fi
+
+pkgname="$1"
+url="/usr/share/calaos/$pkgname.source"
+
+# Check if the source file exists
+if [ ! -f "$url" ]; then
+    echo "Source file $url does not exist."
+    exit 1
+fi
+
+# Read the URL from the source file
+image_url=$(cat "$url")
+
+echo " > Pulling image $image_url"
+podman pull "$image_url"
+
+# Clean old remaining container images
+echo " > Cleaning old images"
+podman image prune -f
+
+# Remove old tags if they exist
+if podman image exists "localhost/var/lib/cache/containers/$pkgname"; then
+    podman rmi "localhost/var/lib/cache/containers/$pkgname"
+fi
