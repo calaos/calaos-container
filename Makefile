@@ -83,3 +83,4 @@ install: install-lib ## Install the binaries
 	install -Dm755 scripts/load_containers_cache.sh $(DESTDIR)$(PREFIX)/sbin/load_containers_cache.sh
 	install -Dm755 scripts/arch-chroot $(DESTDIR)$(PREFIX)/sbin/arch-chroot
 	install -Dm755 scripts/genfstab $(DESTDIR)$(PREFIX)/sbin/genfstab
+	install -Dm755 scripts/pull_calaos_image $(DESTDIR)$(PREFIX)/sbin/pull_calaos_image
