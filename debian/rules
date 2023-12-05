@@ -11,12 +11,6 @@ export GOCACHE=/tmp
 
 override_dh_installsystemd:
 	dh_installsystemd --name=calaos-container
-	dh_installsystemd --name=calaos-server
-	dh_installsystemd --name=calaos-home
-	dh_installsystemd --name=haproxy
-	dh_installsystemd --name=mosquitto
-	dh_installsystemd --name=influxdb --no-enable
-	dh_installsystemd --name=grafana --no-enable
 	dh_installsystemd --name=grub-btrfsd --no-enable
 
 override_dh_gencontrol:
