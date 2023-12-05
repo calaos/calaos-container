@@ -25,9 +25,11 @@ jobs:
       - name: Checkout the repo
         uses: actions/checkout@v2
 
-      - name: Fetch latest release version
-        id: fetch-latest-release
-        uses: actions-ecosystem/action-get-latest-tag@v1
+      - name: Calaos Action Bump Version
+        id: calaos_version
+        uses: calaos/action-bump-version@1.0.1
+        with:
+          version_fragment: ${{ github.event.inputs.vincrement || 'prerelease' }}
 
       - name: Build package
         uses: addnab/docker-run-action@v3
@@ -35,12 +37,7 @@ jobs:
         with:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
-          run: |
-            git config --global --add safe.directory /work
-            last_tag=$(python3 /get_last_tag.py /work)
-            export release=$(pysemver bump ${{ github.event.inputs.vincrement || 'prerelease' }} ${last_tag})
-            echo Build version: $release
-            /build-deb.sh $release && echo "::set-output name=release::$release"
+          run: /build-deb.sh ${{ steps.calaos_version.outputs.version_bumped }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
@@ -48,12 +45,18 @@ jobs:
           name: deb
           path: pkg/*.deb
 
+      - name: Create Tag
+        uses: negz/create-tag@v1
+        with:
+          version: ${{ steps.calaos_version.outputs.version_bumped }}
+          token: ${{ secrets.ACTION_DISPATCH }}
+
       - name: Create a Release
         uses: meeDamian/github-release@2.0
         with:
           token: ${{ secrets.ACTION_DISPATCH }}
-          tag: ${{ steps.build.outputs.release }}
-          name: ${{ steps.build.outputs.release }}
+          tag: ${{ steps.calaos_version.outputs.version_bumped }}
+          name: ${{ steps.calaos_version.outputs.version_bumped }}
           prerelease: false
           files: pkg/*.deb
           gzip: false
