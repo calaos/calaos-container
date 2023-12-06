@@ -1,5 +1,11 @@
 #!/bin/bash
 
+if [ -e /tmp/calaos-os.container.install ]
+then
+    echo "Not pulling image. Calaos-OS image creation in progress..."
+    exit 0
+fi
+
 # Check if pkgname parameter is provided
 if [ -z "$1" ]; then
     echo "Please provide the pkgname parameter."
