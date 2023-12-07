@@ -1,7 +1,6 @@
 
 [Unit]
 Description=Calaos Boot Service
-Before=basic.target
 
 [Service]
 Type=oneshot
@@ -18,4 +17,4 @@ RemainAfterExit=yes
 ExecStartPre=/bin/chvt 2
 
 [Install]
-WantedBy=basic.target
+WantedBy=multi-user.target
