@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStartPre=/usr/sbin/init_calaosfs.sh
+ExecStartPre=/usr/sbin/init_calaosfs
 ExecStart=/usr/bin/calaos-container
 Restart=always
 
