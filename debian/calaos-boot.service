@@ -5,7 +5,7 @@ Before=basic.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/calaos-boot.sh
+ExecStart=/usr/sbin/config_calaos-boot
 
 StandardOutput=tty
 TTYPath=/dev/tty2

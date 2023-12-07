@@ -11,6 +11,7 @@ export GOCACHE=/tmp
 
 override_dh_installsystemd:
 	dh_installsystemd --name=calaos-container
+	dh_installsystemd --name=calaos-boot
 	dh_installsystemd --name=grub-btrfsd --no-enable
 
 override_dh_gencontrol:
