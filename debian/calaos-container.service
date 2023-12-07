@@ -1,6 +1,7 @@
 [Unit]
 Description=Calaos-OS container daemon
 After=network.target
+Before=olad.service
 
 [Service]
 Type=simple

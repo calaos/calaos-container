@@ -32,9 +32,11 @@ then
     touch $rundir/calaos-live
 fi
 
-#For OLA we need to bind mount the original /etc/ola to /mnt
+#For OLA we need to store /etc/ola to /mnt
 #It saves the ola config on the dedicated /mnt/calaos folder
 #This script has to be started once before olad service is started
-mkdir -p /etc/ola
-chown -R olad:olad /etc/ola ${fs}/ola
-mount -o bind /etc/ola ${fs}/ola
+if [ ! -L /etc/ola ]; then
+    rm -fr /etc/ola
+    ln -s ${fs}/ola /etc/ola
+    chown -R olad:olad /etc/ola ${fs}/ola
+fi

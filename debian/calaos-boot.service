@@ -1,0 +1,21 @@
+
+[Unit]
+Description=Calaos Boot Service
+Before=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/calaos-boot.sh
+
+StandardOutput=tty
+TTYPath=/dev/tty2
+
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+RemainAfterExit=yes
+
+ExecStartPre=/bin/chvt 2
+
+[Install]
+WantedBy=basic.target
