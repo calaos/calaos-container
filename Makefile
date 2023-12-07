@@ -74,13 +74,10 @@ apt-install:
 install: install-lib ## Install the binaries
 	install -Dm755 bin/$(BINARY_NAME) $(DESTDIR)$(PREFIX)/bin/$(BINARY_NAME)
 	install -Dm755 bin/$(BINARY_NAME_TOOL) $(DESTDIR)$(PREFIX)/bin/$(BINARY_NAME_TOOL)
-	install -Dm755 scripts/start_calaos_home.sh $(DESTDIR)$(PREFIX)/sbin/start_calaos_home.sh
-	install -Dm755 scripts/calaos_install.sh $(DESTDIR)$(PREFIX)/sbin/calaos_install.sh
-	install -Dm755 scripts/calaos_rollback.sh $(DESTDIR)$(PREFIX)/sbin/calaos_rollback.sh
-	install -Dm755 scripts/init_calaosfs.sh $(DESTDIR)$(PREFIX)/sbin/init_calaosfs.sh
-	install -Dm755 scripts/haproxy_pre.sh $(DESTDIR)$(PREFIX)/sbin/haproxy_pre.sh
-	install -Dm755 scripts/mosquitto_pre.sh $(DESTDIR)$(PREFIX)/sbin/mosquitto_pre.sh
-	install -Dm755 scripts/load_containers_cache.sh $(DESTDIR)$(PREFIX)/sbin/load_containers_cache.sh
+	install -Dm755 scripts/calaos_install $(DESTDIR)$(PREFIX)/sbin/calaos_install
+	install -Dm755 scripts/calaos_rollback $(DESTDIR)$(PREFIX)/sbin/calaos_rollback
+	install -Dm755 scripts/init_calaosfs $(DESTDIR)$(PREFIX)/sbin/init_calaosfs
+	install -Dm755 scripts/load_containers_cache $(DESTDIR)$(PREFIX)/sbin/load_containers_cache
 	install -Dm755 scripts/arch-chroot $(DESTDIR)$(PREFIX)/sbin/arch-chroot
 	install -Dm755 scripts/genfstab $(DESTDIR)$(PREFIX)/sbin/genfstab
 	install -Dm755 scripts/pull_calaos_image $(DESTDIR)$(PREFIX)/sbin/pull_calaos_image
