@@ -27,6 +27,18 @@ image_url=$(cat "$url")
 echo " > Pulling image $image_url"
 podman pull "$image_url"
 
+# get image name
+image_name=$(echo "$image_url" | cut -d ':' -f 1)
+
+# get version
+image_version=$(echo "$image_url" | cut -d ':' -f 2)
+
+#get sha of image from podman
+sha=$(podman images -a | grep "$image_name" | grep "$image_version" | awk -F ' ' '{ print $3 }')
+
+# tag latest
+podman image tag "$sha" "$image_name":latest
+
 # Clean old remaining container images
 echo " > Cleaning old images"
 podman image prune -f
