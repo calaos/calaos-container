@@ -18,14 +18,14 @@ then
 fi
 
 # build container cache directory
-cache=/var/lib/cache/containers/$ct_name
+cache=/var/lib/cache/containers/${ct_name}.tar
 
-if [ -d "$cache" ]
+if [ -f "$cache" ]
 then
     echo "loading $cache"
 
     # Podman loads directory as cache and put it in localhost/... repository
-    podman load -i "$cache"
+    podman load < "$cache"
 
     echo "Image : $image"
 
@@ -35,6 +35,10 @@ then
 
     # tag it SHA with the full qualified image name to be used in the container
     podman image tag "$sha" "$image"
+
+    # tag image to :latest
+    image_name=$(echo "$image" | cut -d ':' -f 1)
+    podman image tag "$sha" "$image_name":latest
 
     # Remove the cache
     rm -rf "$cache"
