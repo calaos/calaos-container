@@ -24,20 +24,22 @@ if [ -f "$cache" ]
 then
     echo "loading $cache"
 
-    # Podman loads directory as cache and put it in localhost/... repository
+    # Podman loads file archive from cache and copy it in the local repository
     podman load < "$cache"
 
     echo "Image : $image"
 
+    image_name=$(echo "$image" | cut -d ':' -f 1)
+    image_version=$(echo "$image" | cut -d ':' -f 2)
+
     # Get SHA of image loaded
-    sha=$(podman images -a | grep "$ct_name" | awk -F ' ' '{ print $3 }')
+    sha=$(podman images -a | grep "$image_name" | grep "$image_version" | awk -F ' ' '{ print $3 }')
     echo "SHA : $sha"
 
-    # tag it SHA with the full qualified image name to be used in the container
+    # tag SHA with the full qualified image name
     podman image tag "$sha" "$image"
 
     # tag image to :latest
-    image_name=$(echo "$image" | cut -d ':' -f 1)
     podman image tag "$sha" "$image_name":latest
 
     # Remove the cache
