@@ -27,10 +27,8 @@ image_url=$(cat "$url")
 echo " > Pulling image $image_url"
 podman pull "$image_url"
 
-# get image name
+# get image name and version
 image_name=$(echo "$image_url" | cut -d ':' -f 1)
-
-# get version
 image_version=$(echo "$image_url" | cut -d ':' -f 2)
 
 #get sha of image from podman
