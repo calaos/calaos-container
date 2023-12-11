@@ -1,6 +1,8 @@
 
 [Unit]
 Description=Calaos Boot Service
+After=getty.target
+Requires=getty.target
 
 [Service]
 Type=oneshot
