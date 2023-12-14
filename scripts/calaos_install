@@ -67,6 +67,20 @@ err_report() {
     err "Error on line $1"
 }
 
+function podman_export()
+{
+    local container_name="$1"
+    local image="$2"
+    local dest="$3/var/lib/cache/containers/"
+
+    mkdir -p ${dest}
+  
+    echo " -> Export image: $container_name ($image)"
+
+    # Save image as oci-dir and compressed it
+    podman save --format oci-archive -o ${dest}/"$container_name".tar "$image"
+}
+
 trap 'err_report $LINENO' ERR
 
 destination=$1
@@ -223,10 +237,12 @@ rsync -avh ${src}/ ${dst} \
     --exclude /proc \
     --exclude /sys \
     --exclude /var/run/containers \
+    --exclude /var/run \
     --exclude /media \
     --exclude /mnt/destination_rootfs \
     --exclude /mnt/origin_rootfs \
-    --exclude /var/lib/containers/storage/overlay
+    --exclude /var/lib/containers/storage/overlay \
+    --exclude /var/lib/containers
 
 #Cleanup initramfs scrits not needed for installed rootfs
 rm -rf ${dst}/.calaos-live \
@@ -248,6 +264,13 @@ sed -i 's/rootflags=subvol=${rootsubvol}//g' ${dst}/etc/grub.d/20_linux_xen
 
 #regen mkinitcpio in rootfs
 arch-chroot ${dst} update-initramfs -u
+
+info "--> Exporting container images"
+for file in /usr/share/calaos/*.source; do
+  container_name=$(basename "$file" .source)
+  source "$file"
+  podman_export "$container_name" "$IMAGE_SRC" "${dst}"
+done
 
 #Initialize Snapper. Unmount our predefined .snapshot folder, let snapper recreate it (it fails otherwise)
 #remove the snapshot created by snapper, remount our .snapshot
