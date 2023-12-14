@@ -22,20 +22,10 @@ if [ ! -f "$url" ]; then
 fi
 
 # Read the URL from the source file
-image_url=$(cat "$url")
+source "$url"
 
-echo " > Pulling image $image_url"
-podman pull "$image_url"
-
-# get image name and version
-image_name=$(echo "$image_url" | cut -d ':' -f 1)
-image_version=$(echo "$image_url" | cut -d ':' -f 2)
-
-#get sha of image from podman
-sha=$(podman images -a | grep "$image_name" | grep "$image_version" | awk -F ' ' '{ print $3 }')
-
-# tag latest
-podman image tag "$sha" "$image_name":latest
+echo " > Pulling image $IMAGE_SRC"
+podman pull "$IMAGE_SRC"
 
 # Clean old remaining container images
 echo " > Cleaning old images"

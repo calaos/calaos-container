@@ -43,10 +43,10 @@ echo
 source_files=(/usr/share/calaos/*.source)
 
 for source_file in "${source_files[@]}"; do
-    image_src=$(<"$source_file")
+    source "$source_file"
     ct_name=$(basename "$source_file" .source)
 
-    load_containers_cache "$ct_name" "$image_src"
+    load_containers_cache "$ct_name" "${IMAGE_SRC}"
 done
 
 echo
