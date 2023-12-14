@@ -225,7 +225,8 @@ rsync -avh ${src}/ ${dst} \
     --exclude /var/run/containers \
     --exclude /media \
     --exclude /mnt/destination_rootfs \
-    --exclude /mnt/origin_rootfs
+    --exclude /mnt/origin_rootfs \
+    --exclude /var/lib/containers/storage/overlay
 
 #Cleanup initramfs scrits not needed for installed rootfs
 rm -rf ${dst}/.calaos-live \
