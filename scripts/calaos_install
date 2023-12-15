@@ -267,9 +267,30 @@ arch-chroot ${dst} update-initramfs -u
 
 info "--> Exporting container images"
 for file in /usr/share/calaos/*.source; do
-  container_name=$(basename "$file" .source)
-  source "$file"
-  podman_export "$container_name" "$IMAGE_SRC" "${dst}"
+    container_name=$(basename "$file" .source)
+    source "$file"
+
+    if podman images | grep "$IMAGE_SRC"
+    then
+        podman_export "$container_name" "$IMAGE_SRC" "${dst}"
+    else
+        if [ -e "/var/lib/cache/containers/${container_name}.tar" ]
+        then
+            info "Image $IMAGE_SRC not found in local repository, copying it from cache"
+            rsync -avh /var/lib/cache/containers/${container_name}.tar ${dst}/var/lib/cache/containers/
+        else
+            info "Image $IMAGE_SRC not found in local repository, trying to pull it..."
+            
+            podman pull "$IMAGE_SRC"
+
+            if podman images | grep "$IMAGE_SRC"
+            then
+                podman_export "$container_name" "$IMAGE_SRC" "${dst}"
+            else
+                err "Image $IMAGE_SRC not found, skipping"
+            fi
+        fi
+    fi
 done
 
 #Initialize Snapper. Unmount our predefined .snapshot folder, let snapper recreate it (it fails otherwise)
