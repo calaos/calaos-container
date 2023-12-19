@@ -67,6 +67,9 @@ load_containers()
     echo "Continuing boot..."
 }
 
+#wait for all devices to be up
+udevadm settle
+
 #force console 2
 chvt 2
 sleep 2
