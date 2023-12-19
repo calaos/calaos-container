@@ -25,6 +25,52 @@ color()
     echo -e "$1$*${NOCOLOR}"
 }
 
+parse_cmdline()
+{
+    # Parse command line and LABEL variable
+    set -- $(cat /proc/cmdline)
+    for x in "$@"; do
+        case "$x" in
+            calaos_install)
+                CALAOS_INSTALL="yes"
+            ;;
+        esac
+    done
+}
+
+parse_arguments()
+{
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --calaos-install)
+                CALAOS_INSTALL="yes"
+            ;;
+        esac
+        shift
+    done
+}
+
+load_containers()
+{
+    source_files=(/usr/share/calaos/*.source)
+
+    for source_file in "${source_files[@]}"; do
+        source "$source_file"
+        ct_name=$(basename "$source_file" .source)
+
+        load_containers_cache "$ct_name" "${IMAGE_SRC}"
+    done
+
+    echo
+    color "${GREEN}" "Initialization done!"
+    echo "Continuing boot..."
+}
+
+#force console 2
+chvt 2
+sleep 2
+
 color "${LIGHTBLUE}" " ██████╗ █████╗ ██╗      █████╗  ██████╗ ███████╗       ██████╗ ███████╗"
 color "${LIGHTBLUE}" "██╔════╝██╔══██╗██║     ██╔══██╗██╔═══██╗██╔════╝      ██╔═══██╗██╔════╝"
 color "${LIGHTBLUE}" "██║     ███████║██║     ███████║██║   ██║███████╗█████╗██║   ██║███████╗"
@@ -40,20 +86,85 @@ color "${CYAN}" "This can take a few minutes. Please be patient."
 echo
 echo
 
-source_files=(/usr/share/calaos/*.source)
+parse_cmdline
+parse_arguments "$@"
 
-for source_file in "${source_files[@]}"; do
-    source "$source_file"
-    ct_name=$(basename "$source_file" .source)
+# Define the dialog exit status codes
+: "${DIALOG_OK=0}"
+: "${DIALOG_CANCEL=1}"
+: "${DIALOG_ESC=255}"
 
-    load_containers_cache "$ct_name" "${IMAGE_SRC}"
-done
+if [ "$CALAOS_INSTALL" == "yes" ]
+then
+    color "${GREEN}" "Calaos-OS installation was requested. Starting installer..."
+    echo
+    sleep 2
 
-echo
-color "${GREEN}" "Initialization done!"
-echo "Continuing boot..."
-echo
-sleep 2
+    # Create a temporary file and make sure it goes away when we're done
+    tmp_file=$(mktemp 2>/dev/null) || tmp_file=/tmp/test$$
+    trap "rm -f $tmp_file" 0 1 2 5 15
 
-# change back to main console
-chvt 1
+    dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
+        --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60
+
+    retvalue=$?
+    case $retvalue in
+        "$DIALOG_OK")
+            disks=()
+
+            # get disk count
+            cpt=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices | length")
+            for ((i=0; i<$cpt; i++))
+            do
+                # get disk info
+                disk=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].name")
+                model=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].model")
+                size=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].size")
+                type=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].type")
+
+                #check if disk is mounted on / using mount command
+                checked="ON"
+                if mount | grep -q "$disk"
+                then
+                    checked="OFF"
+                fi
+
+                # check if disk is a hard drive
+                if [ "$type" == "disk" ]
+                then
+                    # "/dev/nvme0n1" "WDC PC SN720 SDAPNTW-256G-1016 [238.5G]" "OFF"
+                    disks+=("$disk" "$model [$size]" "$checked")
+                fi
+            done
+
+            # ask user to select a disk
+            dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" --menu "Select where to install Calaos OS::" 20 80 10 "${disks[@]}" 2> "$tmp_file"
+            retvalue=$(cat "$tmp_file")
+            case $retvalue in
+                "")
+                    color "${RED}" "No disk selected. Calaos-OS installation aborted."
+                    sleep 2
+                    load_containers
+                    echo
+                    sleep 2
+
+                    # change back to main console
+                    chvt 1
+                ;;
+                *)
+                    color "${GREEN}" "Installing Calaos-OS on $retvalue..."
+                    echo
+                    sleep 2
+
+                    calaos_install "$retvalue"
+            esac
+        ;;
+    esac
+else
+    load_containers
+    echo
+    sleep 2
+
+    # change back to main console
+    chvt 1
+fi

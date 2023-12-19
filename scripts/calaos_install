@@ -84,9 +84,9 @@ function podman_export()
 trap 'err_report $LINENO' ERR
 
 destination=$1
-if [ -z "$destination" ]
+if [ ! -b "$destination" ]
 then
-    err "No disk argument given. Usage: $0 /dev/xxx"
+    err "No valid disk argument given. Usage: $0 /dev/xxx"
     exit 1
 fi
 
