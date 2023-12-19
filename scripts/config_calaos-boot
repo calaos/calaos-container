@@ -107,23 +107,23 @@ then
     tmp_file=$(mktemp 2>/dev/null) || tmp_file=/tmp/test$$
     trap "rm -f $tmp_file" 0 1 2 5 15
 
-    dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
-        --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60
-
-    retvalue=$?
+    retvalue=$(dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
+        --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60)
     case $retvalue in
         "$DIALOG_OK")
             disks=()
 
+            lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json > "$tmp_file"
+
             # get disk count
-            cpt=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices | length")
+            cpt=$(< "$tmp_file" jq -r ".blockdevices | length")
             for ((i=0; i<$cpt; i++))
             do
                 # get disk info
-                disk=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].name")
-                model=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].model")
-                size=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].size")
-                type=$(lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json | jq -r ".blockdevices[$i].type")
+                disk=$(< "$tmp_file" jq -r ".blockdevices[$i].name")
+                model=$(< "$tmp_file" jq -r ".blockdevices[$i].model")
+                size=$(< "$tmp_file" jq -r ".blockdevices[$i].size")
+                type=$(< "$tmp_file" jq -r ".blockdevices[$i].type")
 
                 #check if disk is mounted on / using mount command
                 checked="ON"
@@ -141,9 +141,21 @@ then
             done
 
             # ask user to select a disk
-            dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" --menu "Select where to install Calaos OS::" 20 80 10 "${disks[@]}" 2> "$tmp_file"
-            retvalue=$(cat "$tmp_file")
+            retvalue=$(dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" --radiolist "Select where to install Calaos OS::" 20 80 10 "${disks[@]}" 2> "$tmp_file")
             case $retvalue in
+                "$DIALOG_OK")
+                    disk=$(cat "$tmp_file")
+                    ;;
+                *)
+                    color "${GREEN}" "Installing Calaos-OS on $retvalue..."
+                    echo
+                    sleep 2
+
+                    calaos_install "$retvalue"
+                ;;
+            esac
+
+            case $disk in
                 "")
                     color "${RED}" "No disk selected. Calaos-OS installation aborted."
                     sleep 2
@@ -155,11 +167,12 @@ then
                     chvt 1
                 ;;
                 *)
-                    color "${GREEN}" "Installing Calaos-OS on $retvalue..."
+                    color "${GREEN}" "Installing Calaos-OS on $disk..."
                     echo
                     sleep 2
 
-                    calaos_install "$retvalue"
+                    calaos_install "$disk"
+                ;;
             esac
         ;;
     esac
