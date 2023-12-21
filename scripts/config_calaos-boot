@@ -165,11 +165,7 @@ then
                     disk=$(cat "$tmp_file")
                     ;;
                 *)
-                    color "${GREEN}" "Installing Calaos-OS on $retvalue..."
-                    echo
-                    sleep 2
-
-                    calaos_install "$retvalue"
+                    disk=""
                 ;;
             esac
 
@@ -190,6 +186,7 @@ then
                     sleep 2
 
                     calaos_install "$disk"
+                    reboot
                 ;;
             esac
         ;;
