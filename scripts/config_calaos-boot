@@ -59,20 +59,31 @@ load_containers()
         source "$source_file"
         ct_name=$(basename "$source_file" .source)
 
+        log "Loading container $ct_name"
         load_containers_cache "$ct_name" "${IMAGE_SRC}"
     done
 
     echo
     color "${GREEN}" "Initialization done!"
     echo "Continuing boot..."
+    log "Initialization done! Continuing boot"
+}
+
+log()
+{
+    echo "$1" | systemd-cat -t calaos-boot -p info
 }
 
 #wait for all devices to be up
+log "Waiting for all devices to be up..."
 udevadm settle
 
 #force console 2
 chvt 2
 sleep 2
+clear
+
+log "Starting Calaos-OS boot"
 
 color "${LIGHTBLUE}" " ██████╗ █████╗ ██╗      █████╗  ██████╗ ███████╗       ██████╗ ███████╗"
 color "${LIGHTBLUE}" "██╔════╝██╔══██╗██║     ██╔══██╗██╔═══██╗██╔════╝      ██╔═══██╗██╔════╝"
@@ -89,7 +100,10 @@ color "${CYAN}" "This can take a few minutes. Please be patient."
 echo
 echo
 
+log "Parsing kernel command line"
 parse_cmdline
+
+log "Parsing arguments"
 parse_arguments "$@"
 
 # Define the dialog exit status codes
@@ -99,13 +113,16 @@ parse_arguments "$@"
 
 if [ "$CALAOS_INSTALL" == "yes" ]
 then
+    log "Calaos-OS installation was requested. Starting installer"
+
     color "${GREEN}" "Calaos-OS installation was requested. Starting installer..."
     echo
     sleep 2
 
     # Create a temporary file and make sure it goes away when we're done
-    tmp_file=$(mktemp 2>/dev/null) || tmp_file=/tmp/test$$
-    trap "rm -f $tmp_file" 0 1 2 5 15
+    tmp_file=$(mktemp 2>/dev/null) || tmp_file=/tmp/tmp1$$
+    tmp_file2=$(mktemp 2>/dev/null) || tmp_file2=/tmp/tmp2$$
+    trap "rm -f $tmp_file $tmp_file2" 0 1 2 5 15
 
     retvalue=$(dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
         --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60)
@@ -114,6 +131,7 @@ then
             disks=()
 
             lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json > "$tmp_file"
+            mount > "$tmp_file2"
 
             # get disk count
             cpt=$(< "$tmp_file" jq -r ".blockdevices | length")
@@ -127,7 +145,7 @@ then
 
                 #check if disk is mounted on / using mount command
                 checked="ON"
-                if mount | grep -q "$disk"
+                if < "$tmp_file2" grep -q "$disk"
                 then
                     checked="OFF"
                 fi
@@ -177,6 +195,9 @@ then
         ;;
     esac
 else
+    log "Calaos-OS installation was not requested. Continuing boot"
+    log "Loading containers"
+
     load_containers
     echo
     sleep 2
