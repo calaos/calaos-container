@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -e
-
 NOCOLOR='\033[0m'
 CYAN='\033[0;36m'
 RED='\033[0;31m'
@@ -124,8 +122,9 @@ then
     tmp_file2=$(mktemp 2>/dev/null) || tmp_file2=/tmp/tmp2$$
     trap "rm -f $tmp_file $tmp_file2" 0 1 2 5 15
 
-    retvalue=$(dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
-        --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60)
+    dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
+        --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60
+    retvalue=$?
     case $retvalue in
         "$DIALOG_OK")
             disks=()
@@ -159,7 +158,8 @@ then
             done
 
             # ask user to select a disk
-            retvalue=$(dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" --radiolist "Select where to install Calaos OS::" 20 80 10 "${disks[@]}" 2> "$tmp_file")
+            dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" --radiolist "Select where to install Calaos OS::" 20 80 10 "${disks[@]}" 2> "$tmp_file"
+            retvalue=$?
             case $retvalue in
                 "$DIALOG_OK")
                     disk=$(cat "$tmp_file")
