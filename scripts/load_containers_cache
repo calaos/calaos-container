@@ -26,15 +26,18 @@ then
 
     # Podman loads file archive from cache and copy it in the local repository
     podman load < "$cache"
+
+    image_base=$(echo "$image" | cut -d: -f 1)
+    image_tag=$(echo "$image" | cut -d: -f 2)
     
     #check if image is in local repository
-    if podman images | grep "$image"
+    if podman images | grep "$image_base" | grep "$image_tag" > /dev/null
     then
         echo "Image $image loaded"
         # Remove the cache
         rm -rf "$cache"
     else
         echo "Error: image $image not loaded, an error occured."
-        exit 1
+        return 1
     fi
 fi
