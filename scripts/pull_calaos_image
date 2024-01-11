@@ -24,12 +24,21 @@ fi
 # Read the URL from the source file
 source "$url"
 
-echo " > Pulling image $IMAGE_SRC"
-podman pull "$IMAGE_SRC"
+image_base=$(echo "$IMAGE_SRC" | cut -d: -f 1)
+image_tag=$(echo "$IMAGE_SRC" | cut -d: -f 2)
+
+echo " > Removing old container image"
+for i in $(podman images | grep "$image_base" | awk '{print $3}')
+do
+    podman rmi "$i"
+done
 
 # Clean old remaining container images
 echo " > Cleaning old images"
 podman image prune -f
+
+echo " > Pulling new image $IMAGE_SRC"
+podman pull "$IMAGE_SRC"
 
 # Remove old tags if they exist
 if podman image exists "localhost/var/lib/cache/containers/$pkgname"; then
