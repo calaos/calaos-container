@@ -270,7 +270,10 @@ for file in /usr/share/calaos/*.source; do
     container_name=$(basename "$file" .source)
     source "$file"
 
-    if podman images | grep "$IMAGE_SRC"
+    image_base=$(echo "$IMAGE_SRC" | cut -d: -f 1)
+    image_tag=$(echo "$IMAGE_SRC" | cut -d: -f 2)
+
+    if podman images | grep "$image_base" | grep "$image_tag" > /dev/null
     then
         podman_export "$container_name" "$IMAGE_SRC" "${dst}"
     else
