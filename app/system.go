@@ -72,7 +72,7 @@ func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) (err error) {
 
 func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) (err error) {
 
-	_, err = models.RunCommand("calaos_rollback.sh")
+	_, err = models.RunCommand("calaos_rollback")
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -135,7 +135,7 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	r, err := models.RunCommandReader("calaos_install.sh", INSTALL_LOG_FILE, INSTALL_EXIT_CODE_FILE, n.Device)
+	r, err := models.RunCommandReader("calaos_install", INSTALL_LOG_FILE, INSTALL_EXIT_CODE_FILE, n.Device)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
