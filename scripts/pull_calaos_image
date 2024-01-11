@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 if [ -e /tmp/calaos-os.container.install ]
 then
     echo "Not pulling image. Calaos-OS image creation in progress..."
@@ -27,18 +29,29 @@ source "$url"
 image_base=$(echo "$IMAGE_SRC" | cut -d: -f 1)
 image_tag=$(echo "$IMAGE_SRC" | cut -d: -f 2)
 
-echo " > Removing old container image"
+echo " > Pulling new image $IMAGE_SRC"
+podman pull "$IMAGE_SRC"
+
+echo " > Stoping old container"
+systemctl stop "$pkgname" || true
+
+echo " > Removing old container image and get tag"
 for i in $(podman images | grep "$image_base" | awk '{print $3}')
 do
-    podman rmi "$i"
+    for tag in $(podman image inspect "$i" --format '{{range .RepoTags}}{{.}}{{end}}')
+    do
+        ibase=$(echo "$tag" | cut -d: -f 1)
+        t=$(echo "$tag" | cut -d: -f 2)
+        if [ "$ibase" == "$image_base" ] && [ "$t" != "$image_tag" ]; then
+            echo " > Removing $ibase:$t"
+            podman rmi --force "$i"
+        fi
+    done
 done
 
 # Clean old remaining container images
 echo " > Cleaning old images"
 podman image prune -f
-
-echo " > Pulling new image $IMAGE_SRC"
-podman pull "$IMAGE_SRC"
 
 # Remove old tags if they exist
 if podman image exists "localhost/var/lib/cache/containers/$pkgname"; then
