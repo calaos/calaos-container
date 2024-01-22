@@ -14,7 +14,8 @@ for d in cache \
     mosquitto/config \
     grafana/data \
     config \
-    ola
+    ola \
+    xorg.conf.d
 do
     mkdir -p ${fs}/${d}
 done
