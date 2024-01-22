@@ -11,4 +11,4 @@ Depends: ${misc:Depends}, ${shlibs:Depends},
          bash, podman, openssl, coreutils, util-linux, gawk, bash,
          btrfs-progs, parted, dosfstools, snapper, mount, rsync,
          sed, inotify-tools, curl, ifupdown2, snapper, jq,
-         calaos-ddns
+         calaos-ddns, inputattach

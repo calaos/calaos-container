@@ -1,0 +1,12 @@
+[Unit]
+Description=Inputattach tool for serial2USB converter on %i
+BindTo=dev-%i.device
+After=dev-%i.device xserver-nodm.service
+
+[Service]
+ExecStart=/usr/bin/inputattach -elo /dev/%i
+Restart=always
+RestartSec=0
+
+[Install]
+WantedBy=multi-user.target
