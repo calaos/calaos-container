@@ -57,7 +57,7 @@ jobs:
           token: ${{ secrets.ACTION_DISPATCH }}
           tag: ${{ steps.calaos_version.outputs.version_bumped }}
           name: ${{ steps.calaos_version.outputs.version_bumped }}
-          prerelease: false
+          prerelease: ${{ github.event.inputs.vincrement != '' }}
           files: pkg/*.deb
           gzip: false
 
