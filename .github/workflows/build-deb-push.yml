@@ -8,7 +8,7 @@ on:
       vincrement:
         description: 'Package version increment (major.minor.xxx)'
         required: true
-        default: 'patch'
+        default: 'minor'
         type: choice
         options:
           - major
