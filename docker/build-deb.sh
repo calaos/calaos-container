@@ -15,7 +15,7 @@ then
 fi
 
 #replace - with ~ for debian compliance
-version="${version//-/~}"
+version="${version/-/'~'}"
 sed -i "s/VERSION = 1.0.0/VERSION = $version/g" debian/rules
 sed -i "s/1.0-0/$version/g" debian/changelog
 
