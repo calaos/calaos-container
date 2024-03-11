@@ -29,11 +29,24 @@ source "$url"
 image_base=$(echo "$IMAGE_SRC" | cut -d: -f 1)
 image_tag=$(echo "$IMAGE_SRC" | cut -d: -f 2)
 
+if [ -z "$SERVICE_NAME" ]; then
+    SERVICE_NAME="$pkgname.service"
+fi
+
+#check if $SERVICE_NAME is a valid service
+if ! systemctl list-units --type=service | grep -q "$SERVICE_NAME"; then
+    echo "Service $SERVICE_NAME does not exist."
+    unset SERVICE_NAME
+    exit 1
+fi
+
 echo " > Pulling new image $IMAGE_SRC"
 podman pull "$IMAGE_SRC"
 
-echo " > Stoping old container"
-systemctl stop "$pkgname" || true
+if [ -n "$SERVICE_NAME" ]; then
+    echo " > Stopping service $SERVICE_NAME"
+    systemctl stop "$SERVICE_NAME" || true
+fi
 
 echo " > Removing old container image and get tag"
 for i in $(podman images | grep "$image_base" | awk '{print $3}')
