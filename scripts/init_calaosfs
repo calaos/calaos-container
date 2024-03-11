@@ -15,7 +15,9 @@ for d in cache \
     grafana/data \
     config \
     ola \
-    xorg.conf.d
+    xorg.conf.d \
+    hue2mqtt \
+    envoy
 do
     mkdir -p ${fs}/${d}
 done
