@@ -95,7 +95,7 @@ func getMemoryUsagePercent() (int, error) {
 		if len(fields) >= 3 {
 			if fields[0] == "MemTotal:" {
 				total, _ = strconv.Atoi(fields[1])
-			} else if fields[0] == "MemFree:" {
+			} else if fields[0] == "MemAvailable:" {
 				free, _ = strconv.Atoi(fields[1])
 			}
 		}
