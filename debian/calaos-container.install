@@ -9,3 +9,4 @@ repository/calaos.gpg etc/apt/trusted.gpg.d
 repository/calaos.list etc/apt/sources.list.d
 debian/btrfs-scrub@.service lib/systemd/system
 debian/btrfs-scrub@.timer lib/systemd/system
+debian/usb-serial-touchscreen@.service lib/systemd/system
