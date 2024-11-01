@@ -1,6 +1,6 @@
 [Unit]
 Description=Inputattach tool for serial2USB converter on %i
-BindTo=dev-%i.device
+BindsTo=dev-%i.device
 After=dev-%i.device xserver-nodm.service
 
 [Service]

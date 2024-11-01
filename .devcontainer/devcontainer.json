@@ -19,10 +19,16 @@
 	"customizations": {
 			"vscode": {
 					"extensions": [
-							"ms-vscode.cpptools-extension-pack",
-							"ms-vscode.makefile-tools",
-							"lizebang.bash-extension-pack",
-							"ms-vscode.cmake-tools"
+						"ms-vscode.cpptools-extension-pack",
+						"ms-vscode.makefile-tools",
+						"lizebang.bash-extension-pack",
+						"ms-vscode.cmake-tools",
+						"ms-azuretools.vscode-docker",
+						"golang.go",
+						"jinliming2.vscode-go-template",
+						"mesonbuild.mesonbuild",
+						"esbenp.prettier-vscode",
+						"foxundermoon.shell-format"
 					]
 			}
 	},
@@ -30,5 +36,14 @@
 	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
 	"remoteUser": "root",
 
-	"runArgs": ["--privileged"]
+	"runArgs": [
+		"--privileged",
+		"--cap-add=SYS_ADMIN",
+        "--tmpfs", "/run",
+        "--tmpfs", "/run/lock",
+        "-v", "/sys/fs/cgroup:/sys/fs/cgroup"
+	],
+
+	"overrideCommand": false,
+	"privileged": true
 }

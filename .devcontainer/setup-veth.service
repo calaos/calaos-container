@@ -1,0 +1,11 @@
+[Unit]
+Description=Setup virtual ethernet interfaces (veth)
+Before=systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup_veth.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

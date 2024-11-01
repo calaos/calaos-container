@@ -1,4 +1,4 @@
-FROM debian:12-slim as dev
+FROM debian:12-slim
 
 RUN apt -y update && \
     apt -y upgrade && \
@@ -9,7 +9,7 @@ RUN apt -y update && \
         inotify-tools curl wget ifupdown2 jq build-essential git \
         unzip zip cmake automake autoconf libtool autopoint gettext \
         tar gzip zsh vim nano sudo zstd less gnupg ripgrep gdb cgdb locales \
-        systemd systemd-resolved systemd-sysv
+        systemd systemd-resolved systemd-sysv dbus iproute2 iputils-ping
 
 RUN sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
     sed -i -e 's/# fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen && \
@@ -40,3 +40,24 @@ RUN echo "\n\
 set show-all-if-ambiguous on \n\
 set completion-ignore-case on \n\
 " >> /etc/inputrc
+
+RUN echo "\n\
+[Match]\n\
+Name=calaos-*\n\
+\n\
+[Network]\n\
+DHCP=yes\n\
+" > /etc/systemd/network/calaos.network
+
+COPY setup_veth.sh /usr/local/bin/setup_veth.sh
+RUN chmod +x /usr/local/bin/setup_veth.sh
+COPY setup-veth.service /etc/systemd/system/setup-veth.service
+RUN systemctl enable setup-veth.service
+
+RUN systemctl enable setup-veth.service
+RUN systemctl enable systemd-resolved.service
+RUN systemctl enable systemd-networkd.service
+
+ENV container docker
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd", "--system", "--unit=basic.target"]

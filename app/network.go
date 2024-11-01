@@ -21,3 +21,19 @@ func (a *AppServer) apiNetIntfList(c *fiber.Ctx) (err error) {
 		"output": nets,
 	})
 }
+
+func (a *AppServer) apiNetDNS(c *fiber.Ctx) (err error) {
+	dns, err := models.GetDNSConfig()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"error":  false,
+		"msg":    "ok",
+		"output": dns,
+	})
+}
