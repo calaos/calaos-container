@@ -6,7 +6,7 @@ RUN apt -y update && \
         pkgconf golang libbtrfs-dev libdevmapper-dev libgpgme-dev git python3-semver python3-git \
         pkgconf golang libbtrfs-dev libdevmapper-dev libgpgme-dev libglib2.0-dev libapt-pkg-dev meson \
         bash openssl coreutils util-linux gawk btrfs-progs parted dosfstools snapper rsync sed \
-        inotify-tools curl wget ifupdown2 jq build-essential git \
+        inotify-tools curl wget ifupdown2 jq build-essential git ssh \
         unzip zip cmake automake autoconf libtool autopoint gettext \
         tar gzip zsh vim nano sudo zstd less gnupg ripgrep gdb cgdb locales \
         systemd systemd-resolved systemd-sysv dbus iproute2 iputils-ping
