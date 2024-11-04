@@ -99,8 +99,8 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiNetIntfList(c)
 	})
 
-	api.Get("/network/dns", func(c *fiber.Ctx) error {
-		return a.apiNetDNS(c)
+	api.Post("/network/:intf", func(c *fiber.Ctx) error {
+		return a.apiNetIntfConfigure(c)
 	})
 
 	//Force an update check

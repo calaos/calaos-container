@@ -270,3 +270,32 @@ func (capi *CalaosApi) UpgradeStatus(token string) (status *structs.Status, err 
 
 	return
 }
+
+// GetNetworkInterfaces returns a list of network interfaces with their status
+func (capi *CalaosApi) GetNetworkInterfaces(token string) (netf *[]structs.NetInterface, err error) {
+	_, body, err := capi.callWithToken("GET", "/network/list", token, nil, nil)
+	if err != nil {
+		return
+	}
+
+	netf = &[]structs.NetInterface{}
+	if err = json.Unmarshal(body, netf); err != nil {
+		return nil, fmt.Errorf("GetNetworkInterfaces failed: %v", err)
+	}
+
+	return
+}
+
+func (capi *CalaosApi) ConfigureNetworkInterface(token string, intf string, config *structs.NetInterface) (err error) {
+
+	params := url.Values{
+		"intf": []string{intf},
+	}
+
+	_, _, err = capi.callWithToken("POST", "/network/"+intf, token, params, config)
+	if err != nil {
+		return
+	}
+
+	return
+}

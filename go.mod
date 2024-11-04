@@ -26,6 +26,7 @@ require (
 require (
 	github.com/fatih/color v1.16.0
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/uuid v1.4.0 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.4.9
 	github.com/klauspost/compress v1.17.3 // indirect

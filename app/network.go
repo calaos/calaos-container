@@ -2,6 +2,8 @@ package app
 
 import (
 	"github.com/calaos/calaos-container/models"
+	"github.com/calaos/calaos-container/models/structs"
+
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -22,8 +24,17 @@ func (a *AppServer) apiNetIntfList(c *fiber.Ctx) (err error) {
 	})
 }
 
-func (a *AppServer) apiNetDNS(c *fiber.Ctx) (err error) {
-	dns, err := models.GetDNSConfig()
+func (a *AppServer) apiNetIntfConfigure(c *fiber.Ctx) (err error) {
+	intf := c.Params("intf")
+	var net structs.NetInterface
+	if err := c.BodyParser(&net); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	err = models.ConfigureNetInterface(intf, net)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -32,8 +43,7 @@ func (a *AppServer) apiNetDNS(c *fiber.Ctx) (err error) {
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"error":  false,
-		"msg":    "ok",
-		"output": dns,
+		"error": false,
+		"msg":   "ok",
 	})
 }

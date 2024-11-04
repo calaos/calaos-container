@@ -5,11 +5,14 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/calaos/calaos-container/cmd/calaos-os/api"
+	"github.com/calaos/calaos-container/models/structs"
+
 	"github.com/fatih/color"
 	cli "github.com/jawher/mow.cli"
 	"github.com/jedib0t/go-pretty/v6/table"
@@ -49,6 +52,13 @@ func main() {
 	a.Command("list", "list installed images/pkg and updates", cmdList)
 	a.Command("check-update", "check for any available updates", cmdCheck)
 	a.Command("upgrade", "update images/pkg to the latest availble", cmdUpgrade)
+	a.Command("network", "network related commands", func(cmd *cli.Cmd) {
+		cmd.Command("list", "list network interfaces", cmdNetList)
+		cmd.Command("configure", "configure network interface", func(cmd *cli.Cmd) {
+			cmd.Command("static", "configure network interface with static IP", cmdNetConfigureStatic)
+			cmd.Command("dhcp", "configure network interface with DHCP", cmdNetConfigureDHCP)
+		})
+	})
 
 	if err := a.Run(os.Args); err != nil {
 		exit(err, 1)
@@ -199,4 +209,122 @@ func cmdUpgrade(cmd *cli.Cmd) {
 
 		fmt.Printf("%s Done.\n", green(CharCheck))
 	}
+}
+
+func cmdNetList(cmd *cli.Cmd) {
+	cmd.Spec = ""
+	cmd.Action = func() {
+		a := api.NewCalaosApi(api.CalaosCtHost)
+
+		token, err := getToken()
+		if err != nil {
+			exit(err, 1)
+		}
+
+		nets, err := a.GetNetworkInterfaces(token)
+		if err != nil {
+			exit(err, 1)
+		}
+
+		t := table.NewWriter()
+		t.SetOutputMirror(os.Stdout)
+		t.AppendHeader(table.Row{"Interface", "IP", "Netmask", "Gateway", "MAC", "State", "DHCP"})
+
+		for _, e := range *nets {
+			t.AppendRow(table.Row{
+				e.Name,
+				e.IPv4,
+				e.Gateway,
+				e.MAC,
+				e.State,
+				e.DHCP,
+			})
+		}
+
+		t.SetStyle(table.StyleLight)
+		t.Render()
+	}
+}
+
+func cmdNetConfigureStatic(cmd *cli.Cmd) {
+	cmd.Spec = "INTERFACE IPV4 NETMASK GATEWAY DNS..."
+	intf := cmd.StringArg("INTERFACE", "", "Interface to configure")
+	ip := cmd.StringArg("IPV4", "", "IPv4 address")
+	netmask := cmd.StringArg("NETMASK", "", "Netmask")
+	gateway := cmd.StringArg("GATEWAY", "", "Gateway")
+	dns := cmd.StringsArg("DNS", nil, "DNS servers")
+
+	cmd.Action = func() {
+		fmt.Printf("%s Configuring interface %s...\n", cyan(CharArrow), *intf)
+
+		a := api.NewCalaosApi(api.CalaosCtHost)
+
+		token, err := getToken()
+		if err != nil {
+			exit(err, 1)
+		}
+
+		dnsconf := &structs.DNSConfig{}
+		dnsconf.DNSServers = append(dnsconf.DNSServers, *dns...)
+
+		ipCIDR, _ := toCIDR(*ip, *netmask)
+		config := &structs.NetInterface{
+			Name:      *intf,
+			IPv4:      ipCIDR,
+			Gateway:   *gateway,
+			DHCP:      false,
+			DNSConfig: dnsconf,
+		}
+
+		err = a.ConfigureNetworkInterface(token, *intf, config)
+		if err != nil {
+			exit(err, 1)
+		}
+
+		fmt.Printf("%s Done.\n", green(CharCheck))
+	}
+}
+
+func cmdNetConfigureDHCP(cmd *cli.Cmd) {
+	cmd.Spec = "INTERFACE"
+	intf := cmd.StringArg("INTERFACE", "", "Interface to configure")
+
+	cmd.Action = func() {
+		fmt.Printf("%s Configuring interface %s...\n", cyan(CharArrow), *intf)
+
+		a := api.NewCalaosApi(api.CalaosCtHost)
+
+		token, err := getToken()
+		if err != nil {
+			exit(err, 1)
+		}
+
+		config := &structs.NetInterface{
+			DHCP: true,
+		}
+
+		err = a.ConfigureNetworkInterface(token, *intf, config)
+		if err != nil {
+			exit(err, 1)
+		}
+
+		fmt.Printf("%s Done.\n", green(CharCheck))
+	}
+}
+
+func toCIDR(ipStr, maskStr string) (string, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid ip : %s", ipStr)
+	}
+
+	mask := net.ParseIP(maskStr)
+	if mask == nil {
+		return "", fmt.Errorf("invalid mask : %s", maskStr)
+	}
+
+	ipMask := net.IPv4Mask(mask[12], mask[13], mask[14], mask[15])
+	prefixSize, _ := ipMask.Size()
+
+	return fmt.Sprintf("%s/%d", ipStr, prefixSize), nil
 }
