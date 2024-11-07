@@ -228,9 +228,13 @@ func cmdNetList(cmd *cli.Cmd) {
 
 		t := table.NewWriter()
 		t.SetOutputMirror(os.Stdout)
-		t.AppendHeader(table.Row{"Interface", "IP", "Netmask", "Gateway", "MAC", "State", "DHCP"})
+		t.AppendHeader(table.Row{"Interface", "IP", "Gateway", "MAC", "State", "DHCP"})
 
 		for _, e := range *nets {
+			if e.IsLoopback {
+				continue
+			}
+
 			t.AppendRow(table.Row{
 				e.Name,
 				e.IPv4,
@@ -247,7 +251,7 @@ func cmdNetList(cmd *cli.Cmd) {
 }
 
 func cmdNetConfigureStatic(cmd *cli.Cmd) {
-	cmd.Spec = "INTERFACE IPV4 NETMASK GATEWAY DNS..."
+	cmd.Spec = "INTERFACE IPV4 NETMASK [GATEWAY] [DNS...]"
 	intf := cmd.StringArg("INTERFACE", "", "Interface to configure")
 	ip := cmd.StringArg("IPV4", "", "IPv4 address")
 	netmask := cmd.StringArg("NETMASK", "", "Netmask")
@@ -264,17 +268,14 @@ func cmdNetConfigureStatic(cmd *cli.Cmd) {
 			exit(err, 1)
 		}
 
-		dnsconf := &structs.DNSConfig{}
-		dnsconf.DNSServers = append(dnsconf.DNSServers, *dns...)
-
 		ipCIDR, _ := toCIDR(*ip, *netmask)
 		config := &structs.NetInterface{
-			Name:      *intf,
-			IPv4:      ipCIDR,
-			Gateway:   *gateway,
-			DHCP:      false,
-			DNSConfig: dnsconf,
+			Name:    *intf,
+			IPv4:    ipCIDR,
+			Gateway: *gateway,
+			DHCP:    false,
 		}
+		config.DNSServers = append(config.DNSServers, *dns...)
 
 		err = a.ConfigureNetworkInterface(token, *intf, config)
 		if err != nil {

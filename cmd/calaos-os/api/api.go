@@ -24,6 +24,12 @@ type apiOptions struct {
 	transport func(*http.Transport)
 }
 
+type ApiResponse struct {
+	Error  bool            `json:"error"`
+	Msg    string          `json:"msg"`
+	Output json.RawMessage `json:"output"`
+}
+
 // Optional parameter, used to configure timeouts on API calls.
 func SetTimeout(timeout time.Duration) func(*apiOptions) {
 	return func(opts *apiOptions) {
@@ -273,13 +279,22 @@ func (capi *CalaosApi) UpgradeStatus(token string) (status *structs.Status, err 
 
 // GetNetworkInterfaces returns a list of network interfaces with their status
 func (capi *CalaosApi) GetNetworkInterfaces(token string) (netf *[]structs.NetInterface, err error) {
-	_, body, err := capi.callWithToken("GET", "/network/list", token, nil, nil)
+	_, body, err := capi.callWithToken("GET", "/api/network/list", token, nil, nil)
 	if err != nil {
 		return
 	}
 
+	var initial ApiResponse
+	if err = json.Unmarshal(body, &initial); err != nil {
+		return nil, fmt.Errorf("GetNetworkInterfaces failed: %v", err)
+	}
+
+	if initial.Error {
+		return nil, fmt.Errorf("GetNetworkInterfaces failed: %v", initial.Msg)
+	}
+
 	netf = &[]structs.NetInterface{}
-	if err = json.Unmarshal(body, netf); err != nil {
+	if err = json.Unmarshal(initial.Output, netf); err != nil {
 		return nil, fmt.Errorf("GetNetworkInterfaces failed: %v", err)
 	}
 
@@ -292,9 +307,18 @@ func (capi *CalaosApi) ConfigureNetworkInterface(token string, intf string, conf
 		"intf": []string{intf},
 	}
 
-	_, _, err = capi.callWithToken("POST", "/network/"+intf, token, params, config)
+	_, body, err := capi.callWithToken("POST", "/api/network/"+intf, token, params, config)
 	if err != nil {
 		return
+	}
+
+	var initial ApiResponse
+	if err = json.Unmarshal(body, &initial); err != nil {
+		return fmt.Errorf("ConfigureNetworkInterface failed: %v", err)
+	}
+
+	if initial.Error {
+		return fmt.Errorf("ConfigureNetworkInterface failed: %v", initial.Msg)
 	}
 
 	return

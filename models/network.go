@@ -7,13 +7,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/calaos/calaos-container/models/structs"
-
-	"github.com/godbus/dbus/v5"
 )
 
 type RawDNSServer struct {
@@ -21,27 +17,37 @@ type RawDNSServer struct {
 	Address []byte
 }
 
+type NetworkList struct {
+	Interfaces []RawNetInterface `json:"Interfaces"`
+}
+
 type RawNetInterface struct {
 	Name        string `json:"Name"`
-	Flags       int    `json:"Flags"`
-	IPv4        string `json:"IPv4Address"`
-	IPv4Mask    int    `json:"IPv4Mask"`
-	IPv6        string `json:"IPv6LinkLocalAddress"`
-	MAC         string `json:"HardwareAddress"`
-	State       string `json:"KernelOperationalStateString"`
+	MAC         []byte `json:"HardwareAddress"`
+	State       string `json:"OnlineState"`
 	NetworkFile string `json:"NetworkFile"`
+	Flags       int    `json:"Flags"`
 	Addresses   []struct {
-		Family int    `json:"Family"`
-		Scope  string `json:"ScopeString"`
-		Prefix int    `json:"PrefixLength"`
+		Family       int    `json:"Family"` // 2 for IPv4, 10 for IPv6
+		Address      []byte `json:"Address"`
+		Broadcast    []byte `json:"Broadcast"`
+		PrefixLength int    `json:"PrefixLength"`
+		ConfigSource string `json:"ConfigSource"` // "DHCPv4" or "static"
 	} `json:"Addresses"`
 	Routes []struct {
-		Family    int    `json:"Family"`
-		Type      string `json:"TypeString"`
-		Gateway   string `json:"Gateway"`
-		Dest      string `json:"Destination"`
-		PrefixLen int    `json:"DestinationPrefixLength"`
+		Family       int    `json:"Family"` // 2 for IPv4, 10 for IPv6
+		Gateway      []byte `json:"Gateway"`
+		ConfigSource string `json:"ConfigSource"` // "DHCPv4" or "static"
 	} `json:"Routes"`
+	DNS []struct {
+		Family       int    `json:"Family"` // 2 for IPv4, 10 for IPv6
+		Address      []byte `json:"Address"`
+		ConfigSource string `json:"ConfigSource"` // "DHCPv4" or "static"
+	} `json:"DNS"`
+	SearchDomains []struct {
+		Domain       string `json:"Domain"`
+		ConfigSource string `json:"ConfigSource"` // "DHCPv4" or "static"
+	} `json:"SearchDomains"`
 }
 
 type RawDNSConfig struct {
@@ -51,48 +57,48 @@ type RawDNSConfig struct {
 	SearchDomains    []string `json:"search_domains"`
 }
 
-func parseMask(prefixLen int) string {
-	mask := (0xFFFFFFFF << (32 - prefixLen)) & 0xFFFFFFFF
-	return fmt.Sprintf("%d.%d.%d.%d", (mask>>24)&0xFF, (mask>>16)&0xFF, (mask>>8)&0xFF, mask&0xFF)
-}
-
 func GetAllNetInterfaces() (nets []*structs.NetInterface, err error) {
 	cmd := exec.Command("/usr/bin/networkctl", "list", "--json=short")
 	output, err := cmd.Output()
 	if err != nil {
+		logging.Errorf("failed to get network interfaces: %v", err)
 		return nil, err
 	}
 
-	var rawInterfaces []RawNetInterface
-	if err := json.Unmarshal(output, &rawInterfaces); err != nil {
+	var networkList NetworkList
+	if err := json.Unmarshal(output, &networkList); err != nil {
+		logging.Errorf("failed to unmarshal network interfaces: %v", err)
+		logging.Debugf("output: %s", output)
 		return nil, err
 	}
 
-	dnsConfigs, _ := getDNSConfig()
+	rawInterfaces := networkList.Interfaces
 
 	for _, rawIntf := range rawInterfaces {
-		dnsConfig := &structs.DNSConfig{}
-		for _, dns := range dnsConfigs {
-			if dns.Interface == rawIntf.Name {
-				dnsConfig.DNSServers = dns.DNSServers
-				dnsConfig.SearchDomains = dns.SearchDomains
-				break
-			}
-		}
-
 		netIntf := &structs.NetInterface{
 			Name:       rawIntf.Name,
-			MAC:        rawIntf.MAC,
+			MAC:        net.HardwareAddr(rawIntf.MAC).String(),
 			State:      rawIntf.State,
 			IsLoopback: (rawIntf.Flags & 0x8) != 0, // check IFF_LOOPBACK
-			DNSConfig:  dnsConfig,
+		}
+
+		for _, dns := range rawIntf.DNS {
+			netIntf.DNSServers = append(netIntf.DNSServers, formatIPAddress(dns.Address))
+		}
+
+		for _, domain := range rawIntf.SearchDomains {
+			netIntf.SearchDomains = append(netIntf.SearchDomains, domain.Domain)
 		}
 
 		// Look for IPv4 address and mask
 		for _, addr := range rawIntf.Addresses {
 			if addr.Family == 2 { // IPv4
-				ip, _ := toCIDR(fmt.Sprintf("%d.%d.%d.%d", addr.Scope[0], addr.Scope[1], addr.Scope[2], addr.Scope[3]), parseMask(addr.Prefix))
+				ip := formatIPAddress(addr.Address) + "/" + strconv.Itoa(addr.PrefixLength)
 				netIntf.IPv4 = ip
+				if addr.ConfigSource == "DHCPv4" {
+					netIntf.DHCP = true
+				}
+
 				break
 			}
 		}
@@ -100,15 +106,15 @@ func GetAllNetInterfaces() (nets []*structs.NetInterface, err error) {
 		// Look for IPv6 address
 		for _, addr := range rawIntf.Addresses {
 			if addr.Family == 10 { // IPv6
-				netIntf.IPv6 = rawIntf.IPv6
+				netIntf.IPv6 = formatIPAddress(addr.Address) + "/" + strconv.Itoa(addr.PrefixLength)
 				break
 			}
 		}
 
 		// Look for default gateway
 		for _, route := range rawIntf.Routes {
-			if route.Type == "unicast" && route.Gateway != "" {
-				netIntf.Gateway = route.Gateway
+			if len(route.Gateway) > 0 {
+				netIntf.Gateway = formatIPAddress(route.Gateway)
 				break
 			}
 		}
@@ -119,67 +125,7 @@ func GetAllNetInterfaces() (nets []*structs.NetInterface, err error) {
 	return nets, nil
 }
 
-func getDNSConfig() ([]*RawDNSConfig, error) {
-	conn, err := dbus.SystemBus()
-	if err != nil {
-		return nil, err
-	}
-
-	var dnsConfigs []*RawDNSConfig
-
-	for i := 1; i <= 64; i++ {
-		linkPath := fmt.Sprintf("/org/freedesktop/resolve1/link/%d", i)
-		linkObj := conn.Object("org.freedesktop.resolve1", dbus.ObjectPath(linkPath))
-
-		var currentDNSServer RawDNSServer
-		err := linkObj.Call("org.freedesktop.DBus.Properties.Get", 0, "org.freedesktop.resolve1.Link", "CurrentDNSServer").Store(&currentDNSServer)
-		if err != nil {
-			continue
-		}
-
-		logging.Debugf("CurrentDNSServer for link %d: %v", i, currentDNSServer)
-
-		currentDNS := formatDNSAddress(currentDNSServer.Address)
-
-		var dnsServersProp []RawDNSServer
-		err = linkObj.Call("org.freedesktop.DBus.Properties.Get", 0, "org.freedesktop.resolve1.Link", "DNS").Store(&dnsServersProp)
-		if err != nil {
-			logging.Warnf("failed to get DNS servers for link %d: %v", i, err)
-			continue
-		}
-
-		logging.Debugf("DNS servers for link %d: %v", i, dnsServersProp)
-
-		dnsServers := parseDNSList(dnsServersProp)
-
-		var domainsArray []struct {
-			Domain string
-			Route  bool
-		}
-		err = linkObj.Call("org.freedesktop.DBus.Properties.Get", 0, "org.freedesktop.resolve1.Link", "Domains").Store(&domainsArray)
-		if err != nil {
-			logging.Warnf("failed to get search domains for link %d: %v", i, err)
-			continue
-		}
-
-		var searchDomains []string
-		for _, domain := range domainsArray {
-			searchDomains = append(searchDomains, domain.Domain)
-		}
-
-		ifname, _ := getInterfaceNameByIndex(i)
-		dnsConfigs = append(dnsConfigs, &RawDNSConfig{
-			Interface:        ifname,
-			CurrentDNSServer: currentDNS,
-			DNSServers:       dnsServers,
-			SearchDomains:    searchDomains,
-		})
-	}
-
-	return dnsConfigs, nil
-}
-
-func formatDNSAddress(address []byte) string {
+func formatIPAddress(address []byte) string {
 	if len(address) == 4 { // IPv4
 		return fmt.Sprintf("%d.%d.%d.%d", address[0], address[1], address[2], address[3])
 	} else if len(address) == 16 { // IPv6
@@ -196,56 +142,20 @@ func formatDNSAddress(address []byte) string {
 	return ""
 }
 
-func parseDNSList(value []RawDNSServer) []string {
-	var dnsServers []string
-
-	for _, entry := range value {
-		addr := formatDNSAddress(entry.Address)
-		if addr != "" {
-			dnsServers = append(dnsServers, addr)
-		}
-	}
-	return dnsServers
-}
-
-func getInterfaceNameByIndex(targetIndex int) (string, error) {
-	netPath := "/sys/class/net/"
-	interfaces, err := os.ReadDir(netPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read network interfaces: %v", err)
-	}
-
-	for _, iface := range interfaces {
-		indexPath := filepath.Join(netPath, iface.Name(), "ifindex")
-		indexBytes, err := os.ReadFile(indexPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to read ifindex for interface %s: %v", iface.Name(), err)
-		}
-
-		index, err := strconv.Atoi(strings.TrimSpace(string(indexBytes)))
-		if err != nil {
-			return "", fmt.Errorf("failed to convert index to int for interface %s: %v", iface.Name(), err)
-		}
-
-		if index == targetIndex {
-			return iface.Name(), nil
-		}
-	}
-
-	return "", fmt.Errorf("no interface found with index %d", targetIndex)
-}
-
 const (
 	sdNetConfDhcpTemplate = `[Match]
-Name={{ .InterfaceName }}
+Name={{ .Name }}
 
 [Network]
-{{- if .UseDHCP }}
+{{- if .DHCP }}
 DHCP=yes
 {{- else }}
-Address={{ .Address }}
+Address={{ .IPv4 }}
 Gateway={{ .Gateway }}
-{{- range .DNS }}
+{{- range .DNSServers }}
+DNS={{ . }}
+{{- end }}
+{{- range .SearchDomains }}
 DNS={{ . }}
 {{- end }}
 {{- end }}
@@ -271,8 +181,10 @@ func ConfigureNetInterface(intf string, config structs.NetInterface) error {
 		return err
 	}
 
+	config.Name = intf
+
 	//get network config file if already set for the interface
-	cmd := exec.Command("/usr/bin/networkctl", "status", intf, "--json")
+	cmd := exec.Command("/usr/bin/networkctl", "status", intf, "--json=pretty")
 	output, err := cmd.Output()
 	if err != nil {
 		return err
@@ -320,33 +232,4 @@ func ConfigureNetInterface(intf string, config structs.NetInterface) error {
 	}
 
 	return nil
-}
-
-func toCIDR(ipStr, maskStr string) (string, error) {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return "", fmt.Errorf("invalid ip : %s", ipStr)
-	}
-
-	mask := net.ParseIP(maskStr)
-	if mask == nil {
-		return "", fmt.Errorf("invalid mask : %s", maskStr)
-	}
-
-	ipMask := net.IPv4Mask(mask[12], mask[13], mask[14], mask[15])
-	prefixSize, _ := ipMask.Size()
-
-	return fmt.Sprintf("%s/%d", ipStr, prefixSize), nil
-}
-
-func fromCIDR(cidr string) (string, string, error) {
-	ip, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid CIDR : %s", cidr)
-	}
-
-	ipStr := ip.String()
-	mask := net.IP(ipNet.Mask).String()
-
-	return ipStr, mask, nil
 }
