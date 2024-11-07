@@ -43,3 +43,13 @@ if [ ! -L /etc/ola ]; then
     ln -s ${fs}/ola /etc/ola
     chown -R olad:olad /etc/ola ${fs}/ola
 fi
+
+#Fix missing /var/run from the old installer script
+if [ ! -L /var/run ] || [ "$(readlink /var/run)" != "/run" ]; then
+    if [ -d /var/run ]; then
+        mv /var/run/* /run/
+        rm -rf /var/run
+    fi
+
+    ln -s /run /var/run
+fi

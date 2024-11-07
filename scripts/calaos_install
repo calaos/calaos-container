@@ -350,6 +350,9 @@ arch-chroot ${dst} snapper --no-dbus -c root set-config "TIMELINE_LIMIT_WEEKLY=4
 arch-chroot ${dst} snapper --no-dbus -c root set-config "TIMELINE_LIMIT_MONTHLY=6"
 arch-chroot ${dst} snapper --no-dbus -c root set-config "TIMELINE_LIMIT_YEARLY=2"
 
+#Add link to /var/run -> /run
+arch-chroot ${dst} ln -s /run /var/run
+
 info "--> Unmouting all partitions"
 
 umount ${dst}/.snapshots
