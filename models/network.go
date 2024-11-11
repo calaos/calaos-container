@@ -156,7 +156,7 @@ Gateway={{ .Gateway }}
 DNS={{ . }}
 {{- end }}
 {{- range .SearchDomains }}
-DNS={{ . }}
+Domains={{ . }}
 {{- end }}
 {{- end }}
 `
