@@ -31,6 +31,7 @@ function calaosserver() {
 
 alias calaos_1wire='calaosserver /opt/bin/calaos_1wire'
 alias calaos_config='calaosserver /opt/bin/calaos_config'
+alias calaos_roon='calaosserver /opt/bin/calaos_roon'
 alias wago_test='calaosserver /opt/bin/wago_test'
 alias calaos_mail='calaosserver /opt/bin/calaos_mail'
 alias xinput_calibrator='podman exec -it -e DISPLAY=:0 calaos-home xinput_calibrator --output-filename /etc/X11/xorg.conf.d/99-calibration.conf'
