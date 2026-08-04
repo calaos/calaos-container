@@ -58,9 +58,8 @@ clean: ## Remove build related file
 	rm -f ./junit-report.xml checkstyle-report.xml ./coverage.xml ./profile.cov yamllint-checkstyle.xml
 
 ## Test:
-test: ## Run the tests of the project
-#	$(GOTEST) -v -race ./... $(OUTPUT_OPTIONS)
-	@echo test disabled
+test: build-lib ## Run the tests of the project
+	CGO_LDFLAGS="$(SERVER_LDFLAGS)" $(GOTEST) ./...
 
 coverage: ## Run the tests of the project and export the coverage
 	$(GOTEST) -cover -covermode=count -coverprofile=profile.cov ./...

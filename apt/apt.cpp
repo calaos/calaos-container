@@ -1,8 +1,10 @@
 #include "apt.h"
 #include "apt-cache-file.h"
 
+#include <cstdlib>
+#include <cstring>
+#include <string>
 #include <vector>
-#include <iostream>
 
 #include <apt-pkg/init.h>
 #include <apt-pkg/pkgsystem.h>
@@ -26,13 +28,21 @@ void aptInit()
 
     _config->CndSet("APT::Get::AutomaticRemove::Kernels",
                     _config->FindB("APT::Get::AutomaticRemove", true));
+
+    // Non-interactive dpkg: keep existing conffiles, never prompt
+    _config->Set("Dpkg::Options::", "--force-confdef");
+    _config->Set("Dpkg::Options::", "--force-confold");
+    _config->Set("DPkg::Use-Pty", "false"); // dpkg output -> stdout/journald
+
+    setenv("DEBIAN_FRONTEND", "noninteractive", 1);
+    setenv("APT_LISTCHANGES_FRONTEND", "none", 1);
+    setenv("LC_ALL", "C", 1); // reliable mapping of dpkg action strings
 }
 
 void *aptCacheGetArray()
 {
     auto cache = new AptCacheFile();
 
-    cout << "AptCacheFile Open()" << endl;
     if (cache->Open(true) == false)
     {
         //Unable to get lock
@@ -49,7 +59,6 @@ void *aptCacheGetArray()
     setenv("APT_LISTBUGS_FRONTEND", "none", true);
     */
 
-    cout << "AptCacheFile CheckDeps()" << endl;
     if (!cache->CheckDeps(false))
     {
         //System is in inconsistent state
@@ -58,7 +67,6 @@ void *aptCacheGetArray()
         return nullptr;
     }
 
-    cout << "AptCacheFile DistUpgrade()" << endl;
     if (!cache->DistUpgrade())
     {
         //Failed to get updates
@@ -69,7 +77,6 @@ void *aptCacheGetArray()
 
     PkgList *plist = new PkgList();
 
-    cout << "Listing pkgs" << endl;
     for (pkgCache::PkgIterator pkg = (*cache)->PkgBegin(); !pkg.end(); ++pkg)
     {
         const auto &state = (*cache)[pkg];
@@ -78,8 +85,6 @@ void *aptCacheGetArray()
         {
             string current = string(pkg.CurVersion() == 0 ? "none" : pkg.CurVersion());
             string newest = string(pkg.VersionList().end() ? "none" : pkg.VersionList().VerStr());
-
-            cout << "Append pkg " << pkg.Name() << endl;
 
             Pkg p{nullptr, nullptr, nullptr};
             p.name = strdup(pkg.Name());

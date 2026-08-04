@@ -13,7 +13,7 @@ Container/system management daemon for Calaos-OS (home automation). Go daemon ex
 
 ## Verification
 
-- There are no tests yet (`make test` is intentionally disabled). The bar for a change is: the full build passes. Add Go tests alongside new features/code when it makes sense for robustness.
+- The bar for a change is: the full build passes AND `make test` passes (`go test ./...`, needs the apt lib built first — the target depends on `build-lib`). CI runs `make test` as a gate before building/releasing the .deb. Add Go tests alongside new features/code when it makes sense for robustness.
 - Lint Go code with `CGO_LDFLAGS="-L./bin -lcalaos-apt" golangci-lint run` (build the apt lib first so typecheck works). Lint shell scripts with `shellcheck`. Both tools come from the devcontainer image; if missing, the container needs a rebuild.
 - Standard `gofmt` formatting applies (a PostToolUse hook in `.claude/settings.json` enforces it on edits).
 

@@ -29,6 +29,10 @@ func init() {
 // Init models
 func Init() (err error) {
 
+	// Initialize the shared upgrade status to "idle" so /api/update/status and
+	// the /api/events snapshot report a well-defined state before any upgrade.
+	resetStatus()
+
 	quitCheckUpdate = make(chan interface{})
 	go checkForUpdatesLoop()
 	wgDone.Add(1)

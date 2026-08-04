@@ -12,6 +12,8 @@ libcalaos_apt = shared_library(
     sources: [
         'apt.cpp',
         'apt-cache-file.cpp',
+        'apt-install.cpp',
+        'apt-progress.cpp',
     ],
     dependencies: [
         dependency('glib-2.0'),

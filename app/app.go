@@ -5,11 +5,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	fiberLog "github.com/gofiber/fiber/v2/middleware/logger"
 
 	"github.com/calaos/calaos-container/config"
+	"github.com/calaos/calaos-container/events"
 	logger "github.com/calaos/calaos-container/log"
 	"github.com/sirupsen/logrus"
 )
@@ -23,6 +25,10 @@ type AppServer struct {
 	wgDone        sync.WaitGroup
 
 	appFiber *fiber.App
+
+	// hub is the event bus streamed over GET /api/events. It defaults to the
+	// package-level events.Default hub; tests may override it.
+	hub *events.Hub
 }
 
 var logging *logrus.Entry
@@ -37,6 +43,7 @@ func NewApp() (a *AppServer, err error) {
 
 	a = &AppServer{
 		quitHeartbeat: make(chan interface{}),
+		hub:           events.Default,
 		appFiber: fiber.New(fiber.Config{
 			ServerHeader:          "Calaos Container (Linux)",
 			ReadTimeout:           time.Second * 20,
@@ -130,6 +137,17 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiUpdateStatus(c)
 	})
 
+	// Generic event bus over WebSocket. The global Bearer middleware already
+	// authenticated the HTTP upgrade request (header or ?token=). Reject plain
+	// GET requests that are not a WebSocket upgrade with 426.
+	api.Use("/events", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	api.Get("/events", websocket.New(a.apiEvents))
+
 	return
 }
 
@@ -150,6 +168,10 @@ func (a *AppServer) Start() {
 // Stop the app
 func (a *AppServer) Shutdown() {
 	close(a.quitHeartbeat)
-	a.appFiber.Shutdown()
+	// Close the event hub first: hijacked WebSocket connections are not
+	// closed by fiber's Shutdown, so closing the subscriber channels is what
+	// makes the WS handlers return.
+	a.hub.Close()
+	_ = a.appFiber.Shutdown()
 	a.wgDone.Wait()
 }

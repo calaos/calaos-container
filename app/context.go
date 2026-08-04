@@ -8,11 +8,15 @@ import (
 )
 
 const (
-	TOKEN_FILE = "/run/calaos/calaos-ct.token"
+	defaultTokenFile = "/run/calaos/calaos-ct.token"
 )
 
 var (
 	tokenStr string
+
+	// tokenFile is the path to the file holding the API token. It is a
+	// package variable so tests can point it at a temporary file.
+	tokenFile = defaultTokenFile
 )
 
 func NewTokenMiddleware() fiber.Handler {
@@ -28,12 +32,19 @@ func NewTokenMiddleware() fiber.Handler {
 				token = split[1]
 			}
 		}
+
+		// Browser WebSocket clients cannot set custom headers, so allow the
+		// token to be passed as a query parameter when the Authorization
+		// header is absent.
+		if token == "" {
+			token = c.Query("token")
+		}
 		c.Locals("token", token)
 
 		if tokenStr == "" {
-			content, err := os.ReadFile(TOKEN_FILE)
+			content, err := os.ReadFile(tokenFile)
 			if err != nil {
-				logging.Errorf("Error reading file %s: %s", TOKEN_FILE, err)
+				logging.Errorf("Error reading file %s: %s", tokenFile, err)
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 					"error": true,
 					"msg":   err.Error(),

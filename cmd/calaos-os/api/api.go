@@ -235,15 +235,33 @@ func (capi *CalaosApi) UpdateImages(token string) (imgs *structs.ImageMap, err e
 	return
 }
 
+// apiError converts a non-2xx daemon reply ({"error":true,"msg":"..."}) into
+// a Go error. makeHttpCall only fails on transport errors, so HTTP-level
+// failures (e.g. 500 "package not found") must be surfaced explicitly.
+func apiError(resp *http.Response, body []byte) error {
+	if resp == nil {
+		return fmt.Errorf("api error: no response")
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	var ar ApiResponse
+	if err := json.Unmarshal(body, &ar); err == nil && ar.Msg != "" {
+		return fmt.Errorf("%s", ar.Msg)
+	}
+	return fmt.Errorf("api error: %s", resp.Status)
+}
+
 // UpgradePackages upgrades all packages
 func (capi *CalaosApi) UpgradePackages(token string) (err error) {
 
-	_, _, err = capi.callWithToken("POST", "/api/update/upgrade-all", token, nil, nil)
+	resp, body, err := capi.callWithToken("POST", "/api/update/upgrade-all", token, nil, nil)
 	if err != nil {
 		return
 	}
 
-	return
+	return apiError(resp, body)
 }
 
 // UpdatePackage upgrades a single package
@@ -253,12 +271,12 @@ func (capi *CalaosApi) UpdatePackage(token string, pkg string) (err error) {
 		"package": []string{pkg},
 	}
 
-	_, _, err = capi.callWithToken("POST", "/api/update/upgrade", token, params, nil)
+	resp, body, err := capi.callWithToken("POST", "/api/update/upgrade", token, params, nil)
 	if err != nil {
 		return
 	}
 
-	return
+	return apiError(resp, body)
 }
 
 // UpgradeStatus returns the status of the upgrade

@@ -4,6 +4,8 @@ package main
 //It's main purpose is to start/manage updates from CLI
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/calaos/calaos-container/cmd/calaos-os/api"
+	"github.com/calaos/calaos-container/events"
 	"github.com/calaos/calaos-container/models/structs"
 
 	"github.com/fatih/color"
@@ -162,49 +165,133 @@ func cmdUpgrade(cmd *cli.Cmd) {
 			exit(err, 1)
 		}
 
-		if (*pkg) != "" {
-			err = a.UpdatePackage(token, *pkg)
-		} else {
-			err = a.UpgradePackages(token)
+		// Connect to the event bus BEFORE issuing the upgrade request: the
+		// POST is blocking on the daemon side and progress events can start
+		// flowing as soon as it starts, so we must be subscribed first.
+		conn, err := a.EventsWS(token)
+		if err != nil {
+			if errors.Is(err, api.ErrDaemonTooOld) {
+				exit(fmt.Errorf("le daemon calaos-container est trop ancien et ne supporte pas /api/events. Redémarrez le service (systemctl restart calaos-container) puis réessayez"), 1)
+			}
+			exit(err, 1)
 		}
+		defer func() { _ = conn.Close() }()
 
-		//get status from API and wait until it returns idle
+		// Run the (blocking) upgrade request in the background and collect
+		// its outcome via a channel.
+		postDone := make(chan error, 1)
+		go func() {
+			if (*pkg) != "" {
+				postDone <- a.UpdatePackage(token, *pkg)
+			} else {
+				postDone <- a.UpgradePackages(token)
+			}
+		}()
+
 		bar := progress.New(100)
 		bar.Format = progress.ProgressFormats[0]
 		bar.ShowNumeric = false
 		bar.ShowTextSuffix = true
 
+		// Decode incoming events in a dedicated goroutine so the main loop can
+		// also react to the POST outcome: an upgrade rejected before it starts
+		// (unknown package, upgrade already in progress...) never publishes any
+		// terminal event, and waiting on the WebSocket alone would hang.
+		stCh := make(chan structs.Status)
+		readErr := make(chan error, 1)
+		go func() {
+			first := true
+			for {
+				var ev api.Event
+				if err := conn.ReadJSON(&ev); err != nil {
+					readErr <- err
+					return
+				}
+
+				if ev.Type != events.EventUpgradeProgress {
+					// Ignore unknown event types (the bus is extensible).
+					continue
+				}
+
+				var st structs.Status
+				if err := json.Unmarshal(ev.Data, &st); err != nil {
+					continue
+				}
+
+				// The first event is the connection snapshot: it reflects the
+				// daemon state BEFORE our upgrade request was sent (possibly
+				// the stale terminal state of a previous upgrade), never ours.
+				if first {
+					first = false
+					continue
+				}
+
+				stCh <- st
+			}
+		}()
+
 		currentPkg := ""
+		var st structs.Status
+		var postErr error
+		postCh := postDone
+		var giveUp <-chan time.Time
 
+	readLoop:
 		for {
-			status, err := a.UpgradeStatus(token)
-			if err != nil {
-				exit(err, 1)
-			}
-			if status.Status == "idle" {
-				break
-			}
+			select {
+			case s := <-stCh:
+				// "idle" is the return-to-rest event (reset of a previous
+				// upgrade): nothing to render.
+				if s.Status == "idle" {
+					continue
+				}
+				st = s
 
-			if currentPkg != status.CurrentPkg {
-				bar.SetTextSuffix(fmt.Sprintf("\t %s %s installed", green(CharCheck), status.CurrentPkg))
-				bar.Set(100)
-				fmt.Println()
+				if currentPkg != st.CurrentPkg {
+					if currentPkg != "" {
+						bar.SetTextSuffix(fmt.Sprintf("\t %s %s installed", green(CharCheck), currentPkg))
+						bar.Set(100)
+						fmt.Println()
+					}
+					currentPkg = st.CurrentPkg
+				}
 
-				currentPkg = status.CurrentPkg
+				bar.SetTextSuffix(fmt.Sprintf("\t [%d/%d] %s (%s) %d%%", st.PkgIndex, st.PkgCount, st.CurrentPkg, st.CurrentStep, st.CurrentPercent))
+				bar.Set(st.TotalPercent)
+
+				switch st.Status {
+				case "done", "error":
+					break readLoop
+				}
+
+			case err := <-readErr:
+				exit(fmt.Errorf("connexion au daemon perdue: %v", err), 1)
+
+			case postErr = <-postCh:
+				// The upgrade request completed. If the upgrade actually ran,
+				// its terminal done/error event has already been published:
+				// leave a short grace period for it to arrive. If the upgrade
+				// was rejected before starting, no event will ever come.
+				postCh = nil
+				giveUp = time.After(3 * time.Second)
+
+			case <-giveUp:
+				break readLoop
 			}
-
-			bar.SetTextSuffix(fmt.Sprintf("\t Installing %s", status.CurrentPkg))
-			if status.ProgressTotal < 1 {
-				bar.Set(0)
-			} else {
-				bar.Set(status.Progress * 100 / status.ProgressTotal)
-			}
-
-			time.Sleep(500 * time.Millisecond)
 		}
 
-		if err != nil {
-			exit(err, 1)
+		_ = conn.Close()
+
+		if postCh != nil {
+			postErr = <-postDone
+		}
+
+		if st.Status == "error" {
+			exit(fmt.Errorf("%s", st.Error), 1)
+		}
+
+		if postErr != nil {
+			exit(postErr, 1)
 		}
 
 		fmt.Printf("%s Done.\n", green(CharCheck))

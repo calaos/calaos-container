@@ -31,3 +31,4 @@ debian/debhelper-build-stamp
 debian/files
 calaos-os.releases
 calaos-container.dev.toml
+/calaos-os
