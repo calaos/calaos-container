@@ -1,0 +1,6 @@
+version: "2"
+
+run:
+  timeout: 5m
+  # typecheck needs the CGO apt library; build it first (make build-lib)
+  # and run with: CGO_LDFLAGS="-L./bin -lcalaos-apt" golangci-lint run
