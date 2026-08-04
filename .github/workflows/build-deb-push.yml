@@ -27,7 +27,7 @@ jobs:
         with:
           image: ghcr.io/calaos/debian_deb_build_base
           options: -v ${{ github.workspace }}:/work
-          run: cd /work && make test
+          run: cd /work && apt-get update && apt-get build-dep -y . && make test
 
   build-and-push-deb-pkg:
     name: Build deb package and push to repositories
