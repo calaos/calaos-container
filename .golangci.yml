@@ -23,20 +23,17 @@ linters:
         path: "cmd/calaos-os/api/api\\.go"
         text: "resp\\.Body\\.Close"
       - linters: [errcheck]
-        path: "config/config\\.go"
-        text: "Config\\.Load"
-      - linters: [errcheck]
         path: "models/command\\.go"
         text: "(pipeWriter|log)\\.Close"
       - linters: [errcheck]
         path: "models/network\\.go"
         text: "file\\.Close"
-      - linters: [errcheck]
-        path: "models/update\\.go"
-        source: "checkForUpdates\\(\\)"
       - linters: [gosec]
         path: "app/context\\.go"
         text: "G101"
+      - linters: [gosec]
+        path: "models/network\\.go"
+        text: "G(204|304)"
       - linters: [gosec]
         path: "cmd/calaos-os/api/api\\.go"
         text: "G402"
@@ -46,18 +43,6 @@ linters:
       - linters: [gosec]
         path: "models/command\\.go"
         text: "G(104|204|304|306)"
-      - linters: [gosec]
-        path: "models/network\\.go"
-        text: "G(204|304)"
-      - linters: [gosec]
-        path: "config/config\\.go"
-        text: "G104"
-      - linters: [gosec]
-        path: "models/update\\.go"
-        text: "G104"
-      - linters: [staticcheck]
-        path: "config/config\\.go"
-        text: "QF1004"
       - linters: [staticcheck]
         path: "log/format\\.go"
         text: "ST1019"
