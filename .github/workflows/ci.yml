@@ -57,7 +57,7 @@ jobs:
         run: make test
 
   shellcheck:
-    name: shellcheck (non-blocking)
+    name: shellcheck
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -76,10 +76,9 @@ jobs:
           cat /tmp/shell_files.txt
 
       - name: shellcheck
-        # Non-blocking until CC-035 flips this to a hard gate. Vendored
-        # third-party scripts are excluded above, not via .shellcheckrc
-        # (shellcheck has no path-exclusion directive of its own).
-        continue-on-error: true
+        # Blocking gate since CC-035 (scripts cleaned by CC-030..034).
+        # Vendored third-party scripts are excluded above, not via
+        # .shellcheckrc (shellcheck has no path-exclusion directive).
         run: xargs -a /tmp/shell_files.txt shellcheck
 
   deb-build-dry-run:

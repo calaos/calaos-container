@@ -3,7 +3,7 @@
 - **Phase:** P3 (runs last in the phase)
 - **Priority:** P1
 - **Size:** S
-- **Status:** Backlog
+- **Status:** Done
 - **Depends on:** CC-031, CC-032, CC-033, CC-034 (all Calaos-owned scripts must be shellcheck-clean first)
 - **Blocks:** —
 - **Files owned (exclusive for this phase):**
