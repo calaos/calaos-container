@@ -66,30 +66,103 @@ var (
 	// running (nil when idle).
 	progressMu sync.Mutex
 	progressCb func(Progress)
+
+	// initErr records a failure of the one-shot C aptInit(). init() cannot
+	// return an error and aborting the whole daemon at package load would be
+	// worse, so the failure is kept here and returned by every entry point:
+	// nothing works if libapt-pkg could not be initialized, and the caller
+	// gets an explicit reason instead of an empty package list.
+	initErr error
 )
 
 func init() {
-	C.aptInit()
+	var cerr *C.char
+	if C.aptInit(&cerr) != 0 {
+		initErr = errors.New(cErrString(cerr, "apt initialization failed"))
+	} else {
+		freeCErr(cerr)
+	}
+
 	C.aptRegisterProgressBridge()
 }
 
-func GetCachePackages() (plist []*Pkg) {
-	arr := C.aptCacheGetArray()
+// cErrString converts an error message allocated by the C++ layer (strdup) to
+// a Go string AND frees it — the C ABI hands over ownership of that buffer.
+// fallback is used when C reported a failure without a message.
+func cErrString(cerr *C.char, fallback string) string {
+	if cerr == nil {
+		return fallback
+	}
+
+	s := C.GoString(cerr)
+	C.free(unsafe.Pointer(cerr))
+
+	if s == "" {
+		return fallback
+	}
+
+	return s
+}
+
+// freeCErr releases a C error buffer whose content is not needed. Success
+// paths must not leak a message the C layer may have set anyway.
+func freeCErr(cerr *C.char) {
+	if cerr != nil {
+		C.free(unsafe.Pointer(cerr))
+	}
+}
+
+// GetCachePackages returns the upgradable packages known to the local apt
+// cache (an empty slice when everything is up to date).
+//
+// It returns an error whenever the C++ layer could not produce a trustworthy
+// list — apt/dpkg lock held by another process, broken package state,
+// unsolvable dist-upgrade, libapt-pkg not initialized. Callers must not treat
+// a failure as "no updates available".
+//
+// It holds transactionMu because libapt-pkg's globals (_config, _error,
+// _system) and the dpkg/archives locks are shared with UpgradeAll and
+// InstallPackage: draining the global error stack cannot be allowed to race
+// with a transaction reporting its own failure. No progress callback ever
+// calls back into this function, so the lock cannot deadlock a transaction.
+func GetCachePackages() ([]*Pkg, error) {
+	transactionMu.Lock()
+	defer transactionMu.Unlock()
+
+	if initErr != nil {
+		return nil, initErr
+	}
+
+	var cerr *C.char
+
+	arr := C.aptCacheGetArray(&cerr)
+	if arr == nil {
+		return nil, errors.New(cErrString(cerr, "failed to read the apt cache"))
+	}
 	defer C.aptCacheArrayFree(arr)
 
-	for i := 0; i < int(C.aptCacheArrayCount(arr)); i++ {
-		p := (*C.Pkg)(C.aptCacheArrayGet(arr, C.int(i)))
+	// Success: no message expected, but never leak one.
+	freeCErr(cerr)
 
-		pkg := &Pkg{
+	count := int(C.aptCacheArrayCount(arr))
+	plist := make([]*Pkg, 0, count)
+
+	for i := 0; i < count; i++ {
+		p := (*C.Pkg)(C.aptCacheArrayGet(arr, C.int(i)))
+		if p == nil {
+			// Out of range: cannot happen for i < count, but the C accessor is
+			// allowed to say no and dereferencing nil here would panic.
+			continue
+		}
+
+		plist = append(plist, &Pkg{
 			Name:           C.GoString(p.name),
 			VersionCurrent: C.GoString(p.version_current),
 			VersionNew:     C.GoString(p.version_new),
-		}
-
-		plist = append(plist, pkg)
+		})
 	}
 
-	return
+	return plist, nil
 }
 
 // UpgradeAll runs a full dist-upgrade (download + install) of all upgradable
@@ -126,6 +199,10 @@ func runTransaction(cb func(Progress), call func(**C.char) C.int) error {
 	transactionMu.Lock()
 	defer transactionMu.Unlock()
 
+	if initErr != nil {
+		return initErr
+	}
+
 	progressMu.Lock()
 	progressCb = cb
 	progressMu.Unlock()
@@ -136,19 +213,64 @@ func runTransaction(cb func(Progress), call func(**C.char) C.int) error {
 	}()
 
 	var cerr *C.char
+
 	ret := call(&cerr)
-	if cerr != nil {
-		defer C.free(unsafe.Pointer(cerr))
+	if ret != 0 {
+		return errors.New(cErrString(cerr, "apt transaction failed"))
 	}
 
-	if ret != 0 {
-		if cerr != nil {
-			return errors.New(C.GoString(cerr))
-		}
-		return errors.New("apt transaction failed")
-	}
+	freeCErr(cerr)
 
 	return nil
+}
+
+// cacheArrayProbeForTest exercises the raw C accessors that GetCachePackages
+// never reaches: the NULL handle, and out-of-range indices on a real handle
+// (-1, count, count+1). It reports whether they all behaved (NULL result, no
+// crash) — before CC-020 the bounds check was `idx > size()`, so idx == count
+// called std::vector::at() out of range and threw std::out_of_range across the
+// cgo boundary, which is undefined behaviour.
+//
+// It lives here and not in apt_test.go because cgo is not available in Go test
+// files.
+func cacheArrayProbeForTest() (ok bool, count int, err error) {
+	// The NULL handle must be inert (count 0, no entry, free is a no-op).
+	if C.aptCacheArrayCount(nil) != 0 || C.aptCacheArrayGet(nil, 0) != nil {
+		return false, 0, nil
+	}
+	C.aptCacheArrayFree(nil)
+
+	transactionMu.Lock()
+	defer transactionMu.Unlock()
+
+	if initErr != nil {
+		return false, 0, initErr
+	}
+
+	var cerr *C.char
+
+	arr := C.aptCacheGetArray(&cerr)
+	if arr == nil {
+		return false, 0, errors.New(cErrString(cerr, "failed to read the apt cache"))
+	}
+	defer C.aptCacheArrayFree(arr)
+
+	freeCErr(cerr)
+
+	count = int(C.aptCacheArrayCount(arr))
+
+	for _, idx := range []int{-1, count, count + 1} {
+		if C.aptCacheArrayGet(arr, C.int(idx)) != nil {
+			return false, count, nil
+		}
+	}
+
+	// ... while the last valid index must still resolve.
+	if count > 0 && C.aptCacheArrayGet(arr, C.int(count-1)) == nil {
+		return false, count, nil
+	}
+
+	return true, count, nil
 }
 
 // emitProgressForTest drives the C emitter (aptEmitProgress) so that tests

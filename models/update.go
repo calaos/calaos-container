@@ -127,7 +127,8 @@ func setNewVersions(m structs.ImageMap) {
 // A failing `apt-get update` is reported to the caller (so GET /update/check
 // surfaces it) but the map is still rebuilt from the local apt cache: the cache
 // remains the best available truth, it simply may be stale with regard to the
-// remote indexes.
+// remote indexes. A failing cache read, on the other hand, leaves the known
+// versions untouched and is reported as an error.
 func refreshNewVersions() error {
 	logging.Infoln("Checking for updates")
 	logging.Infoln("Checking dpkg updates")
@@ -141,7 +142,22 @@ func refreshNewVersions() error {
 
 	versions := structs.ImageMap{}
 
-	pkgs := apt.GetCachePackages()
+	// A failing cache read leaves us without any trustworthy view of the
+	// available updates. Report it (so GET /update/check answers an error
+	// instead of "already up to date") and keep the previously known map: a
+	// transient apt/dpkg lock must not erase pending updates.
+	pkgs, cacheErr := apt.GetCachePackages()
+	if cacheErr != nil {
+		logging.Errorf("Failed to read the apt cache: %v", cacheErr)
+
+		err := fmt.Errorf("failed to read the apt cache: %w", cacheErr)
+		if aptErr != nil {
+			err = errors.Join(fmt.Errorf("apt-get update failed: %w", aptErr), err)
+		}
+
+		return err
+	}
+
 	for _, p := range pkgs {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 

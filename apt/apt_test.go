@@ -1,7 +1,12 @@
 package apt
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -65,7 +70,14 @@ func TestProgressBridgeNoCallback(t *testing.T) {
 // TestGetCachePackagesSmoke ensures listing upgradable packages through the
 // C++ layer does not crash and returns well-formed entries.
 func TestGetCachePackagesSmoke(t *testing.T) {
-	pkgs := GetCachePackages()
+	pkgs, err := GetCachePackages()
+	if err != nil {
+		// An environment without a usable apt state (no dpkg database, cache
+		// lock held, not root) legitimately fails here. That failure being
+		// reported at all is the point of CC-020; TestGetCachePackagesError
+		// covers the reporting itself.
+		t.Skipf("apt cache unavailable in this environment: %v", err)
+	}
 
 	for i, p := range pkgs {
 		if p == nil {
@@ -74,5 +86,72 @@ func TestGetCachePackagesSmoke(t *testing.T) {
 		if p.Name == "" {
 			t.Errorf("package %d has an empty name (%+v)", i, p)
 		}
+		if p.VersionNew == "" {
+			t.Errorf("package %d has an empty new version (%+v)", i, p)
+		}
 	}
+}
+
+// TestCacheArrayBounds checks the raw C accessors reject out-of-range indices
+// and tolerate a NULL handle (see cacheArrayProbeForTest).
+func TestCacheArrayBounds(t *testing.T) {
+	ok, count, err := cacheArrayProbeForTest()
+	if err != nil {
+		t.Skipf("apt cache unavailable in this environment: %v", err)
+	}
+	if !ok {
+		t.Fatalf("aptCacheArrayGet bounds check failed (count=%d)", count)
+	}
+}
+
+// TestGetCachePackagesError is the regression test for the core of CC-020: a
+// broken apt setup must surface as an error, never as an empty package list
+// (which callers would report as "already up to date").
+//
+// libapt reads APT_CONFIG once, when pkgInitConfig() runs in this package's
+// init(), so the broken configuration cannot be installed from inside the
+// running test binary: the test re-executes itself as a child with APT_CONFIG
+// pointing at a config tree that does not exist.
+func TestGetCachePackagesError(t *testing.T) {
+	if os.Getenv("CALAOS_APT_BROKEN_CHILD") == "1" {
+		pkgs, err := GetCachePackages()
+		if err == nil {
+			fmt.Printf("CHILD-UNEXPECTED-SUCCESS: %d packages\n", len(pkgs))
+			os.Exit(2)
+		}
+		if pkgs != nil {
+			fmt.Printf("CHILD-NON-NIL-LIST: %d packages\n", len(pkgs))
+			os.Exit(3)
+		}
+		fmt.Printf("CHILD-ERROR: %v\n", err)
+		os.Exit(0)
+	}
+
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "broken.conf")
+
+	// Point every apt directory at a path that cannot exist: opening the cache
+	// must fail, and the reason must reach the caller.
+	content := fmt.Sprintf("Dir %q;\nDir::State::status %q;\n",
+		filepath.Join(dir, "nonexistent")+"/",
+		filepath.Join(dir, "nonexistent", "status"))
+	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing apt config: %v", err)
+	}
+
+	// os.Args[0] is this very test binary, not external input.
+	//nolint:gosec // G204: re-executing the test binary is the point here.
+	cmd := exec.Command(os.Args[0], "-test.run=TestGetCachePackagesError", "-test.v")
+	cmd.Env = append(os.Environ(), "CALAOS_APT_BROKEN_CHILD=1", "APT_CONFIG="+cfg)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child did not report the broken apt setup as an error: %v\noutput:\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "CHILD-ERROR:") {
+		t.Fatalf("child output missing the propagated error:\n%s", out)
+	}
+
+	t.Logf("propagated error from the broken apt setup:\n%s", out)
 }

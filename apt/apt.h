@@ -11,10 +11,44 @@ typedef struct
     char *version_new;
 } Pkg;
 
-void aptInit();
-void *aptCacheGetArray();
+/* Error reporting convention of this ABI
+ * ---------------------------------------
+ * Every fallible entry point takes a `char **errorMsg` out-parameter. It is
+ * set to NULL on entry and, on failure only, to a strdup()ed message that the
+ * CALLER MUST free(). Messages are drained from libapt's global `_error` stack
+ * before the apt objects that produced them are destroyed (destroying an
+ * AptCacheFile discards that stack, see apt-cache-file.cpp).
+ *
+ * No function of this ABI ever lets a C++ exception escape: exceptions are
+ * caught at the boundary and turned into an error return, as unwinding through
+ * cgo is undefined behaviour.
+ */
+
+/* Initialize the libapt-pkg backend (configuration + system). Must be called
+ * once before any other function of this ABI.
+ * Returns 0 on success; non-zero on failure, with *errorMsg set. */
+int aptInit(char **errorMsg);
+
+/* Build the list of upgradable packages, as computed by a simulated
+ * dist-upgrade on the local cache.
+ *
+ * Returns an opaque non-NULL handle to be released with aptCacheArrayFree().
+ * On failure (cache lock held by another apt process, broken/inconsistent
+ * dpkg state, unsolvable dist-upgrade) returns NULL and sets *errorMsg. A NULL
+ * return is ALWAYS an error and never means "no upgradable package": an empty
+ * list is a valid non-NULL handle whose count is 0. */
+void *aptCacheGetArray(char **errorMsg);
+
+/* Number of entries in the handle returned by aptCacheGetArray (0 if NULL). */
 int aptCacheArrayCount(void *arr);
+
+/* Borrowed pointer to entry `idx`, or NULL if out of range. The entry (and the
+ * strings it holds) stays owned by the handle: it is valid until
+ * aptCacheArrayFree() and must not be freed individually. */
 Pkg *aptCacheArrayGet(void *arr, int idx);
+
+/* Release a handle from aptCacheGetArray and all the strings it owns.
+ * NULL-safe. */
 void aptCacheArrayFree(void *arr);
 
 /* Progress reporting for apt transactions (upgrade/install).

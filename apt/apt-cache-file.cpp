@@ -1,8 +1,7 @@
 #include "apt-cache-file.h"
 
-#include <iostream>
-
 #include <apt-pkg/algorithms.h>
+#include <apt-pkg/error.h>
 #include <apt-pkg/progress.h>
 #include <apt-pkg/upgrade.h>
 
@@ -28,7 +27,14 @@ void AptCacheFile::Close()
     pkgCacheFile::Close();
 
     // Discard all errors to avoid a future failure when opening
-    // the package cache
+    // the package cache: _error is a process-global stack and a leftover
+    // pending error makes every subsequent Open() fail, which matters for a
+    // long-lived daemon doing one check after another.
+    //
+    // ORDERING CONTRACT: this destroys the very messages describing why an
+    // operation failed. Callers that report errors across the C ABI must drain
+    // _error (setError() in apt.cpp, fail() in apt-install.cpp) BEFORE letting
+    // the AptCacheFile go out of scope.
     _error->Discard();
 }
 
