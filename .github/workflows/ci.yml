@@ -1,0 +1,104 @@
+name: PR CI
+
+# Pre-merge quality gate (CC-001). Runs on every PR and on push to main.
+# Distinct from build-deb-push.yml, which builds/publishes the release .deb
+# after a merge to main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  # Keep in sync with .devcontainer/Dockerfile / docker/Dockerfile.
+  GOLANGCI_LINT_VERSION: v2.12.2
+  CGO_LDFLAGS: -L./bin -lcalaos-apt
+
+jobs:
+  build-vet-lint-test:
+    name: Build, vet, lint, race tests
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/calaos/debian_deb_build_base
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        # Pulls libapt-pkg-dev, meson (and its ninja-build dep), pkg-config,
+        # libglib2.0-dev, etc. from debian/control Build-Depends. Go itself
+        # comes from the go.dev toolchain already baked into the image
+        # (ahead of Debian's golang-go on PATH).
+        run: |
+          apt-get update
+          apt-get build-dep -y .
+
+      - name: Build apt shared library
+        run: make build-lib
+
+      - name: Build server (cgo + libapt)
+        run: go build ./...
+
+      - name: Build calaos-os CLI
+        run: cd cmd/calaos-os && go build .
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Install golangci-lint
+        run: curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b /usr/local/bin "$GOLANGCI_LINT_VERSION"
+
+      - name: golangci-lint
+        run: golangci-lint run
+
+      - name: go test -race
+        run: make test
+
+  shellcheck:
+    name: shellcheck (non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Discover Calaos-owned shell scripts
+        id: discover
+        run: |
+          : > /tmp/shell_files.txt
+          git ls-files \
+            | grep -vE '^(scripts/genfstab|scripts/arch-chroot|grub-btrfs/|initramfs/)' \
+            | while read -r f; do
+                [ -f "$f" ] || continue
+                head -n1 "$f" | grep -qE '^#!.*(bash|\bsh\b|dash|ksh)' && echo "$f" >> /tmp/shell_files.txt
+              done
+          cat /tmp/shell_files.txt
+
+      - name: shellcheck
+        # Non-blocking until CC-035 flips this to a hard gate. Vendored
+        # third-party scripts are excluded above, not via .shellcheckrc
+        # (shellcheck has no path-exclusion directive of its own).
+        continue-on-error: true
+        run: xargs -a /tmp/shell_files.txt shellcheck
+
+  deb-build-dry-run:
+    name: Debian package dry-run build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/calaos/debian_deb_build_base
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: apt-get build-dep
+        run: |
+          apt-get update
+          apt-get build-dep -y .
+
+      - name: dpkg-buildpackage (unsigned, binary only)
+        run: dpkg-buildpackage -us -uc -b

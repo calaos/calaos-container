@@ -4,3 +4,72 @@ run:
   timeout: 5m
   # typecheck needs the CGO apt library; build it first (make build-lib)
   # and run with: CGO_LDFLAGS="-L./bin -lcalaos-apt" golangci-lint run
+
+# Curated set for CC-001: the "standard" default (errcheck, govet, ineffassign,
+# staticcheck, unused) plus gosec. Kept intentionally small so it's green on
+# main; broadening the set is tracked separately, not part of this ticket.
+linters:
+  default: standard
+  enable:
+    - gosec
+  exclusions:
+    rules:
+      # Pre-existing findings on main, predating CC-001. Fixing the
+      # underlying application code is out of scope for this ticket (CI
+      # pipeline only, see docs/backlog/CC-001-pr-ci-pipeline.md); grandfathered
+      # here so the lint gate is green without touching unrelated code. New
+      # issues in these files (different identifiers/lines) are still caught.
+      - linters: [errcheck]
+        path: "cmd/calaos-os/api/api\\.go"
+        text: "resp\\.Body\\.Close"
+      - linters: [errcheck]
+        path: "config/config\\.go"
+        text: "Config\\.Load"
+      - linters: [errcheck]
+        path: "models/command\\.go"
+        text: "(pipeWriter|log)\\.Close"
+      - linters: [errcheck]
+        path: "models/network\\.go"
+        text: "file\\.Close"
+      - linters: [errcheck]
+        path: "models/update\\.go"
+        source: "checkForUpdates\\(\\)"
+      - linters: [gosec]
+        path: "app/context\\.go"
+        text: "G101"
+      - linters: [gosec]
+        path: "cmd/calaos-os/api/api\\.go"
+        text: "G402"
+      - linters: [gosec]
+        path: "cmd/calaos-os/calaos-os\\.go"
+        text: "G101"
+      - linters: [gosec]
+        path: "models/command\\.go"
+        text: "G(104|204|304|306)"
+      - linters: [gosec]
+        path: "models/network\\.go"
+        text: "G(204|304)"
+      - linters: [gosec]
+        path: "config/config\\.go"
+        text: "G104"
+      - linters: [gosec]
+        path: "models/update\\.go"
+        text: "G104"
+      - linters: [staticcheck]
+        path: "config/config\\.go"
+        text: "QF1004"
+      - linters: [staticcheck]
+        path: "log/format\\.go"
+        text: "ST1019"
+      - linters: [staticcheck]
+        path: "models/system\\.go"
+        text: "QF1003"
+      - linters: [unused]
+        path: "cmd/calaos-os/api/api\\.go"
+        text: "call is unused"
+      - linters: [unused]
+        path: "cmd/calaos-os/calaos-os\\.go"
+        text: "var (blue|errorBgRed|bgCyan) is unused"
+      - linters: [unused]
+        path: "^main\\.go"
+        text: "var (blue|errorBgRed|green|cyan|bgCyan) is unused"

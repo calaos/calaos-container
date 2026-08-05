@@ -1,0 +1,11 @@
+# Shellcheck options shared by the CI shellcheck step (.github/workflows/ci.yml)
+# and local runs (`shellcheck scripts/*`).
+#
+# CC-001 scope note: shellcheck has no file-path-exclusion directive of its
+# own (only rule/severity options). Vendored third-party scripts
+# (scripts/genfstab, scripts/arch-chroot, grub-btrfs/**, initramfs/**) are
+# therefore excluded by the CI workflow's file-discovery step, not here.
+
+# Allow scripts to 'source' files that live next to them (e.g. scripts/*
+# sourcing a sibling helper) without requiring -x on the command line.
+source-path=SCRIPTDIR

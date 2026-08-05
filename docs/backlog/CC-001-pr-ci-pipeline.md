@@ -3,7 +3,7 @@
 - **Phase:** P0
 - **Priority:** P0
 - **Size:** M
-- **Status:** Backlog
+- **Status:** Done
 - **Depends on:** CC-002 (merge order only — develop in parallel, merge after, so the pipeline is green on main)
 - **Blocks:** CC-030, CC-034, CC-035, and effectively every later ticket (they all rely on the CI gate)
 - **Files owned (exclusive for this phase):**
@@ -55,4 +55,64 @@ None (additive; PRs now require a green pipeline).
 
 ## Verification notes
 
-_(filled by the implementing agent)_
+**Ticket text was stale at implementation time.** Pre-existing state (commits `93701d6`
+"CI: install build deps in test job" and `70bde9b`) already had: `*_test.go` files in
+`app/`, `apt/`, `models/`, `models/structs/`, `cmd/calaos-os/api/`; a working
+`make test` running `go test ./...` (not stubbed); and `build-deb-push.yml`'s `test`
+job already running `make test` inside `ghcr.io/calaos/debian_deb_build_base` — but
+only on `push` to `main`, i.e. post-merge, not a PR gate. A stub `.golangci.yml`
+already existed (no linters configured). `.shellcheckrc` and `.github/workflows/ci.yml`
+did not exist. Implemented only the gap: added `-race`, curated `.golangci.yml`,
+new `.shellcheckrc`, and the new PR-triggered `ci.yml`. `build-deb-push.yml` was not
+touched.
+
+**What was built:**
+- `.github/workflows/ci.yml` (new) — triggers on `pull_request` and `push` to `main`.
+  Three jobs: `build-vet-lint-test` (build apt lib, `go build ./...`, `cmd/calaos-os`
+  build, `go vet`, `golangci-lint run`, `make test`, all inside
+  `ghcr.io/calaos/debian_deb_build_base`), `shellcheck` (non-blocking,
+  `continue-on-error: true`, on ubuntu-latest), `deb-build-dry-run`
+  (`dpkg-buildpackage -us -uc -b` inside the same base image, blocking).
+- `.golangci.yml` — `linters.default: standard` (govet, staticcheck, errcheck,
+  unused, ineffassign) + `gosec` enabled, matching the ticket's curated set exactly.
+  29 pre-existing findings on main (6 errcheck, 13 gosec incl. 3 gosec/errcheck
+  overlap unmasked once errcheck was excluded on the same lines, 4 staticcheck,
+  9 unused) are grandfathered via `linters.exclusions.rules`, scoped per
+  (linter, file, specific message/source) — not blanket per-file suppression —
+  so new issues in those same files are still caught. Fixing the underlying
+  application code is out of scope for this ticket; narrowed the config instead,
+  per the ticket's own guidance.
+- `.shellcheckrc` (new) — shellcheck has no file-path-exclusion directive, so it
+  only sets `source-path=SCRIPTDIR`; the vendored-file exclusion
+  (`scripts/genfstab`, `scripts/arch-chroot`, `grub-btrfs/**`, `initramfs/**`) is
+  implemented in `ci.yml`'s file-discovery step instead (documented in both files).
+- `Makefile` `test` target — changed `$(GOTEST) ./...` to `$(GOTEST) -race ./...`.
+  Single Go module (one `go.mod` at repo root; `cmd/calaos-os` is a package in it,
+  not a separate module), so no second `cd cmd/calaos-os && go test` was needed.
+
+**Verification performed** (host lacks `libapt-pkg-dev`/`golangci-lint`/passwordless
+sudo, so verification ran inside a container from
+`ghcr.io/calaos/debian_deb_build_base:latest`, the same image `ci.yml` uses, with the
+repo bind-mounted — i.e. the actual CI environment, not an approximation):
+- `apt-get build-dep -y .` then `make build-lib` then `go build ./...` then
+  `(cd cmd/calaos-os && go build .)` — all pass.
+- `go vet ./...` — clean, 0 issues.
+- `CGO_LDFLAGS="-L./bin -lcalaos-apt" golangci-lint run` (v2.12.2, pinned to match
+  `.devcontainer/Dockerfile`) with the new `.golangci.yml` — `0 issues`.
+  `golangci-lint config verify` — passes (schema-valid).
+- `make test` — runs `CGO_LDFLAGS=... go test -race ./...`, all packages pass
+  (`app`, `apt`, `cmd/calaos-os/api`, `events`, `models`, `models/structs`).
+- `shellcheck` on the discovered file list (`.devcontainer/setup_veth.sh`,
+  `docker/build-deb.sh`, `env/calaos.sh`, and 7 files under `scripts/`, vendored
+  files excluded) — runs and reports findings (e.g. `scripts/calaos_install`
+  SC2046/SC1090), exit code 123 as expected for a non-blocking step; the excluded
+  vendored files (`scripts/genfstab`, `scripts/arch-chroot`, `grub-btrfs/grub-btrfsd`,
+  `initramfs/**`) are never passed to shellcheck, so they produce no annotations.
+- `dpkg-buildpackage -us -uc -b` (after `apt-get build-dep -y .`) — builds
+  `calaos-container_1.0.0-0~bookworm0_amd64.deb` successfully.
+- `.github/workflows/ci.yml` validated with `python3 -c "import yaml,sys;
+  yaml.safe_load(open(...))"` (valid) and with `actionlint` v1.7.12
+  (`go install github.com/rhysd/actionlint/cmd/actionlint@latest`) — 0 findings.
+- All build artifacts (`bin/`, `apt/build/`, `debian/calaos-container`, etc.)
+  cleaned up after verification; nothing left uncommitted beyond the intended
+  file changes.
