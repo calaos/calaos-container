@@ -26,6 +26,7 @@ Build and release plumbing is fragile and duplicated:
 - **debhelper compat 11** (`debian/compat`) while 13 is current.
 - Leftover `clean` targets remove report files no target produces (`Makefile:55-58`).
 - Possible new build flag from CC-020's apt ABI change — check that ticket's verification notes.
+- **Note (2026-08-05, usrmerge trap):** the debian build runs `dh_auto_install` → `make install` with an EMPTY `PREFIX`, so make-installed files ship at `/bin`, `/sbin`, `/lib` (usr-merge aliased paths). CC-030 initially shipped `calaos-common.sh` through BOTH `make install` (`/lib/calaos/`) and `debian/calaos-container.install` (`/usr/lib/calaos/`); on usr-merged bookworm these alias the same real file and dpkg fails the upgrade unpack (`unable to install new version of '/usr/lib/calaos/calaos-common.sh'`, seen on 1.7.1~dev.4). Fixed by removing the dh_install line — every file must ship via exactly ONE channel. When this ticket fixes `PREFIX` (canonical `/usr` paths), move ALL make-installed files in one coordinated change and test the dev.x → dev.y upgrade path, not just a fresh install.
 - **Note (2026-08-05, post CC-001):** `build-deb-push.yml` was already modified as a CC-001 follow-up: its `test` job was replaced by a `ci` job that calls `ci.yml` as a reusable workflow (`workflow_call`), and `build-and-push-deb-pkg` now has `needs: ci` so the release only runs when all CI gates are green. Preserve this gating when reworking the file; the `prerelease` fix at line ~64 is still pending here.
 
 ## Work items
