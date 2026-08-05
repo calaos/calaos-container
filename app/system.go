@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -258,7 +260,15 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	r, err := models.RunCommandReader("calaos_install", INSTALL_LOG_FILE, INSTALL_EXIT_CODE_FILE, n.Device)
+	// The installer is started detached: it writes its output to
+	// INSTALL_LOG_FILE and its exit status to INSTALL_EXIT_CODE_FILE on its
+	// own, and runs to completion whatever happens to this request.
+	proc, err := models.StartLoggedCommand(models.LoggedCommand{
+		Name:         "calaos_install",
+		Args:         []string{n.Device},
+		LogFile:      INSTALL_LOG_FILE,
+		ExitCodeFile: INSTALL_EXIT_CODE_FILE,
+	})
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -266,7 +276,49 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	return c.SendStream(r)
+	// Streaming is a read-only view on that log file. Capture what the tail
+	// needs *before* returning: the body stream writer runs after the handler
+	// is done, when the fiber/fasthttp context must no longer be touched.
+	// c.Context().Done() is a plain channel owned by the fasthttp server (it
+	// is closed on server shutdown, not on client disconnect), so it is safe
+	// to keep; a disconnected client is detected by the write to w failing.
+	serverDone := c.Context().Done()
+	installDone := proc.Done()
+
+	c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		ctx, cancel := contextFromDone(serverDone)
+		defer cancel()
+
+		// Whatever ends the tail — client gone, server shutting down, install
+		// finished — only this stream is affected, never the installer.
+		if terr := models.TailFile(ctx, INSTALL_LOG_FILE, w, models.TailOptions{Until: installDone}); terr != nil {
+			logging.Debugf("install stream for pid %d ended: %v", proc.Pid(), terr)
+		}
+	})
+
+	return nil
+}
+
+// contextFromDone adapts a bare done channel to a context.Context, so a
+// cancellation signal that is not already a context (fasthttp's
+// RequestCtx.Done()) can bound context-aware helpers. The returned cancel
+// function must be called to release the watching goroutine.
+func contextFromDone(done <-chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if done == nil {
+		return ctx, cancel
+	}
+
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	return ctx, cancel
 }
 
 func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
