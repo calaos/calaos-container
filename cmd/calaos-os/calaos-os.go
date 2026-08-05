@@ -279,6 +279,13 @@ func cmdUpgrade(cmd *cli.Cmd) {
 		// not hang forever waiting on the WebSocket.
 		overallDeadline := time.After(upgradeOverallTimeout)
 
+		// clearBarLine erases the live progress-bar line so permanent
+		// output (package-done lines, errors) never lands after the bar's
+		// space padding. The bar library itself only ever repaints over
+		// the current line with \r and cannot print at 100% (Set(total)
+		// clears instead of painting), so all permanent lines are ours.
+		clearBarLine := func() { fmt.Print("\r\x1b[2K") }
+
 	readLoop:
 		for {
 			select {
@@ -290,16 +297,19 @@ func cmdUpgrade(cmd *cli.Cmd) {
 				}
 				st = s
 
-				if currentPkg != st.CurrentPkg {
-					if currentPkg != "" {
-						bar.SetTextSuffix(fmt.Sprintf("\t %s %s installed", green(CharCheck), currentPkg))
-						bar.Set(100)
-						fmt.Println()
+				// Global phases (download, cache rebuild...) publish
+				// events with an empty CurrentPkg: they only move the
+				// total bar and must not be treated as a package
+				// transition, or each one would flush a bogus
+				// "installed" line.
+				if st.CurrentPkg != "" {
+					if currentPkg != "" && currentPkg != st.CurrentPkg {
+						clearBarLine()
+						fmt.Printf("%s %s installed\n", green(CharCheck), currentPkg)
 					}
 					currentPkg = st.CurrentPkg
+					bar.SetTextSuffix(fmt.Sprintf("  [%d/%d] %s (%s) %d%%", st.PkgIndex, st.PkgCount, st.CurrentPkg, st.CurrentStep, st.CurrentPercent))
 				}
-
-				bar.SetTextSuffix(fmt.Sprintf("\t [%d/%d] %s (%s) %d%%", st.PkgIndex, st.PkgCount, st.CurrentPkg, st.CurrentStep, st.CurrentPercent))
 				bar.Set(st.TotalPercent)
 
 				switch st.Status {
@@ -308,6 +318,7 @@ func cmdUpgrade(cmd *cli.Cmd) {
 				}
 
 			case err := <-readErr:
+				clearBarLine()
 				exit(fmt.Errorf("connexion au daemon perdue: %w", err), ExitNetwork)
 
 			case postErr = <-postCh:
@@ -330,6 +341,7 @@ func cmdUpgrade(cmd *cli.Cmd) {
 				break readLoop
 
 			case <-overallDeadline:
+				clearBarLine()
 				exit(fmt.Errorf("upgrade timed out after %s waiting for the daemon", upgradeOverallTimeout), ExitNetwork)
 			}
 		}
@@ -340,6 +352,10 @@ func cmdUpgrade(cmd *cli.Cmd) {
 			postErr = <-postDone
 		}
 
+		// Leave the bar line before printing any permanent outcome; a
+		// no-op if the bar never painted (e.g. rejected upgrade).
+		clearBarLine()
+
 		if st.Status == "error" {
 			exit(fmt.Errorf("%s", st.Error), ExitServer)
 		}
@@ -348,6 +364,9 @@ func cmdUpgrade(cmd *cli.Cmd) {
 			exitAPIErr(postErr)
 		}
 
+		if currentPkg != "" {
+			fmt.Printf("%s %s installed\n", green(CharCheck), currentPkg)
+		}
 		fmt.Printf("%s Done.\n", green(CharCheck))
 	}
 }
