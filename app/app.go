@@ -125,6 +125,11 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiUpdateImages(c)
 	})
 
+	//List installed calaos-* packages
+	api.Get("/update/installed", func(c *fiber.Ctx) error {
+		return a.apiUpdateInstalled(c)
+	})
+
 	api.Post("/update/upgrade-all", func(c *fiber.Ctx) error {
 		return a.apiUpdateUpgradeAll(c)
 	})

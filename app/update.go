@@ -36,6 +36,18 @@ func (a *AppServer) apiUpdateImages(c *fiber.Ctx) (err error) {
 	return c.Status(fiber.StatusOK).JSON(m)
 }
 
+func (a *AppServer) apiUpdateInstalled(c *fiber.Ctx) (err error) {
+	m, err := models.GetInstalledCalaosPackages()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": true,
+			"msg":   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(m)
+}
+
 func (a *AppServer) apiUpdateUpgradeAll(c *fiber.Ctx) (err error) {
 
 	err = models.UpgradeAll()
