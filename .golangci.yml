@@ -23,9 +23,6 @@ linters:
         path: "cmd/calaos-os/api/api\\.go"
         text: "resp\\.Body\\.Close"
       - linters: [errcheck]
-        path: "models/command\\.go"
-        text: "(pipeWriter|log)\\.Close"
-      - linters: [errcheck]
         path: "models/network\\.go"
         text: "file\\.Close"
       - linters: [gosec]
@@ -40,9 +37,6 @@ linters:
       - linters: [gosec]
         path: "cmd/calaos-os/calaos-os\\.go"
         text: "G101"
-      - linters: [gosec]
-        path: "models/command\\.go"
-        text: "G(104|204|304|306)"
       - linters: [staticcheck]
         path: "log/format\\.go"
         text: "ST1019"
