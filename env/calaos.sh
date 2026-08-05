@@ -16,7 +16,7 @@ function calaosserver() {
     #check if calaos-server container is running
     if podman ps | grep calaos-server > /dev/null
     then
-        podman exec -it calaos-server ${cmd} "$@"
+        podman exec -it calaos-server "${cmd}" "$@"
     else
         #if not, we need run the container using calaos_1wire instead of calaos_server
         local img
@@ -25,7 +25,7 @@ function calaosserver() {
             -v /mnt/calaos/config:/root/.config/calaos \
             -v /run/calaos:/run/calaos \
             --privileged -v /dev/bus/usb:/dev/bus/usb \
-            --entrypoint ${cmd} "$img" "$@"
+            --entrypoint "${cmd}" "$img" "$@"
     fi
 }
 
