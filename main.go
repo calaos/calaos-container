@@ -23,6 +23,16 @@ const (
 	CharAbort = "✘"
 )
 
+// Exit codes, one per failure class so an operator (or `systemctl status`) can
+// tell what went wrong without digging through the logs.
+const (
+	exitUsage      = 1 // invalid command line
+	exitConfig     = 2 // config file missing, unparsable or invalid
+	exitAppInit    = 3 // app.NewApp() failed
+	exitModelsInit = 4 // models.Init() failed
+	exitRuntime    = 5 // the HTTP listener failed while running
+)
+
 var (
 	errorRed = color.New(color.FgRed).SprintFunc()
 
@@ -31,19 +41,40 @@ var (
 	myApp *app.AppServer
 )
 
-func exit(err error, exit int) {
-	logging.Fatalln(errorRed(CharAbort), err)
-	cli.Exit(exit)
+// exit logs err and terminates the process with the given code. It never
+// returns.
+//
+// cli.Exit panics with an exit code that mow.cli's flow recovers and turns
+// into os.Exit(code), so this must only be called from within the cli action.
+// Logging must not use Fatal*: logrus would os.Exit(1) itself and the
+// requested code would never make it out.
+func exit(err error, code int) {
+	logging.Errorln(errorRed(CharAbort), err)
+	cli.Exit(code)
 }
 
-func handleSignals() {
+// handleSignals blocks until the daemon is asked to stop (SIGINT/SIGTERM) or
+// the HTTP listener fails, then shuts everything down cleanly. The listener
+// error, if any, is returned so the caller can pick the exit code.
+func handleSignals(listenErr <-chan error) error {
 	sigint := make(chan os.Signal, 1)
 	signal.Notify(sigint, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-	<-sigint
+	defer signal.Stop(sigint)
 
-	logging.Println("Shuting down...")
+	var err error
+
+	select {
+	case sig := <-sigint:
+		logging.Println("Received signal", sig, "- shutting down...")
+	case err = <-listenErr:
+		// A closed channel yields a nil error: the server stopped on its own
+		// without failing, shut the rest down as well.
+	}
+
 	myApp.Shutdown()
 	models.Shutdown()
+
+	return err
 }
 
 func main() {
@@ -62,23 +93,26 @@ func main() {
 		var err error
 
 		if err = config.InitConfig(conffile); err != nil {
-			exit(err, 1)
+			exit(err, exitConfig)
 		}
 
 		if myApp, err = app.NewApp(); err != nil {
-			exit(err, 1)
+			exit(err, exitAppInit)
 		}
 
 		if err = models.Init(); err != nil {
-			exit(err, 1)
+			exit(err, exitModelsInit)
 		}
 
-		myApp.Start()
-
-		handleSignals()
+		if err = handleSignals(myApp.Start()); err != nil {
+			exit(err, exitRuntime)
+		}
 	}
 
 	if err := a.Run(os.Args); err != nil {
-		exit(err, 1)
+		// Outside of the cli action the panic thrown by cli.Exit would not be
+		// recovered by mow.cli, so exit directly here.
+		logging.Errorln(errorRed(CharAbort), err)
+		os.Exit(exitUsage)
 	}
 }

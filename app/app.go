@@ -1,7 +1,11 @@
 package app
 
 import (
+	"fmt"
+	"net"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +21,21 @@ import (
 )
 
 const (
-	maxFileSize = 1 * 1024 * 1024 * 1024
+	// maxBodySize caps the size of a request body. No endpoint takes a large
+	// upload (the installer streams data *out*, not in), so 1 MiB is plenty
+	// and keeps a single request from forcing a huge allocation.
+	maxBodySize = 1 * 1024 * 1024
+
+	// readTimeout is the deadline for reading a full request.
+	readTimeout = 20 * time.Second
+
+	// idleTimeout closes keep-alive connections that sit idle between
+	// requests. Hijacked WebSocket connections (/api/events) are not affected.
+	idleTimeout = 75 * time.Second
+
+	// defaultAddr mirrors the config default and is only used as a fallback
+	// when deriving the CORS origins.
+	defaultAddr = "127.0.0.1"
 )
 
 type AppServer struct {
@@ -40,15 +58,26 @@ func init() {
 func NewApp() (a *AppServer, err error) {
 	logging.Infoln("Init server")
 
+	// Derived before anything else: the cors middleware panics on a malformed
+	// origin, so a bad address/override must fail here as a plain error.
+	allowOrigins, err := corsAllowOrigins(
+		config.Config.String("general.address"),
+		config.Config.Int("general.port"),
+		config.Config.String("general.cors_origins"))
+	if err != nil {
+		return nil, err
+	}
+
 	a = &AppServer{
 		hub: events.Default,
 		appFiber: fiber.New(fiber.Config{
 			ServerHeader:          "Calaos Container (Linux)",
-			ReadTimeout:           time.Second * 20,
+			ReadTimeout:           readTimeout,
+			IdleTimeout:           idleTimeout,
 			AppName:               "Calaos Container",
 			DisableStartupMessage: true,
 			EnablePrintRoutes:     false,
-			BodyLimit:             maxFileSize,
+			BodyLimit:             maxBodySize,
 		}),
 	}
 
@@ -57,7 +86,7 @@ func NewApp() (a *AppServer, err error) {
 		Use(NewTokenMiddleware())
 
 	a.appFiber.Use(cors.New(cors.Config{
-		AllowOrigins: "http://127.0.0.1",
+		AllowOrigins: allowOrigins,
 	}))
 
 	a.appFiber.Hooks().OnShutdown(func() error {
@@ -149,18 +178,103 @@ func NewApp() (a *AppServer, err error) {
 	return
 }
 
-// Run the app
-func (a *AppServer) Start() {
-	addr := config.Config.String("general.address") + ":" + strconv.Itoa(config.Config.Int("general.port"))
+// Start runs the HTTP server in a background goroutine.
+//
+// It returns a channel reporting a listener failure to the caller: the error
+// must be handled by the main goroutine (which can still run Shutdown) instead
+// of killing the process from the goroutine. The channel is closed when the
+// server stops, so a clean Shutdown yields a nil error.
+func (a *AppServer) Start() <-chan error {
+	addr := net.JoinHostPort(
+		config.Config.String("general.address"),
+		strconv.Itoa(config.Config.Int("general.port")))
 
 	logging.Infoln("\u21D2 Server listening on", addr)
 
+	a.wgDone.Add(1)
+
+	listenErr := make(chan error, 1)
 	go func() {
+		defer close(listenErr)
 		if err := a.appFiber.Listen(addr); err != nil {
-			logging.Fatalf("Failed to listen http server: %v", err)
+			listenErr <- fmt.Errorf("http server failed to listen on %s: %w", addr, err)
 		}
 	}()
-	a.wgDone.Add(1)
+
+	return listenErr
+}
+
+// corsAllowOrigins builds the CORS allow-list for the API.
+//
+// override (general.cors_origins) wins when set, so a UI served from another
+// host can be allowed explicitly. Otherwise the list is derived from the
+// address the daemon listens on: both the bare origin (a UI served on port 80)
+// and the API origin itself, instead of a hardcoded literal that silently
+// diverges from general.address.
+func corsAllowOrigins(addr string, port int, override string) (string, error) {
+	origins := strings.TrimSpace(override)
+
+	if origins == "" {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			// Config validation rejects an empty address; this only keeps a
+			// caller that skipped it (tests) from producing a bogus origin.
+			addr = defaultAddr
+		}
+
+		origins = httpOrigin(addr, "")
+		if port > 0 && port <= 65535 {
+			origins += "," + httpOrigin(addr, strconv.Itoa(port))
+		}
+	}
+
+	if err := validateOrigins(origins); err != nil {
+		return "", err
+	}
+
+	return origins, nil
+}
+
+// httpOrigin formats host (and optional port) as an http:// origin, bracketing
+// IPv6 literals.
+func httpOrigin(host, port string) string {
+	if port != "" {
+		return "http://" + net.JoinHostPort(host, port)
+	}
+	if strings.Contains(host, ":") {
+		return "http://[" + host + "]"
+	}
+	return "http://" + host
+}
+
+// validateOrigins applies the same checks as fiber's cors middleware, which
+// panics on a malformed origin. Failing here turns an operator typo into a
+// startup error instead of a panic.
+func validateOrigins(origins string) error {
+	if origins == "*" {
+		return nil
+	}
+
+	for _, origin := range strings.Split(origins, ",") {
+		o := strings.TrimSpace(origin)
+
+		// The middleware supports a "scheme://*.domain" subdomain wildcard;
+		// drop the "*" the same way it does before validating.
+		if i := strings.Index(o, "://*."); i != -1 {
+			o = strings.TrimSpace(o[:i+3] + o[i+4:])
+		}
+
+		u, err := url.Parse(o)
+		if err != nil {
+			return fmt.Errorf("invalid CORS origin %q: %w", origin, err)
+		}
+		if u.Scheme == "" || u.Host == "" || strings.Contains(u.Host, "*") ||
+			(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("invalid CORS origin %q: expected scheme://host", origin)
+		}
+	}
+
+	return nil
 }
 
 // Stop the app
