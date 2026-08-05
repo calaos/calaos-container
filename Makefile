@@ -73,6 +73,7 @@ apt-install:
 install: install-lib ## Install the binaries
 	install -Dm755 bin/$(BINARY_NAME) $(DESTDIR)$(PREFIX)/bin/$(BINARY_NAME)
 	install -Dm755 bin/$(BINARY_NAME_TOOL) $(DESTDIR)$(PREFIX)/bin/$(BINARY_NAME_TOOL)
+	install -Dm644 scripts/lib/calaos-common.sh $(DESTDIR)$(PREFIX)/lib/calaos/calaos-common.sh
 	install -Dm755 scripts/calaos_install $(DESTDIR)$(PREFIX)/sbin/calaos_install
 	install -Dm755 scripts/calaos_rollback $(DESTDIR)$(PREFIX)/sbin/calaos_rollback
 	install -Dm755 scripts/init_calaosfs $(DESTDIR)$(PREFIX)/sbin/init_calaosfs

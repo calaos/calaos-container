@@ -1,4 +1,5 @@
 calaos-container.toml etc
+scripts/lib/calaos-common.sh usr/lib/calaos
 env/calaos.sh etc/profile.d
 initramfs/hooks/grub-btrfs-overlay usr/share/initramfs-tools/hooks/grub-btrfs-overlay
 initramfs/scripts/local-bottom/grub-btrfs-overlay usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay
