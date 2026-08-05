@@ -16,23 +16,14 @@ on:
           - patch
 
 jobs:
-  test:
-    name: Run unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout the repo
-        uses: actions/checkout@v4
-      - name: Run tests
-        uses: addnab/docker-run-action@v3
-        with:
-          image: ghcr.io/calaos/debian_deb_build_base
-          options: -v ${{ github.workspace }}:/work
-          run: cd /work && apt-get update && apt-get build-dep -y . && make test
+  ci:
+    name: CI quality gate
+    uses: ./.github/workflows/ci.yml
 
   build-and-push-deb-pkg:
     name: Build deb package and push to repositories
     runs-on: ubuntu-latest
-    needs: test
+    needs: ci
 
     steps:
       - name: Checkout the repo

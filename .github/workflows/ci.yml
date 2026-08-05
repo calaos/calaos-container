@@ -1,13 +1,12 @@
 name: PR CI
 
-# Pre-merge quality gate (CC-001). Runs on every PR and on push to main.
-# Distinct from build-deb-push.yml, which builds/publishes the release .deb
-# after a merge to main.
+# Pre-merge quality gate (CC-001). Runs standalone on every PR, and is
+# called as a reusable workflow by build-deb-push.yml on push to main so
+# the release .deb is only built/published when all gates are green.
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_call:
 
 env:
   # Keep in sync with .devcontainer/Dockerfile / docker/Dockerfile.

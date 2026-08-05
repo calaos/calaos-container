@@ -26,6 +26,7 @@ Build and release plumbing is fragile and duplicated:
 - **debhelper compat 11** (`debian/compat`) while 13 is current.
 - Leftover `clean` targets remove report files no target produces (`Makefile:55-58`).
 - Possible new build flag from CC-020's apt ABI change — check that ticket's verification notes.
+- **Note (2026-08-05, post CC-001):** `build-deb-push.yml` was already modified as a CC-001 follow-up: its `test` job was replaced by a `ci` job that calls `ci.yml` as a reusable workflow (`workflow_call`), and `build-and-push-deb-pkg` now has `needs: ci` so the release only runs when all CI gates are green. Preserve this gating when reworking the file; the `prerelease` fix at line ~64 is still pending here.
 
 ## Work items
 
