@@ -76,18 +76,13 @@ func refreshNewVersions() error {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
 		NewVersions[p.Name] = structs.Image{
-			Name:          p.Name,
-			Version:       p.VersionNew,
-			CurrentVerion: p.VersionCurrent,
+			Name:           p.Name,
+			Version:        p.VersionNew,
+			CurrentVersion: p.VersionCurrent,
 		}
 	}
 
 	return nil
-}
-
-func LoadFromDisk(filePath string) (structs.ImageMap, error) {
-	imageMap := make(structs.ImageMap)
-	return imageMap, nil
 }
 
 type MultiError struct {

@@ -32,3 +32,4 @@ debian/files
 calaos-os.releases
 calaos-container.dev.toml
 /calaos-os
+/cmd/calaos-os/calaos-os

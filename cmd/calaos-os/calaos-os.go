@@ -23,23 +23,17 @@ import (
 )
 
 const (
-	CharStar     = "\u2737"
-	CharAbort    = "\u2718"
-	CharCheck    = "\u2714"
-	CharWarning  = "\u26A0"
-	CharArrow    = "\u2012\u25b6"
-	CharVertLine = "\u2502"
+	CharAbort = "✘"
+	CharCheck = "✔"
+	CharArrow = "‒▶"
 
 	TOKEN_FILE = "/run/calaos/calaos-ct.token"
 )
 
 var (
-	blue       = color.New(color.FgBlue).SprintFunc()
-	errorRed   = color.New(color.FgRed).SprintFunc()
-	errorBgRed = color.New(color.BgRed, color.FgBlack).SprintFunc()
-	green      = color.New(color.FgGreen).SprintFunc()
-	cyan       = color.New(color.FgCyan).SprintFunc()
-	bgCyan     = color.New(color.FgWhite).SprintFunc()
+	errorRed = color.New(color.FgRed).SprintFunc()
+	green    = color.New(color.FgGreen).SprintFunc()
+	cyan     = color.New(color.FgCyan).SprintFunc()
 )
 
 func exit(err error, exit int) {
@@ -86,18 +80,24 @@ func cmdList(cmd *cli.Cmd) {
 			exit(err, 1)
 		}
 
-		imgs, err := a.UpdateImages(token)
+		imgs, err := a.UpdateAvailable(token)
 		if err != nil {
 			exit(err, 1)
 		}
 
+		if len(*imgs) == 0 {
+			fmt.Printf("%s No updates available.\n", green(CharCheck))
+			return
+		}
+
 		t := table.NewWriter()
 		t.SetOutputMirror(os.Stdout)
-		t.AppendHeader(table.Row{"Image", "Version", "Source"})
+		t.AppendHeader(table.Row{"Image", "Current version", "New version"})
 
 		for _, e := range *imgs {
 			t.AppendRow(table.Row{
 				e.Name,
+				e.CurrentVersion,
 				e.Version,
 			})
 		}
@@ -137,7 +137,7 @@ func cmdCheck(cmd *cli.Cmd) {
 		for _, e := range *imgs {
 			t.AppendRow(table.Row{
 				e.Name,
-				e.CurrentVerion,
+				e.CurrentVersion,
 				e.Version,
 			})
 		}

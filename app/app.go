@@ -21,8 +21,7 @@ const (
 )
 
 type AppServer struct {
-	quitHeartbeat chan interface{}
-	wgDone        sync.WaitGroup
+	wgDone sync.WaitGroup
 
 	appFiber *fiber.App
 
@@ -42,8 +41,7 @@ func NewApp() (a *AppServer, err error) {
 	logging.Infoln("Init server")
 
 	a = &AppServer{
-		quitHeartbeat: make(chan interface{}),
-		hub:           events.Default,
+		hub: events.Default,
 		appFiber: fiber.New(fiber.Config{
 			ServerHeader:          "Calaos Container (Linux)",
 			ReadTimeout:           time.Second * 20,
@@ -120,11 +118,6 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiUpdateAvail(c)
 	})
 
-	//Get currently installed images
-	api.Get("/update/images", func(c *fiber.Ctx) error {
-		return a.apiUpdateImages(c)
-	})
-
 	//List installed calaos-* packages
 	api.Get("/update/installed", func(c *fiber.Ctx) error {
 		return a.apiUpdateInstalled(c)
@@ -172,7 +165,6 @@ func (a *AppServer) Start() {
 
 // Stop the app
 func (a *AppServer) Shutdown() {
-	close(a.quitHeartbeat)
 	// Close the event hub first: hijacked WebSocket connections are not
 	// closed by fiber's Shutdown, so closing the subscriber channels is what
 	// makes the WS handlers return.

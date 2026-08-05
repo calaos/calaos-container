@@ -20,21 +20,11 @@ import (
 const (
 	DefaultConfigFilename = "/etc/calaos-container.toml"
 
-	CharStar     = "\u2737"
-	CharAbort    = "\u2718"
-	CharCheck    = "\u2714"
-	CharWarning  = "\u26A0"
-	CharArrow    = "\u2012\u25b6"
-	CharVertLine = "\u2502"
+	CharAbort = "✘"
 )
 
 var (
-	blue       = color.New(color.FgBlue).SprintFunc()
-	errorRed   = color.New(color.FgRed).SprintFunc()
-	errorBgRed = color.New(color.BgRed, color.FgBlack).SprintFunc()
-	green      = color.New(color.FgGreen).SprintFunc()
-	cyan       = color.New(color.FgCyan).SprintFunc()
-	bgCyan     = color.New(color.FgWhite).SprintFunc()
+	errorRed = color.New(color.FgRed).SprintFunc()
 
 	logging *logrus.Entry
 

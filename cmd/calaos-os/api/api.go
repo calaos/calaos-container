@@ -220,21 +220,6 @@ func (capi *CalaosApi) UpdateAvailable(token string) (imgs *structs.ImageMap, er
 }
 
 // UpdateImages returns currently installed images
-func (capi *CalaosApi) UpdateImages(token string) (imgs *structs.ImageMap, err error) {
-
-	_, body, err := capi.callWithToken("GET", "/api/update/images", token, nil, nil)
-	if err != nil {
-		return
-	}
-
-	imgs = &structs.ImageMap{}
-	if err = json.Unmarshal(body, imgs); err != nil {
-		return nil, fmt.Errorf("UpdateImages failed: %v", err)
-	}
-
-	return
-}
-
 // apiError converts a non-2xx daemon reply ({"error":true,"msg":"..."}) into
 // a Go error. makeHttpCall only fails on transport errors, so HTTP-level
 // failures (e.g. 500 "package not found") must be surfaced explicitly.

@@ -67,9 +67,3 @@ linters:
       - linters: [unused]
         path: "cmd/calaos-os/api/api\\.go"
         text: "call is unused"
-      - linters: [unused]
-        path: "cmd/calaos-os/calaos-os\\.go"
-        text: "var (blue|errorBgRed|bgCyan) is unused"
-      - linters: [unused]
-        path: "^main\\.go"
-        text: "var (blue|errorBgRed|green|cyan|bgCyan) is unused"
