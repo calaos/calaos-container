@@ -1,4 +1,15 @@
 #!/bin/bash
+#
+# PROVENANCE: Vendored from Arch Linux arch-install-scripts
+# Upstream:   https://github.com/archlinux/arch-install-scripts
+# License:    GPLv2+ (https://www.gnu.org/licenses/gpl-2.0.html)
+# Version:    Unknown (M4 macros expanded and embedded locally)
+# Modified:   Yes - M4 macros (common) have been expanded inline to make
+#             script self-contained without build-time preprocessing.
+#
+# This script sets up mounts and chroots into a target directory, with support
+# for both traditional chroot and unprivileged namespace modes. The executable
+# logic is functionally identical to the upstream source, with preprocessing expanded.
 
 shopt -s extglob
 
