@@ -15,6 +15,13 @@ import (
 
 const (
 	CalaosCtHost = "localhost:8000"
+
+	// DefaultTimeout bounds the http.Client used for non-streaming REST
+	// calls (list/check/upgrade/network) so a hung or unreachable daemon
+	// does not block the CLI indefinitely. Callers can override it via
+	// SetTimeout. EventsWS uses its own WebSocket dialer/handshake timeout
+	// and is unaffected by this value.
+	DefaultTimeout = 30 * time.Second
 )
 
 type apiOptions struct {
@@ -74,7 +81,8 @@ func (capi *CalaosApi) SetCustomHTTPClient(c *http.Client) {
 // Build and return a CalaosApi struct
 func NewCalaosApi(host string, options ...func(*apiOptions)) *CalaosApi {
 	opts := apiOptions{
-		proxy: http.ProxyFromEnvironment,
+		proxy:   http.ProxyFromEnvironment,
+		timeout: DefaultTimeout,
 	}
 	for _, o := range options {
 		o(&opts)

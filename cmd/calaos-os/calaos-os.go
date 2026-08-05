@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +29,22 @@ const (
 	CharArrow = "‒▶"
 
 	TOKEN_FILE = "/run/calaos/calaos-ct.token"
+
+	// upgradeOverallTimeout bounds how long cmdUpgrade will wait on the
+	// event bus for a terminal (done/error) event before giving up, so a
+	// daemon that stops publishing mid-upgrade doesn't hang the CLI forever.
+	upgradeOverallTimeout = 30 * time.Minute
+)
+
+// Exit codes let calling shell scripts distinguish failure classes instead
+// of receiving an undifferentiated 1 for everything. Scripts that only check
+// `!= 0` are unaffected by this; scripts asserting `== 1` for non-usage
+// failures may need updating.
+const (
+	ExitUsage   = 1 // bad CLI invocation / invalid user-supplied arguments
+	ExitConfig  = 2 // local config/token problem (e.g. token file missing/unreadable)
+	ExitNetwork = 3 // could not reach the daemon, or the connection was lost
+	ExitServer  = 4 // the daemon was reached but reported/caused a failure
 )
 
 var (
@@ -39,6 +56,28 @@ var (
 func exit(err error, exit int) {
 	fmt.Println(errorRed(CharAbort), err)
 	cli.Exit(exit)
+}
+
+// classifyAPIErr picks a network vs. server exit code for an error returned
+// by the api package: transport-level failures (connection refused, DNS,
+// timeout, connection lost...) are network errors; anything else means the
+// daemon was reached and is treated as a server-side failure.
+func classifyAPIErr(err error) int {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return ExitNetwork
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return ExitNetwork
+	}
+	return ExitServer
+}
+
+// exitAPIErr exits with a network or server exit code depending on err, see
+// classifyAPIErr.
+func exitAPIErr(err error) {
+	exit(err, classifyAPIErr(err))
 }
 
 func main() {
@@ -58,7 +97,7 @@ func main() {
 	})
 
 	if err := a.Run(os.Args); err != nil {
-		exit(err, 1)
+		exit(err, ExitUsage)
 	}
 }
 
@@ -77,12 +116,12 @@ func cmdList(cmd *cli.Cmd) {
 
 		token, err := getToken()
 		if err != nil {
-			exit(err, 1)
+			exit(err, ExitConfig)
 		}
 
 		imgs, err := a.UpdateAvailable(token)
 		if err != nil {
-			exit(err, 1)
+			exitAPIErr(err)
 		}
 
 		if len(*imgs) == 0 {
@@ -115,12 +154,12 @@ func cmdCheck(cmd *cli.Cmd) {
 
 		token, err := getToken()
 		if err != nil {
-			exit(err, 1)
+			exit(err, ExitConfig)
 		}
 
 		imgs, err := a.UpdateCheck(token)
 		if err != nil {
-			exit(err, 1)
+			exitAPIErr(err)
 		}
 
 		if len(*imgs) == 0 {
@@ -132,7 +171,7 @@ func cmdCheck(cmd *cli.Cmd) {
 
 		t := table.NewWriter()
 		t.SetOutputMirror(os.Stdout)
-		t.AppendHeader(table.Row{"Image", "Current version", "New version", "Source"})
+		t.AppendHeader(table.Row{"Image", "Current version", "New version"})
 
 		for _, e := range *imgs {
 			t.AppendRow(table.Row{
@@ -162,7 +201,7 @@ func cmdUpgrade(cmd *cli.Cmd) {
 
 		token, err := getToken()
 		if err != nil {
-			exit(err, 1)
+			exit(err, ExitConfig)
 		}
 
 		// Connect to the event bus BEFORE issuing the upgrade request: the
@@ -171,9 +210,9 @@ func cmdUpgrade(cmd *cli.Cmd) {
 		conn, err := a.EventsWS(token)
 		if err != nil {
 			if errors.Is(err, api.ErrDaemonTooOld) {
-				exit(fmt.Errorf("le daemon calaos-container est trop ancien et ne supporte pas /api/events. Redémarrez le service (systemctl restart calaos-container) puis réessayez"), 1)
+				exit(fmt.Errorf("le daemon calaos-container est trop ancien et ne supporte pas /api/events. Redémarrez le service (systemctl restart calaos-container) puis réessayez"), ExitServer)
 			}
-			exit(err, 1)
+			exitAPIErr(err)
 		}
 		defer func() { _ = conn.Close() }()
 
@@ -235,6 +274,10 @@ func cmdUpgrade(cmd *cli.Cmd) {
 		var postErr error
 		postCh := postDone
 		var giveUp <-chan time.Time
+		// overallDeadline is a wall-clock backstop: if the daemon stops
+		// publishing events mid-upgrade (crash, restart...) the CLI must
+		// not hang forever waiting on the WebSocket.
+		overallDeadline := time.After(upgradeOverallTimeout)
 
 	readLoop:
 		for {
@@ -265,18 +308,29 @@ func cmdUpgrade(cmd *cli.Cmd) {
 				}
 
 			case err := <-readErr:
-				exit(fmt.Errorf("connexion au daemon perdue: %v", err), 1)
+				exit(fmt.Errorf("connexion au daemon perdue: %w", err), ExitNetwork)
 
 			case postErr = <-postCh:
-				// The upgrade request completed. If the upgrade actually ran,
-				// its terminal done/error event has already been published:
-				// leave a short grace period for it to arrive. If the upgrade
-				// was rejected before starting, no event will ever come.
 				postCh = nil
+				if postErr != nil {
+					// The upgrade request itself failed (network error, or
+					// the daemon rejected it before starting: unknown
+					// package, upgrade already in progress...). No terminal
+					// event will ever be published for it, so there is
+					// nothing to wait for: abort immediately instead of
+					// polling the event bus.
+					break readLoop
+				}
+				// The request succeeded; if the upgrade actually ran, its
+				// terminal done/error event has already been published or
+				// will arrive shortly. Leave a short grace period for it.
 				giveUp = time.After(3 * time.Second)
 
 			case <-giveUp:
 				break readLoop
+
+			case <-overallDeadline:
+				exit(fmt.Errorf("upgrade timed out after %s waiting for the daemon", upgradeOverallTimeout), ExitNetwork)
 			}
 		}
 
@@ -287,11 +341,11 @@ func cmdUpgrade(cmd *cli.Cmd) {
 		}
 
 		if st.Status == "error" {
-			exit(fmt.Errorf("%s", st.Error), 1)
+			exit(fmt.Errorf("%s", st.Error), ExitServer)
 		}
 
 		if postErr != nil {
-			exit(postErr, 1)
+			exitAPIErr(postErr)
 		}
 
 		fmt.Printf("%s Done.\n", green(CharCheck))
@@ -305,12 +359,12 @@ func cmdNetList(cmd *cli.Cmd) {
 
 		token, err := getToken()
 		if err != nil {
-			exit(err, 1)
+			exit(err, ExitConfig)
 		}
 
 		nets, err := a.GetNetworkInterfaces(token)
 		if err != nil {
-			exit(err, 1)
+			exitAPIErr(err)
 		}
 
 		t := table.NewWriter()
@@ -352,10 +406,13 @@ func cmdNetConfigureStatic(cmd *cli.Cmd) {
 
 		token, err := getToken()
 		if err != nil {
-			exit(err, 1)
+			exit(err, ExitConfig)
 		}
 
-		ipCIDR, _ := toCIDR(*ip, *netmask)
+		ipCIDR, err := toCIDR(*ip, *netmask)
+		if err != nil {
+			exit(err, ExitUsage)
+		}
 		config := &structs.NetInterface{
 			Name:    *intf,
 			IPv4:    ipCIDR,
@@ -366,7 +423,7 @@ func cmdNetConfigureStatic(cmd *cli.Cmd) {
 
 		err = a.ConfigureNetworkInterface(token, *intf, config)
 		if err != nil {
-			exit(err, 1)
+			exitAPIErr(err)
 		}
 
 		fmt.Printf("%s Done.\n", green(CharCheck))
@@ -384,7 +441,7 @@ func cmdNetConfigureDHCP(cmd *cli.Cmd) {
 
 		token, err := getToken()
 		if err != nil {
-			exit(err, 1)
+			exit(err, ExitConfig)
 		}
 
 		config := &structs.NetInterface{
@@ -393,7 +450,7 @@ func cmdNetConfigureDHCP(cmd *cli.Cmd) {
 
 		err = a.ConfigureNetworkInterface(token, *intf, config)
 		if err != nil {
-			exit(err, 1)
+			exitAPIErr(err)
 		}
 
 		fmt.Printf("%s Done.\n", green(CharCheck))
