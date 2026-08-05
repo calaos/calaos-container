@@ -1,43 +1,70 @@
 #!/bin/bash
+#
+# load_containers_cache <ct_name> [image] - load a cached podman image
+# archive (built at image-creation time) for container <ct_name>, verify it
+# landed in the local repository, then drop the cache file. Called from
+# config_calaos-boot with both arguments; the image= file, when present,
+# always takes priority over the second argument.
 
-ct_name="$1"
+set -euo pipefail
 
-# Get fqdn of image (docker.io|ghcr.io|...)
-if [ -f /etc/containers/systemd/"$ct_name".container ]
-then
-    image=$(< /etc/containers/systemd/"$ct_name".container grep Image= | cut -d= -f 2)
-else
-    image="$2"
+# shellcheck source=lib/calaos-common.sh
+. /usr/lib/calaos/calaos-common.sh
+
+trap 'die "Error on line $LINENO"' ERR
+
+ct_name="${1:-}"
+container_file="/etc/containers/systemd/${ct_name}.container"
+
+# Get fqdn of image (docker.io|ghcr.io|...) from the quadlet unit file.
+# Reads only the first non-comment "Image=" line: the old
+# `grep Image= | cut -d= -f2` matched every line containing "Image="
+# (including comments, and any accidental duplicate), so multiple matches
+# or an inline "#" in the value silently produced a garbled result.
+image=""
+if [ -f "$container_file" ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            \#*|\;*|'') continue ;;
+            Image=*)
+                image="${line#Image=}"
+                break
+                ;;
+        esac
+    done < "$container_file"
 fi
 
-if [ -z "$image" ]
-then
-    echo "Usage: $0 <containe_name> <full image name>"
+if [ -z "$image" ]; then
+    image="${2:-}"
+fi
+
+if [ -z "$image" ]; then
+    echo "Usage: $0 <container_name> <full image name>"
     echo "  ex: $0 calaos-home ghcr.io/calaos/calaos_home:latest"
     exit 1
 fi
 
 # build container cache directory
-cache=/var/lib/cache/containers/${ct_name}.tar
+cache="/var/lib/cache/containers/${ct_name}.tar"
 
-if [ -f "$cache" ]
-then
+if [ -f "$cache" ]; then
     echo "loading $cache"
 
-    # Podman loads file archive from cache and copy it in the local repository
+    # Podman loads the archive from cache and copies it into the local
+    # repository.
     podman load < "$cache"
 
-    image_base=$(echo "$image" | cut -d: -f 1)
-    image_tag=$(echo "$image" | cut -d: -f 2)
-    
-    #check if image is in local repository
-    if podman images | grep "$image_base" | grep "$image_tag" > /dev/null
-    then
+    # Check if the image landed in the local repository. Uses the library's
+    # exact-match check (podman images --format '{{.Repository}}:{{.Tag}}')
+    # instead of `podman images | grep "$base" | grep "$tag"`, which never
+    # matched a ':'-containing reference (repo and tag are separate columns)
+    # and could false-positive on unrelated repos/tags as substrings.
+    if calaos_image_exists "$image"; then
         echo "Image $image loaded"
         # Remove the cache
-        rm -rf "$cache"
+        rm -f "$cache"
     else
         echo "Error: image $image not loaded, an error occured."
-        return 1
+        exit 1
     fi
 fi

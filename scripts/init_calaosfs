@@ -1,6 +1,15 @@
 #!/bin/bash
+#
+# init_calaosfs - lay out the /mnt/calaos data tree and /run/calaos runtime
+# dir. Runs as ExecStartPre of the calaos-container daemon service, before
+# olad.service.
 
-set -e
+set -euo pipefail
+
+# shellcheck source=lib/calaos-common.sh
+. /usr/lib/calaos/calaos-common.sh
+
+trap 'die "Error on line $LINENO"' ERR
 
 fs="/mnt/calaos"
 rundir="/run/calaos"
@@ -19,36 +28,52 @@ for d in cache \
     hue2mqtt \
     envoy
 do
-    mkdir -p ${fs}/${d}
+    mkdir -p "${fs}/${d}"
 done
 
-mkdir -p $rundir
+mkdir -p "$rundir"
 
 #Create a unique token
-if [ ! -e $rundir/calaos-ct.token ]
-then
-    echo "$(date +%s-%N)-$RANDOM" > $rundir/calaos-ct.token
+if [ ! -e "$rundir/calaos-ct.token" ]; then
+    echo "$(date +%s-%N)-$RANDOM" > "$rundir/calaos-ct.token"
 fi
 
-if [ -e /.calaos-live ]
-then
-    touch $rundir/calaos-live
+if [ -e /.calaos-live ]; then
+    touch "$rundir/calaos-live"
 fi
 
 #For OLA we need to store /etc/ola to /mnt
 #It saves the ola config on the dedicated /mnt/calaos folder
 #This script has to be started once before olad service is started
+#
+#Only touch the symlink when $fs is actually mounted: doing this
+#unconditionally created a dangling /etc/ola -> /mnt/calaos/ola symlink (and
+#a pointless chown -R through it) whenever /mnt/calaos hadn't been mounted
+#yet at ExecStartPre time.
 if [ ! -L /etc/ola ]; then
-    rm -fr /etc/ola
-    ln -s ${fs}/ola /etc/ola
-    chown -R olad:olad /etc/ola ${fs}/ola
+    if mountpoint -q "$fs"; then
+        rm -rf /etc/ola
+        ln -s "${fs}/ola" /etc/ola
+        chown -R olad:olad /etc/ola "${fs}/ola"
+    else
+        warn "Skipping OLA symlink setup: $fs is not mounted"
+    fi
 fi
 
-#Fix missing /var/run from the old installer script
-if [ ! -L /var/run ] || [ "$(readlink /var/run)" != "/run" ]; then
-    if [ -d /var/run ]; then
-        mv /var/run/* /run/
+#Fix missing /var/run from the old installer script.
+#Idempotent: if /var/run is already the expected symlink to /run, do
+#nothing. Otherwise migrate with cp (merge/overwrite), not mv: mv aborts
+#the whole migration under set -e on the first colliding filename already
+#present in /run (populated by early-boot services racing this script),
+#leaving neither a full migration nor the replacement symlink in place.
+if [ -L /var/run ] && [ "$(readlink /var/run)" = "/run" ]; then
+    :
+else
+    if [ -d /var/run ] && [ ! -L /var/run ]; then
+        cp -a /var/run/. /run/
         rm -rf /var/run
+    elif [ -e /var/run ] || [ -L /var/run ]; then
+        rm -f /var/run
     fi
 
     ln -s /run /var/run

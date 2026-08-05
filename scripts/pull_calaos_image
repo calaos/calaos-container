@@ -1,15 +1,25 @@
 #!/bin/bash
+#
+# pull_calaos_image <pkgname> - pull the image referenced by
+# /usr/share/calaos/<pkgname>.source, stop the matching service, drop the
+# now-stale old tag of that same image, and prune leftovers. Installed on
+# deployed systems (invoked from calaos_install / update flows), kept as a
+# standalone entry point.
 
-set -e
+set -euo pipefail
 
-if [ -e /tmp/calaos-os.container.install ]
-then
+# shellcheck source=lib/calaos-common.sh
+. /usr/lib/calaos/calaos-common.sh
+
+trap 'die "Error on line $LINENO"' ERR
+
+if [ -e /tmp/calaos-os.container.install ]; then
     echo "Not pulling image. Calaos-OS image creation in progress..."
     exit 0
 fi
 
 # Check if pkgname parameter is provided
-if [ -z "$1" ]; then
+if [ -z "${1:-}" ]; then
     echo "Please provide the pkgname parameter."
     exit 1
 fi
@@ -24,17 +34,27 @@ if [ ! -f "$url" ]; then
 fi
 
 # Read the URL from the source file
+# shellcheck source=/dev/null
 source "$url"
 
-image_base=$(echo "$IMAGE_SRC" | cut -d: -f 1)
-image_tag=$(echo "$IMAGE_SRC" | cut -d: -f 2)
+# Split IMAGE_SRC into repo/tag via the library instead of `cut -d: -f1/2`,
+# which mis-splits registry:port references (e.g. "myregistry:5000/foo:1.0").
+# image_base/image_tag are written via calaos_image_split's printf -v (the
+# initial assignment here is just so shellcheck sees them as assigned).
+image_base=""
+image_tag=""
+calaos_image_split "$IMAGE_SRC" image_base image_tag
 
-if [ -z "$SERVICE_NAME" ]; then
+if [ -z "${SERVICE_NAME:-}" ]; then
     SERVICE_NAME="$pkgname.service"
 fi
 
-#check if $SERVICE_NAME is a valid service
-if ! systemctl list-units --type=service | grep -q "$SERVICE_NAME"; then
+#check if $SERVICE_NAME is a valid, currently loaded service. Filtering
+#list-units by the unit name itself (systemctl's own exact/glob unit-name
+#match) instead of `grep -q "$SERVICE_NAME"` avoids the old substring bug,
+#e.g. SERVICE_NAME="calaos-home.service" matching an unrelated
+#"calaos-home-worker.service" line.
+if ! systemctl list-units --type=service --no-legend --plain "$SERVICE_NAME" | grep -q .; then
     echo "Service $SERVICE_NAME not running"
     unset SERVICE_NAME
 fi
@@ -42,24 +62,29 @@ fi
 echo " > Pulling new image $IMAGE_SRC"
 podman pull "$IMAGE_SRC"
 
-if [ -n "$SERVICE_NAME" ]; then
+if [ -n "${SERVICE_NAME:-}" ]; then
     echo " > Stopping service $SERVICE_NAME"
     systemctl stop "$SERVICE_NAME" || true
 fi
 
 echo " > Removing old container image and get tag"
-for i in $(podman images | grep "$image_base" | awk '{print $3}')
-do
-    for tag in $(podman image inspect "$i" --format '{{range .RepoTags}}{{.}}{{end}}')
-    do
-        ibase=$(echo "$tag" | cut -d: -f 1)
-        t=$(echo "$tag" | cut -d: -f 2)
-        if [ "$ibase" == "$image_base" ] && [ "$t" != "$image_tag" ]; then
-            echo " > Removing $ibase:$t"
-            podman rmi --force "$i"
-        fi
-    done
-done
+# Walk exact "repo:tag" references (podman images --format, the same
+# exact-match technique as calaos_image_split/calaos_image_exists) instead
+# of `podman images | grep "$image_base" | awk '{print $3}'`, which
+# word-split IDs on whitespace with pipefail off and matched image_base as
+# a bare substring against unrelated repositories. Only a reference whose
+# repo is exactly image_base and whose tag differs from the one just
+# pulled is removed - never every other non-matching tag encountered along
+# the way, and never a reference from a different repository.
+ibase=""
+itag=""
+while IFS= read -r ref; do
+    calaos_image_split "$ref" ibase itag
+    if [ "$ibase" = "$image_base" ] && [ "$itag" != "$image_tag" ]; then
+        echo " > Removing $ref"
+        podman rmi --force "$ref"
+    fi
+done < <(podman images --format '{{.Repository}}:{{.Tag}}')
 
 # Clean old remaining container images
 echo " > Cleaning old images"
