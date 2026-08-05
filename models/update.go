@@ -12,40 +12,66 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func checkForUpdatesLoop() {
+// parseUpdateTime reads and validates general.update_time from the config. It
+// is called from Init() so that a bad value aborts startup with a clear error
+// instead of killing the process from inside a goroutine.
+func parseUpdateTime() (time.Duration, error) {
+	raw := config.Config.String("general.update_time")
+
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid general.update_time %q: %w", raw, err)
+	}
+	if d <= 0 {
+		// time.NewTicker panics on a non-positive duration.
+		return 0, fmt.Errorf("invalid general.update_time %q: must be a positive duration", raw)
+	}
+
+	return d, nil
+}
+
+// checkForUpdatesLoop runs the periodic update check every updateTime until
+// quit is closed. Both the interval and the quit channel are passed by Init()
+// rather than read from package state, so the goroutine never races with a
+// concurrent Init()/Shutdown().
+func checkForUpdatesLoop(updateTime time.Duration, quit <-chan interface{}) {
 	defer wgDone.Done()
 
-	//Parse duration from config
-	updateTime, err := time.ParseDuration(config.Config.String("general.update_time"))
-	if err != nil {
-		logging.Fatalf("Failed to parse update_time duration: %v", err)
-		return
-	}
+	ticker := time.NewTicker(updateTime)
+	defer ticker.Stop()
+
+	logging.Debugf("Periodic update check started (every %s)", updateTime)
 
 	for {
 		select {
-		case <-quitCheckUpdate:
+		case <-quit:
 			logging.Debugln("Exit checkForUpdates goroutine")
 			return
-		case <-time.After(updateTime):
-			if muCheck.TryLock() {
-				defer muCheck.Unlock()
-
-				checkForUpdates()
-			}
-			return
+		case <-ticker.C:
+			runPeriodicCheck()
 		}
+	}
+}
+
+// runPeriodicCheck performs a single periodic check. It is a separate function
+// so that nothing deferred inside a tick accumulates for the lifetime of the
+// loop. A failing check is logged and the loop keeps ticking.
+func runPeriodicCheck() {
+	logging.Debugln("Periodic update check firing")
+
+	if err := checkForUpdates(); err != nil {
+		logging.Warnf("Periodic update check failed: %v", err)
 	}
 }
 
 // CheckUpdates manually check for updates online
 func CheckUpdates() error {
-	muCheck.Lock()
-	defer muCheck.Unlock()
-
 	return checkForUpdates()
 }
 
+// checkForUpdates refreshes the available versions under upgradeLock. Callers
+// that already hold upgradeLock (Upgrade/UpgradeAll) must call
+// refreshNewVersions() directly instead.
 func checkForUpdates() error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("checkForUpdates(): Upgrade already in progress")
@@ -56,30 +82,80 @@ func checkForUpdates() error {
 	return refreshNewVersions()
 }
 
-// refreshNewVersions runs `apt-get update` and rebuilds NewVersions from the
-// apt cache. It does NOT touch upgradeLock: callers that already hold it (an
-// in-progress upgrade refreshing the list after success) call this directly,
-// while checkForUpdates() acquires the lock first.
+// GetNewVersions returns a copy of the currently known available versions. The
+// copy is what callers get so that they can read/marshal it without holding a
+// lock while a check rebuilds the shared map.
+func GetNewVersions() structs.ImageMap {
+	newVersionsMu.RLock()
+	defer newVersionsMu.RUnlock()
+
+	m := make(structs.ImageMap, len(newVersions))
+	for k, v := range newVersions {
+		m[k] = v
+	}
+
+	return m
+}
+
+// getNewVersion looks up a single package in the available versions.
+func getNewVersion(pkg string) (structs.Image, bool) {
+	newVersionsMu.RLock()
+	defer newVersionsMu.RUnlock()
+
+	img, ok := newVersions[pkg]
+
+	return img, ok
+}
+
+// setNewVersions atomically replaces the shared available-versions map.
+func setNewVersions(m structs.ImageMap) {
+	newVersionsMu.Lock()
+	defer newVersionsMu.Unlock()
+
+	newVersions = m
+}
+
+// refreshNewVersions runs `apt-get update` and rebuilds the available versions
+// from the apt cache. It does NOT touch upgradeLock: callers that already hold
+// it (an in-progress upgrade refreshing the list after success) call this
+// directly, while checkForUpdates() acquires the lock first.
+//
+// The new map is built into a local variable and swapped in at the end, so
+// newVersionsMu is never held across the apt-get run or the cgo cache call, and
+// readers never observe a half-rebuilt map.
+//
+// A failing `apt-get update` is reported to the caller (so GET /update/check
+// surfaces it) but the map is still rebuilt from the local apt cache: the cache
+// remains the best available truth, it simply may be stale with regard to the
+// remote indexes.
 func refreshNewVersions() error {
 	logging.Infoln("Checking for updates")
-
-	NewVersions = structs.ImageMap{}
-
 	logging.Infoln("Checking dpkg updates")
 
 	//Update apt cache without interaction
-	out, _ := RunCommand("apt-get", "update", "-qq")
+	out, aptErr := RunCommand("apt-get", "update", "-qq")
 	logging.Debugln("apt-get update output:", out)
+	if aptErr != nil {
+		logging.Errorf("apt-get update failed: %v", aptErr)
+	}
+
+	versions := structs.ImageMap{}
 
 	pkgs := apt.GetCachePackages()
 	for _, p := range pkgs {
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
-		NewVersions[p.Name] = structs.Image{
+		versions[p.Name] = structs.Image{
 			Name:           p.Name,
 			Version:        p.VersionNew,
 			CurrentVersion: p.VersionCurrent,
 		}
+	}
+
+	setNewVersions(versions)
+
+	if aptErr != nil {
+		return fmt.Errorf("apt-get update failed: %w", aptErr)
 	}
 
 	return nil
@@ -247,23 +323,14 @@ func Upgrade(pkg string) error {
 	}
 	defer upgradeLock.Release(1)
 
-	found := false
 	//search for package in cache
-	for name := range NewVersions {
-		if name == pkg {
-			//found package, upgrade it
-			found = true
-		}
-	}
-
+	img, found := getNewVersion(pkg)
 	if !found {
 		logging.WithFields(logrus.Fields{
 			"pkg": pkg,
 		}).Errorln("Package not found")
 		return fmt.Errorf("package not found")
 	}
-
-	img := NewVersions[pkg]
 
 	initUpgradeStatus()
 

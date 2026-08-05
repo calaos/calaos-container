@@ -15,11 +15,11 @@ func (a *AppServer) apiUpdateCheck(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(models.NewVersions)
+	return c.Status(fiber.StatusOK).JSON(models.GetNewVersions())
 }
 
 func (a *AppServer) apiUpdateAvail(c *fiber.Ctx) (err error) {
-	return c.Status(fiber.StatusOK).JSON(models.NewVersions)
+	return c.Status(fiber.StatusOK).JSON(models.GetNewVersions())
 }
 
 func (a *AppServer) apiUpdateInstalled(c *fiber.Ctx) (err error) {
