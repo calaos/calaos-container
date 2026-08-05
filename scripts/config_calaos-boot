@@ -1,44 +1,32 @@
 #!/bin/bash
+# config_calaos-boot - boot-time TUI (tty2): offers to install Calaos-OS or
+# loads the local container cache and continues booting.
+#
+# Started by systemd (debian/calaos-boot.service, RemainAfterExit=yes,
+# Type=oneshot) on tty2. See docs/backlog/CC-032-config-calaos-boot-hardening.md.
 
-NOCOLOR='\033[0m'
-CYAN='\033[0;36m'
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-ORANGE='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-LIGHTGRAY='\033[0;37m'
-DARKGRAY='\033[1;30m'
-LIGHTRED='\033[1;31m'
-LIGHTGREEN='\033[1;32m'
-YELLOW='\033[1;33m'
-LIGHTBLUE='\033[1;34m'
-LIGHTPURPLE='\033[1;35m'
-LIGHTCYAN='\033[1;36m'
-WHITE='\033[1;37m'
+set -euo pipefail
 
-color()
-{
-    echo -e "$1$*${NOCOLOR}"
-}
+# shellcheck disable=SC1091
+. /usr/lib/calaos/calaos-common.sh
 
-parse_cmdline()
-{
-    # Parse command line and LABEL variable
-    set -- $(cat /proc/cmdline)
-    for x in "$@"; do
-        case "$x" in
-            calaos_install)
-                CALAOS_INSTALL="yes"
-            ;;
-        esac
-    done
-}
+trap 'die "Error on line $LINENO"' ERR
+
+# Define the dialog exit status codes.
+: "${DIALOG_OK:=0}"
+: "${DIALOG_CANCEL:=1}"
+: "${DIALOG_ESC:=255}"
+
+# Whether the installer was requested, either via the kernel command line
+# (bare "calaos_install" boot flag) or via the --calaos-install argument.
+# Defaulted here since set -u requires it to be defined before the "==" test
+# below, regardless of which (if any) of those two sources set it.
+CALAOS_INSTALL="no"
 
 parse_arguments()
 {
-    # Parse arguments
+    # Parse this script's own arguments (as opposed to the kernel command
+    # line, handled separately via the library's calaos_parse_cmdline).
     while [ $# -gt 0 ]; do
         case "$1" in
             --calaos-install)
@@ -49,37 +37,176 @@ parse_arguments()
     done
 }
 
+log()
+{
+    # Non-fatal: journald/systemd-cat may not be fully up yet this early in
+    # boot, and a logging hiccup must never abort the boot sequence.
+    echo "$1" | systemd-cat -t calaos-boot -p info || true
+}
+
 load_containers()
 {
+    local source_files source_file ct_name
+
     source_files=(/usr/share/calaos/*.source)
 
     for source_file in "${source_files[@]}"; do
+        [ -e "$source_file" ] || continue
+
+        # shellcheck disable=SC1090
         source "$source_file"
         ct_name=$(basename "$source_file" .source)
 
         log "Loading container $ct_name"
-        load_containers_cache "$ct_name" "${IMAGE_SRC}"
+        if load_containers_cache "$ct_name" "${IMAGE_SRC}"; then
+            log "Container $ct_name loaded"
+        else
+            warn "Failed to load container $ct_name (${IMAGE_SRC})"
+            log "Failed to load container $ct_name (${IMAGE_SRC})"
+        fi
     done
 
     echo
-    color "${GREEN}" "Initialization done!"
+    green "Initialization done!"
     echo "Continuing boot..."
     log "Initialization done! Continuing boot"
 }
 
-log()
+cleanup_tmp_files()
 {
-    echo "$1" | systemd-cat -t calaos-boot -p info
+    rm -f "${tmp_file:-}"
+}
+
+# disk_is_mounted <disk>
+# Returns 0 if <disk> (a whole block device, e.g. "/dev/sda") or any of its
+# partitions is currently mounted, 1 otherwise. Uses lsblk's own device
+# tree (exact device match) rather than substring-matching the device name
+# against `mount` output, which false-positives whenever one disk's name is
+# a prefix of another's (e.g. "/dev/sda" is a substring of "/dev/sda1", and
+# with enough disks in the kernel's sdX namespace, "/dev/sda" is even a
+# substring of the unrelated "/dev/sdaa").
+disk_is_mounted()
+{
+    local disk="$1"
+    lsblk -no MOUNTPOINT "$disk" 2>/dev/null | grep -q .
+}
+
+# run_installer
+# Drives the "select a disk / install" flow, looping on a user-selected
+# retry after a failed install. Never reboots on a failed install.
+run_installer()
+{
+    local retry disk model size type checked cpt i retvalue install_result
+    local -a disks
+
+    retry="yes"
+    while [ "$retry" = "yes" ]; do
+        retry="no"
+        disks=()
+
+        lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json > "$tmp_file"
+
+        # get disk count
+        cpt=$(< "$tmp_file" jq -r ".blockdevices | length")
+        for ((i = 0; i < cpt; i++))
+        do
+            # get disk info
+            disk=$(< "$tmp_file" jq -r ".blockdevices[$i].name")
+            model=$(< "$tmp_file" jq -r ".blockdevices[$i].model")
+            size=$(< "$tmp_file" jq -r ".blockdevices[$i].size")
+            type=$(< "$tmp_file" jq -r ".blockdevices[$i].type")
+
+            # check if disk (or one of its partitions) is mounted
+            checked="ON"
+            if disk_is_mounted "$disk"; then
+                checked="OFF"
+            fi
+
+            # check if disk is a hard drive
+            if [ "$type" = "disk" ]; then
+                # "/dev/nvme0n1" "WDC PC SN720 SDAPNTW-256G-1016 [238.5G]" "OFF"
+                disks+=("$disk" "$model [$size]" "$checked")
+            fi
+        done
+
+        # ask user to select a disk
+        retvalue="$DIALOG_OK"
+        dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
+            --radiolist "Select where to install Calaos OS::" 20 80 10 "${disks[@]}" \
+            2> "$tmp_file" || retvalue=$?
+
+        disk=""
+        if [ "$retvalue" -eq "$DIALOG_OK" ]; then
+            disk=$(cat "$tmp_file")
+        fi
+
+        case "$disk" in
+            "")
+                err "No disk selected. Calaos-OS installation aborted."
+                log "No disk selected. Calaos-OS installation aborted"
+                sleep 2
+                load_containers
+                echo
+                sleep 2
+
+                # change back to main console
+                chvt 1 || true
+                return 0
+            ;;
+            *)
+                green "Installing Calaos-OS on $disk..."
+                log "Installing Calaos-OS on $disk"
+                echo
+                sleep 2
+
+                install_result=0
+                calaos_install "$disk" || install_result=$?
+
+                if [ "$install_result" -eq 0 ]; then
+                    green "Calaos-OS installation successful on $disk. Rebooting..."
+                    log "Calaos-OS installation successful on $disk"
+                    echo
+                    sleep 2
+                    reboot
+                    return 0
+                fi
+
+                # Installer failed: never reboot into a half-installed /
+                # unbootable system. Report the failure and offer a retry
+                # instead of falling through to reboot.
+                err "Calaos-OS installation failed on $disk (exit code $install_result)."
+                log "Calaos-OS installation failed on $disk (exit code $install_result)"
+
+                retvalue="$DIALOG_OK"
+                dialog --backtitle "Calaos-OS Installer" --title "Installation failed" \
+                    --yesno "Calaos-OS installation on $disk failed.\n\nDo you want to retry?" 9 70 \
+                    || retvalue=$?
+
+                if [ "$retvalue" -eq "$DIALOG_OK" ]; then
+                    retry="yes"
+                else
+                    color "${ORANGE}" "Skipping installation. Continuing boot..."
+                    log "Skipping installation after failure. Continuing boot"
+                    load_containers
+                    echo
+                    sleep 2
+
+                    # change back to main console
+                    chvt 1 || true
+                fi
+            ;;
+        esac
+    done
 }
 
 #wait for all devices to be up
 log "Waiting for all devices to be up..."
-udevadm settle
+udevadm settle || true
 
 #force console 2
-chvt 2
+chvt 2 || true
 sleep 2
-clear
+clear || true
 
 log "Starting Calaos-OS boot"
 
@@ -93,102 +220,39 @@ echo
 echo
 color "${PURPLE}" "Welcome to Calaos-OS!"
 echo
-color "${CYAN}" "Calaos-OS is currently initializing. Please wait..."
-color "${CYAN}" "This can take a few minutes. Please be patient."
+info "Calaos-OS is currently initializing. Please wait..."
+info "This can take a few minutes. Please be patient."
 echo
 echo
 
 log "Parsing kernel command line"
-parse_cmdline
+calaos_parse_cmdline
+if calaos_cmdline_get calaos_install > /dev/null; then
+    CALAOS_INSTALL="yes"
+fi
 
 log "Parsing arguments"
 parse_arguments "$@"
 
-# Define the dialog exit status codes
-: "${DIALOG_OK=0}"
-: "${DIALOG_CANCEL=1}"
-: "${DIALOG_ESC=255}"
-
-if [ "$CALAOS_INSTALL" == "yes" ]
+if [ "$CALAOS_INSTALL" = "yes" ]
 then
     log "Calaos-OS installation was requested. Starting installer"
 
-    color "${GREEN}" "Calaos-OS installation was requested. Starting installer..."
+    green "Calaos-OS installation was requested. Starting installer..."
     echo
     sleep 2
 
-    # Create a temporary file and make sure it goes away when we're done
+    # Create a temporary file and make sure it goes away when we're done.
     tmp_file=$(mktemp 2>/dev/null) || tmp_file=/tmp/tmp1$$
-    tmp_file2=$(mktemp 2>/dev/null) || tmp_file2=/tmp/tmp2$$
-    trap "rm -f $tmp_file $tmp_file2" 0 1 2 5 15
+    register_cleanup cleanup_tmp_files
 
+    retvalue="$DIALOG_OK"
     dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" \
-        --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60
-    retvalue=$?
+        --yesno "Do you want to install Calaos-OS?\n\nIf No, Calaos-OS Live will continue booting normally" 8 60 \
+        || retvalue=$?
     case $retvalue in
         "$DIALOG_OK")
-            disks=()
-
-            lsblk -d -n -p -o NAME,MODEL,SIZE,TYPE --json > "$tmp_file"
-            mount > "$tmp_file2"
-
-            # get disk count
-            cpt=$(< "$tmp_file" jq -r ".blockdevices | length")
-            for ((i=0; i<$cpt; i++))
-            do
-                # get disk info
-                disk=$(< "$tmp_file" jq -r ".blockdevices[$i].name")
-                model=$(< "$tmp_file" jq -r ".blockdevices[$i].model")
-                size=$(< "$tmp_file" jq -r ".blockdevices[$i].size")
-                type=$(< "$tmp_file" jq -r ".blockdevices[$i].type")
-
-                #check if disk is mounted on / using mount command
-                checked="ON"
-                if < "$tmp_file2" grep -q "$disk"
-                then
-                    checked="OFF"
-                fi
-
-                # check if disk is a hard drive
-                if [ "$type" == "disk" ]
-                then
-                    # "/dev/nvme0n1" "WDC PC SN720 SDAPNTW-256G-1016 [238.5G]" "OFF"
-                    disks+=("$disk" "$model [$size]" "$checked")
-                fi
-            done
-
-            # ask user to select a disk
-            dialog --backtitle "Calaos-OS Installer" --title "Calaos-OS Installer" --radiolist "Select where to install Calaos OS::" 20 80 10 "${disks[@]}" 2> "$tmp_file"
-            retvalue=$?
-            case $retvalue in
-                "$DIALOG_OK")
-                    disk=$(cat "$tmp_file")
-                    ;;
-                *)
-                    disk=""
-                ;;
-            esac
-
-            case $disk in
-                "")
-                    color "${RED}" "No disk selected. Calaos-OS installation aborted."
-                    sleep 2
-                    load_containers
-                    echo
-                    sleep 2
-
-                    # change back to main console
-                    chvt 1
-                ;;
-                *)
-                    color "${GREEN}" "Installing Calaos-OS on $disk..."
-                    echo
-                    sleep 2
-
-                    calaos_install "$disk"
-                    reboot
-                ;;
-            esac
+            run_installer
         ;;
     esac
 else
@@ -200,5 +264,5 @@ else
     sleep 2
 
     # change back to main console
-    chvt 1
+    chvt 1 || true
 fi
