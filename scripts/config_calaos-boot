@@ -254,6 +254,11 @@ then
         "$DIALOG_OK")
             run_installer
         ;;
+        *)
+            # "No" promises a normal live boot, which needs the cached images
+            load_containers
+            chvt 1 || true
+        ;;
     esac
 else
     log "Calaos-OS installation was not requested. Continuing boot"
