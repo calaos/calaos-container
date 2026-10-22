@@ -155,3 +155,45 @@ func TestEventsWSPrefersV2(t *testing.T) {
 		t.Fatalf("dialed %q, want v2", hit)
 	}
 }
+
+// TestEnvelopedNotFoundDoesNotFallBack: only a daemon without /api/v2 (plain
+// 404) sends the CLI back to the legacy routes.
+func TestEnvelopedNotFoundDoesNotFallBack(t *testing.T) {
+	capi := newFakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v2/update/check": reply(404, `{"error":true,"code":"not_found","msg":"not found"}`),
+		"/api/update/check": func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("legacy route hit")
+		},
+	})
+
+	_, err := capi.UpdateCheck("tok")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != 404 || ae.Code != "not_found" {
+		t.Fatalf("UpdateCheck error %v", err)
+	}
+}
+
+func TestEventsWSFallsBackToLegacy(t *testing.T) {
+	hit := ""
+	upgrader := websocket.Upgrader{}
+	capi := newFakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/events": func(w http.ResponseWriter, r *http.Request) {
+			hit = "legacy"
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			_, _, _ = conn.ReadMessage()
+		},
+	})
+
+	conn, err := capi.EventsWS("tok")
+	if err != nil {
+		t.Fatalf("EventsWS: %v", err)
+	}
+	_ = conn.Close()
+	if hit != "legacy" {
+		t.Fatalf("dialed %q, want legacy", hit)
+	}
+}

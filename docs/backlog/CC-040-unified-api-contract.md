@@ -76,9 +76,10 @@ External clients (calaos-home web UI) keep working on the legacy routes; the in-
 ## Verification notes
 
 - Prefix `/api/v2`. Routes: `update/{check,available,installed,status}`, `system/{reboot,restart,info,fs_status,rollback_snapshot}`, `system/install/{list_devices,start,status}`, `network/{list,:intf}`, `events`. No v2 upgrade route until ADM-CC3; the CLI upgrades through the legacy routes.
-- `app/legacy_golden_test.go` + `app/testdata/golden/` (52 cases) pin status, content type and body of every legacy route. The goldens were recorded before the refactor and none changed; two were added: legacy `system/reboot` answers 409 during a run (deliberate, ADM-CH1a), legacy `rollback_snapshot` keeps rebooting during a run (accepted risk).
+- `app/legacy_golden_test.go` + `app/testdata/golden/` (58 cases) pin status, content type and body of every legacy route. The goldens were recorded before the refactor and none changed; two were added: legacy `system/reboot` answers 409 during a run (deliberate, ADM-CH1a), legacy `rollback_snapshot` keeps rebooting during a run (accepted risk).
 - `app/v2_test.go`: exact envelope per route, 409, `never_run`/`running`/`finished`, no internal text in any v2 error, `bad_bearer`, `?token=` refused on v2, session header (`bad_session`, empty header, `not_allowed` on bearer-only routes), 404/405/426 envelopes, `/api/v2/events`.
-- `models` only gained `ErrUpgradeInProgress` and `ErrPackageNotFound`, with the same messages.
+- `models` gained `ErrUpgradeInProgress` and `ErrPackageNotFound` (same messages) and `RebootGuard`: reboot and v2 rollback take the apt lock (409 while an upgrade holds it, snapshots included; allowed during a version check) and keep it once the reboot is issued.
+- All 58 goldens were also run on the pre-refactor code (`138688b`): 57 pass, `system_reboot_in_progress` is the intended 409.
 - CLI: `/api/v2` envelope with a fallback to the legacy routes when the daemon in memory predates `/api/v2`; `/api/v2/events`, then `/api/events`. Tests in `cmd/calaos-os/api/api_v2_test.go`.
 - `go vet`, `golangci-lint` (v2.12.2) and `go test -race ./...` green in `ghcr.io/calaos/debian_deb_build_base`.
 - End to end in that container (daemon + CLI): `calaos-os list`, `check-update`, `upgrade no-such-pkg` (package not found, exit 4) work; `network list` fails there only because the image has no `networkctl` (legacy fails the same way, with the raw error text).

@@ -46,6 +46,32 @@ type stubBackend struct {
 
 	installCodeFile string
 	installLogFile  string
+
+	rebootBlocked bool   // an upgrade holds the apt lock
+	startLog      string // written to the log by the fake installer
+	startRunning  bool   // the fake installer has not exited
+}
+
+// fakeProcess is a models.Process for a fake installer.
+type fakeProcess struct{ done chan struct{} }
+
+func newFakeProcess(running bool) *fakeProcess {
+	p := &fakeProcess{done: make(chan struct{})}
+	if !running {
+		close(p.done)
+	}
+	return p
+}
+
+func (p *fakeProcess) Pid() int              { return 4242 }
+func (p *fakeProcess) Done() <-chan struct{} { return p.done }
+func (p *fakeProcess) ExitCode() (int, bool) {
+	select {
+	case <-p.done:
+		return 0, true
+	default:
+		return 0, false
+	}
 }
 
 type stubResult struct {
@@ -58,7 +84,13 @@ func (s *stubBackend) install(t *testing.T) {
 
 	prev := []any{runCommand, checkUpdates, getNewVersions, getInstalledPackages,
 		upgradeAll, upgradePackage, updateStatus, getSystemInfo, getNetInterfaces,
-		interfaceExists, configureNetInterface, installLogFile, installExitCodeFile}
+		interfaceExists, configureNetInterface, installLogFile, installExitCodeFile,
+		rebootGuard, startLoggedCommand}
+
+	installMu.Lock()
+	prevProc := installProc
+	installProc = nil
+	installMu.Unlock()
 
 	runCommand = func(command string, args ...string) (string, error) {
 		key := strings.Join(append([]string{command}, args...), " ")
@@ -89,6 +121,18 @@ func (s *stubBackend) install(t *testing.T) {
 	getNetInterfaces = func() ([]*structs.NetInterface, error) { return s.nets, s.netsErr }
 	interfaceExists = func(string) (bool, error) { return s.intfExists, s.intfExistsErr }
 	configureNetInterface = func(string, structs.NetInterface) error { return s.configureErr }
+	rebootGuard = func(fn func() error) error {
+		if s.rebootBlocked {
+			return models.ErrUpgradeInProgress
+		}
+		return fn()
+	}
+	startLoggedCommand = func(spec models.LoggedCommand) (models.Process, error) {
+		if err := os.WriteFile(spec.LogFile, []byte(s.startLog), 0o600); err != nil {
+			return nil, err
+		}
+		return newFakeProcess(s.startRunning), nil
+	}
 
 	installExitCodeFile = "/nonexistent/calaos_install.code"
 	installLogFile = "/nonexistent/calaos_install.log"
@@ -113,6 +157,9 @@ func (s *stubBackend) install(t *testing.T) {
 		configureNetInterface = prev[10].(func(string, structs.NetInterface) error)
 		installLogFile = prev[11].(string)
 		installExitCodeFile = prev[12].(string)
+		rebootGuard = prev[13].(func(func() error) error)
+		startLoggedCommand = prev[14].(func(models.LoggedCommand) (models.Process, error))
+		setInstallProc(prevProc)
 	})
 }
 
@@ -217,6 +264,10 @@ func legacyCases(t *testing.T) []httpCase {
 		{name: "auth_lowercase_scheme", method: "GET", path: "/api/update/available", auth: "bearer " + testToken},
 		{name: "auth_query_token", method: "GET", path: "/api/update/available?token=" + testToken, auth: "-"},
 		{name: "unknown_route", method: "GET", path: "/api/nope"},
+		{name: "unknown_route_upper_case", method: "GET", path: "/API/NOPE"},
+		{name: "update_available_upper_case", method: "GET", path: "/API/UPDATE/AVAILABLE"},
+		{name: "session_header_ignored", method: "GET", path: "/api/network/list",
+			headers: map[string]string{"X-Calaos-Admin-Session": "dead"}},
 		{name: "wrong_method", method: "GET", path: "/api/system/reboot"},
 		{name: "events_plain_get", method: "GET", path: "/api/events"},
 
@@ -224,9 +275,9 @@ func legacyCases(t *testing.T) []httpCase {
 			backend: stubBackend{commands: map[string]stubResult{"systemctl reboot": {}}}},
 		// Deliberate legacy change: no reboot while dpkg runs.
 		{name: "system_reboot_in_progress", method: "POST", path: "/api/system/reboot",
-			backend: stubBackend{status: upgrading}},
+			backend: stubBackend{rebootBlocked: true}},
 		{name: "system_rollback_in_progress", method: "POST", path: "/api/system/rollback_snapshot",
-			backend: stubBackend{status: upgrading, commands: map[string]stubResult{"calaos_rollback": {}, "systemctl reboot": {}}}},
+			backend: stubBackend{rebootBlocked: true, commands: map[string]stubResult{"calaos_rollback": {}, "systemctl reboot": {}}}},
 		{name: "system_reboot_err", method: "POST", path: "/api/system/reboot",
 			backend: stubBackend{commands: map[string]stubResult{"systemctl reboot": {err: boom}}}},
 		{name: "system_restart_ok", method: "POST", path: "/api/system/restart",
@@ -254,6 +305,9 @@ func legacyCases(t *testing.T) []httpCase {
 			backend: stubBackend{commands: map[string]stubResult{"lsblk --bytes --json --paths --output-all": {out: goldenLsblkInventory}}}},
 		{name: "install_start_no_confirm", method: "POST", path: "/api/system/install/start", ctype: "application/json", body: `{"device":"/dev/sdb"}`,
 			backend: stubBackend{commands: map[string]stubResult{"lsblk --bytes --json --paths --output-all": {out: goldenLsblkInventory}}}},
+		{name: "install_start_ok", method: "POST", path: "/api/system/install/start", ctype: "application/json", body: `{"device":"/dev/sdb","confirm":true}`,
+			backend: stubBackend{installLogFile: filepath.Join(dir, "start.log"), startLog: "partitioning /dev/sdb\ndone\n",
+				commands: map[string]stubResult{"lsblk --bytes --json --paths --output-all": {out: goldenLsblkInventory}}}},
 		{name: "install_status_never_run", method: "GET", path: "/api/system/install/status"},
 		{name: "install_status_bad_code", method: "GET", path: "/api/system/install/status",
 			backend: stubBackend{installCodeFile: codeBad}},
@@ -293,6 +347,10 @@ func legacyCases(t *testing.T) []httpCase {
 		{name: "update_upgrade_all_ok", method: "POST", path: "/api/update/upgrade-all"},
 		{name: "update_upgrade_all_in_progress", method: "POST", path: "/api/update/upgrade-all",
 			backend: stubBackend{upgradeAllErr: errors.New("upgrade already in progress")}},
+		{name: "update_upgrade_all_apt_err", method: "POST", path: "/api/update/upgrade-all",
+			backend: stubBackend{upgradeAllErr: errors.New("E: Sub-process /usr/bin/dpkg returned an error code (1)")}},
+		{name: "update_upgrade_apt_err", method: "POST", path: "/api/update/upgrade?package=calaos-server",
+			backend: stubBackend{upgradeErr: errors.New("E: Sub-process /usr/bin/dpkg returned an error code (1)")}},
 		{name: "update_upgrade_ok", method: "POST", path: "/api/update/upgrade?package=calaos-server"},
 		{name: "update_upgrade_not_found", method: "POST", path: "/api/update/upgrade?package=nope",
 			backend: stubBackend{upgradeErr: errors.New("package not found")}},

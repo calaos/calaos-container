@@ -168,16 +168,7 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiUpdateStatus(c)
 	})
 
-	// Generic event bus over WebSocket. The global Bearer middleware already
-	// authenticated the HTTP upgrade request (header or ?token=). Reject plain
-	// GET requests that are not a WebSocket upgrade with 426.
-	api.Use("/events", func(c *fiber.Ctx) error {
-		if websocket.IsWebSocketUpgrade(c) {
-			return c.Next()
-		}
-		return fiber.ErrUpgradeRequired
-	})
-	api.Get("/events", websocket.New(a.apiEvents))
+	a.registerEvents(api)
 
 	a.registerV2(api.Group("/v2"))
 
@@ -206,13 +197,25 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Get("/network/list", bearerOnly, a.v2NetList)
 	v2.Post("/network/:intf", bearerOnly, a.v2NetConfigure)
 
-	v2.Use("/events", func(c *fiber.Ctx) error {
+	a.registerEvents(v2, s)
+}
+
+// registerEvents serves the event bus over WebSocket. The global Bearer
+// middleware already authenticated the HTTP upgrade request; guards run next,
+// then plain GET requests that are not a WebSocket upgrade get 426.
+func (a *AppServer) registerEvents(r fiber.Router, guards ...fiber.Handler) {
+	args := []interface{}{"/events"}
+	for _, g := range guards {
+		args = append(args, g)
+	}
+	args = append(args, fiber.Handler(func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()
 		}
 		return fiber.ErrUpgradeRequired
-	})
-	v2.Get("/events", websocket.New(a.apiEvents))
+	}))
+	r.Use(args...)
+	r.Get("/events", websocket.New(a.apiEvents))
 }
 
 // Start runs the HTTP server in a background goroutine.

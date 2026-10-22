@@ -85,7 +85,7 @@ func TestV2Success(t *testing.T) {
 		{httpCase{method: "GET", path: "/api/v2/system/install/status"},
 			`{"error":false,"msg":"ok","data":{"status":"never_run"}}`},
 		{httpCase{method: "GET", path: "/api/v2/system/install/status", backend: stubBackend{installLogFile: logFile}},
-			`{"error":false,"msg":"ok","data":{"status":"running"}}`},
+			`{"error":false,"msg":"ok","data":{"exit_code":-1,"log":"done\n","status":"finished"}}`},
 		{httpCase{method: "GET", path: "/api/v2/system/install/status", backend: stubBackend{installCodeFile: codeFile, installLogFile: logFile}},
 			`{"error":false,"msg":"ok","data":{"exit_code":3,"log":"done\n","status":"finished"}}`},
 		{httpCase{method: "GET", path: "/api/v2/network/list", backend: stubBackend{nets: []*structs.NetInterface{{Name: "eth0", IPv4: "10.0.0.2/24"}}}},
@@ -106,7 +106,6 @@ func TestV2Success(t *testing.T) {
 
 func TestV2Errors(t *testing.T) {
 	leak := errors.New(secretDetail)
-	upgrading := structs.Status{Status: "upgrading"}
 
 	cases := []struct {
 		name   string
@@ -121,9 +120,9 @@ func TestV2Errors(t *testing.T) {
 			500, codeInternal, "internal error"},
 		{"installed failure", httpCase{method: "GET", path: "/api/v2/update/installed", backend: stubBackend{installedErr: leak}},
 			500, codeInternal, ""},
-		{"reboot in progress", httpCase{method: "POST", path: "/api/v2/system/reboot", backend: stubBackend{status: upgrading}},
+		{"reboot in progress", httpCase{method: "POST", path: "/api/v2/system/reboot", backend: stubBackend{rebootBlocked: true}},
 			409, codeUpgradeInProgress, ""},
-		{"rollback in progress", httpCase{method: "POST", path: "/api/v2/system/rollback_snapshot", backend: stubBackend{status: upgrading}},
+		{"rollback in progress", httpCase{method: "POST", path: "/api/v2/system/rollback_snapshot", backend: stubBackend{rebootBlocked: true}},
 			409, codeUpgradeInProgress, ""},
 		{"reboot failure", httpCase{method: "POST", path: "/api/v2/system/reboot", backend: stubBackend{commands: map[string]stubResult{"systemctl reboot": {err: leak}}}},
 			500, codeInternal, ""},
@@ -229,18 +228,102 @@ func TestV2Sessions(t *testing.T) {
 	check("POST", "/api/v2/system/reboot", "dead", 401, codeBadSession)
 	check("GET", "/api/v2/network/list", "live", 403, codeNotAllowed)
 
-	// Present but empty must not fall back to the bearer-only path.
-	r := httptest.NewRequest("GET", "/api/v2/update/available", nil)
-	r.Header.Set("Authorization", "Bearer "+testToken)
-	r.Header[headerAdminSession] = []string{""}
-	resp, err := a.appFiber.Test(r, -1)
+}
+
+// TestV2EmptySessionHeader sends the header with an empty value as the first
+// request of a fresh app: it must not fall back to the bearer-only path.
+func TestV2EmptySessionHeader(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         int
+	}{
+		{"POST", "/api/v2/system/reboot", http.StatusUnauthorized},
+		{"GET", "/api/v2/network/list", http.StatusForbidden},
+	} {
+		(&stubBackend{commands: map[string]stubResult{"systemctl reboot": {}}}).install(t)
+		a := newHandlerTestApp(t)
+
+		r := httptest.NewRequest(tc.method, tc.path, nil)
+		r.Header.Set("Authorization", "Bearer "+testToken)
+		r.Header[headerAdminSession] = []string{""}
+		resp, err := a.appFiber.Test(r, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s %s with an empty session header: got %d, want %d", tc.method, tc.path, resp.StatusCode, tc.want)
+		}
+	}
+}
+
+// TestV2RollbackSingleGuard: rollback and reboot run inside one guard, so no
+// upgrade can start between them.
+func TestV2RollbackSingleGuard(t *testing.T) {
+	var ran []string
+	s := &stubBackend{}
+	s.install(t)
+	runCommand = func(command string, args ...string) (string, error) {
+		ran = append(ran, strings.Join(append([]string{command}, args...), " "))
+		return "", nil
+	}
+	guards := 0
+	rebootGuard = func(fn func() error) error {
+		guards++
+		before := len(ran)
+		err := fn()
+		if len(ran)-before != 2 {
+			t.Errorf("guard covered %d commands, want rollback and reboot", len(ran)-before)
+		}
+		return err
+	}
+	a := newHandlerTestApp(t)
+
+	resp, body := doCase(t, a, httpCase{method: "POST", path: "/api/v2/system/rollback_snapshot"})
+	if resp.StatusCode != http.StatusOK || guards != 1 {
+		t.Fatalf("got %d %s, %d guards", resp.StatusCode, body, guards)
+	}
+	if strings.Join(ran, ";") != "calaos_rollback;systemctl reboot" {
+		t.Fatalf("commands %v", ran)
+	}
+}
+
+func TestV2InstallStatusLiveProcess(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "install.log")
+	s := &stubBackend{installLogFile: logFile, startLog: "partitioning\n", startRunning: true,
+		commands: map[string]stubResult{"lsblk --bytes --json --paths --output-all": {out: goldenLsblkInventory}}}
+	s.install(t)
+	a := newHandlerTestApp(t)
+
+	// A live installer streams until it exits: only start it here.
+	proc, err := startLoggedCommand(models.LoggedCommand{LogFile: logFile})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("empty session header: got %d, want 401", resp.StatusCode)
+	setInstallProc(proc)
+
+	status, _, body := v2Do2(t, a, httpCase{method: "GET", path: "/api/v2/system/install/status"})
+	if status != http.StatusOK || body != `{"error":false,"msg":"ok","data":{"status":"running"}}` {
+		t.Fatalf("live installer: %d %s", status, body)
 	}
+
+	close(proc.(*fakeProcess).done)
+	status, _, body = v2Do2(t, a, httpCase{method: "GET", path: "/api/v2/system/install/status"})
+	if status != http.StatusOK || body != `{"error":false,"msg":"ok","data":{"exit_code":-1,"log":"partitioning\n","status":"finished"}}` {
+		t.Fatalf("installer gone without exit code: %d %s", status, body)
+	}
+}
+
+// v2Do2 is v2Do on an existing app.
+func v2Do2(t *testing.T, a *AppServer, tc httpCase) (int, v2Reply, string) {
+	t.Helper()
+	resp, body := doCase(t, a, tc)
+	var r v2Reply
+	if err := json.Unmarshal(body, &r); err != nil {
+		t.Fatalf("body is not JSON: %q", body)
+	}
+	return resp.StatusCode, r, string(body)
 }
 
 func TestV2EventsWebSocket(t *testing.T) {
@@ -267,5 +350,15 @@ func TestV2EventsWebSocket(t *testing.T) {
 	_, resp, err := gws.DefaultDialer.Dial("ws://"+addr+"/api/v2/events?token="+testToken, nil)
 	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("query token on /api/v2/events: err %v, resp %v", err, resp)
+	}
+
+	h.Set(headerAdminSession, "dead")
+	_, resp, err = gws.DefaultDialer.Dial("ws://"+addr+"/api/v2/events", h)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("dead session on /api/v2/events: err %v, resp %v", err, resp)
+	}
+	var r v2Reply
+	if derr := json.NewDecoder(resp.Body).Decode(&r); derr != nil || r.Code != codeBadSession {
+		t.Fatalf("dead session body: %+v %v", r, derr)
 	}
 }

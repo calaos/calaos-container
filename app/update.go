@@ -17,13 +17,6 @@ func legacyError(c *fiber.Ctx, status int, err error) error {
 	})
 }
 
-// upgradeRunning reports an apt run in progress, during which a reboot would
-// cut dpkg.
-func upgradeRunning() bool {
-	st, err := updateStatus()
-	return err == nil && st != nil && st.Status == "upgrading"
-}
-
 func (a *AppServer) apiUpdateCheck(c *fiber.Ctx) (err error) {
 	if err = checkUpdates(); err != nil {
 		return legacyError(c, fiber.StatusInternalServerError, err)

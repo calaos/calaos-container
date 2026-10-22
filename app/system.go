@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/calaos/calaos-container/models"
 	"github.com/gofiber/fiber/v2"
@@ -22,18 +23,19 @@ func legacyOK(c *fiber.Ctx) error {
 	})
 }
 
-// apiSystemReboot answers 409 during a run, the one deliberate change to a
-// legacy route: a reboot there would cut dpkg, and old kiosks handle any
-// non-2xx the same way.
-func (a *AppServer) apiSystemReboot(c *fiber.Ctx) error {
-	if upgradeRunning() {
-		return legacyError(c, fiber.StatusConflict, models.ErrUpgradeInProgress)
-	}
-	return a.legacyReboot(c)
+func reboot() error {
+	_, err := runCommand("systemctl", "reboot")
+	return err
 }
 
-func (a *AppServer) legacyReboot(c *fiber.Ctx) error {
-	if _, err := runCommand("systemctl", "reboot"); err != nil {
+// apiSystemReboot answers 409 during an upgrade, the one deliberate change to
+// a legacy route: a reboot there would cut dpkg, and old kiosks handle any
+// non-2xx the same way.
+func (a *AppServer) apiSystemReboot(c *fiber.Ctx) error {
+	if err := rebootGuard(reboot); err != nil {
+		if errors.Is(err, models.ErrUpgradeInProgress) {
+			return legacyError(c, fiber.StatusConflict, err)
+		}
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 	return legacyOK(c)
@@ -73,13 +75,16 @@ func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) error {
 	})
 }
 
-// apiSystemRollbackSnapshot keeps its legacy behaviour during a run (no 409).
+// apiSystemRollbackSnapshot keeps its legacy behaviour during an upgrade (no
+// 409), an accepted risk until old kiosks are gone.
 func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) error {
 	if _, err := runCommand("calaos_rollback"); err != nil {
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
-
-	return a.legacyReboot(c)
+	if err := reboot(); err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
+	}
+	return legacyOK(c)
 }
 
 func (a *AppServer) apiSystemInstallListDevices(c *fiber.Ctx) error {
@@ -254,6 +259,7 @@ func streamInstall(c *fiber.Ctx, device string) error {
 	if err != nil {
 		return err
 	}
+	setInstallProc(proc)
 
 	// Streaming is a read-only view on that log file. Capture what the tail
 	// needs *before* returning: the body stream writer runs after the handler
@@ -338,12 +344,17 @@ func (a *AppServer) apiSystemInfo(c *fiber.Ctx) error {
 	})
 }
 
-func (a *AppServer) v2SystemReboot(c *fiber.Ctx) error {
-	if upgradeRunning() {
+// guardedError maps a RebootGuard failure to the v2 vocabulary.
+func guardedError(err error) error {
+	if errors.Is(err, models.ErrUpgradeInProgress) {
 		return errUpgradeInProgress()
 	}
-	if _, err := runCommand("systemctl", "reboot"); err != nil {
-		return errInternal(err)
+	return errInternal(err)
+}
+
+func (a *AppServer) v2SystemReboot(c *fiber.Ctx) error {
+	if err := rebootGuard(reboot); err != nil {
+		return guardedError(err)
 	}
 	return sendOK(c, fiber.StatusOK, nil)
 }
@@ -371,14 +382,19 @@ func (a *AppServer) v2SystemFsStatus(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, parsed)
 }
 
+// v2SystemRollbackSnapshot guards rollback and reboot together, so an
+// upgrade can never start between them.
 func (a *AppServer) v2SystemRollbackSnapshot(c *fiber.Ctx) error {
-	if upgradeRunning() {
-		return errUpgradeInProgress()
+	err := rebootGuard(func() error {
+		if _, err := runCommand("calaos_rollback"); err != nil {
+			return err
+		}
+		return reboot()
+	})
+	if err != nil {
+		return guardedError(err)
 	}
-	if _, err := runCommand("calaos_rollback"); err != nil {
-		return errInternal(err)
-	}
-	return a.v2SystemReboot(c)
+	return sendOK(c, fiber.StatusOK, nil)
 }
 
 func (a *AppServer) v2InstallListDevices(c *fiber.Ctx) error {
@@ -412,8 +428,37 @@ func (a *AppServer) v2InstallStart(c *fiber.Ctx) error {
 	return nil
 }
 
+var (
+	installMu   sync.Mutex
+	installProc models.Process
+)
+
+func setInstallProc(p models.Process) {
+	installMu.Lock()
+	installProc = p
+	installMu.Unlock()
+}
+
+// installRunning reports an installer started by this daemon and still alive.
+func installRunning() bool {
+	installMu.Lock()
+	p := installProc
+	installMu.Unlock()
+	if p == nil {
+		return false
+	}
+	select {
+	case <-p.Done():
+		return false
+	default:
+		return true
+	}
+}
+
 // v2InstallStatus derives the state from the files the installer writes: the
-// log is created at start, the exit code only at the end.
+// log is created at start, the exit code at the end. A log without exit code
+// and without a live process is an installer that failed to start or outlived
+// a daemon restart: it never writes its code, so it reads as finished, -1.
 func (a *AppServer) v2InstallStatus(c *fiber.Ctx) error {
 	code, codeErr := os.ReadFile(installExitCodeFile)
 	if codeErr != nil && !errors.Is(codeErr, fs.ErrNotExist) {
@@ -426,10 +471,14 @@ func (a *AppServer) v2InstallStatus(c *fiber.Ctx) error {
 	}
 
 	if codeErr != nil {
-		if logErr != nil {
+		switch {
+		case logErr != nil:
 			return sendOK(c, fiber.StatusOK, fiber.Map{"status": "never_run"})
+		case installRunning():
+			return sendOK(c, fiber.StatusOK, fiber.Map{"status": "running"})
+		default:
+			return sendOK(c, fiber.StatusOK, fiber.Map{"status": "finished", "exit_code": -1, "log": string(log)})
 		}
-		return sendOK(c, fiber.StatusOK, fiber.Map{"status": "running"})
 	}
 
 	exitCode, err := strconv.Atoi(strings.TrimSpace(string(code)))

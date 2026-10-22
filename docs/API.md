@@ -126,7 +126,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, then reboots); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/install/list_devices` | bearer only | 200 | `lsblk --json --output-all` output |
 | POST | `/api/v2/system/install/start` | bearer only | 200 | `text/plain` log stream; body `{"device": "/dev/...", "confirm": true}` |
-| GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}` |
+| GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}`; `exit_code` is `-1` when the installer ended without an exit status (failed start, daemon restarted under it) |
 | GET | `/api/v2/network/list` | bearer only | 200 | array of interfaces |
 | POST | `/api/v2/network/{intf}` | bearer only | 200 | `null`; body `{ipv4, gateway, dns_servers, search_domains, dhcp}` |
 | GET | `/api/v2/admin/status` | bearer, session allowed | 200 | `{"admin_set": <bool>}` |
@@ -483,7 +483,7 @@ token is provisioned.
 |---|---|
 | raw JSON on `update/*`, `{error, msg, output}` on `system/*` and `network/*` | one envelope, payload in `data` |
 | `500` "upgrade already in progress" | `409 upgrade_in_progress` |
-| `400` on `install/status` before any install | `200 {"status":"never_run"}`; `running` while the installer runs |
+| `400` on `install/status` before any install | `200 {"status":"never_run"}`; `running` while an installer started by this daemon is alive; `finished` with `exit_code: -1` when it ended without an exit status |
 | `msg` = raw Go or subprocess error | `code` + sanitized `msg`; details in the daemon log |
 | fiber plain-text `404`, `405`, `426` | `not_found`, `method_not_allowed`, `upgrade_required` envelopes |
 | `401 {"msg":"wrong token"}` | `401 bad_bearer` |

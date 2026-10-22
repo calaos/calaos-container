@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/calaos/calaos-container/apt"
@@ -18,6 +19,28 @@ var (
 	ErrUpgradeInProgress = errors.New("upgrade already in progress")
 	ErrPackageNotFound   = errors.New("package not found")
 )
+
+// upgrading is true for the whole locked section of Upgrade and UpgradeAll,
+// snapshots included, so RebootGuard can tell an upgrade from a version check.
+var upgrading atomic.Bool
+
+// RebootGuard runs fn, a reboot or a rollback, unless an upgrade holds
+// upgradeLock. On success the lock stays held: the system is going down and
+// no upgrade may start meanwhile. A version check holding the lock does not
+// block it: cutting apt-get update is harmless.
+func RebootGuard(fn func() error) error {
+	if !upgradeLock.TryAcquire(1) {
+		if upgrading.Load() {
+			return ErrUpgradeInProgress
+		}
+		return fn()
+	}
+	if err := fn(); err != nil {
+		upgradeLock.Release(1)
+		return err
+	}
+	return nil
+}
 
 // parseUpdateTime reads and validates general.update_time from the config. It
 // is called from Init() so that a bad value aborts startup with a clear error
@@ -345,6 +368,8 @@ func Upgrade(pkg string) error {
 		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
+	upgrading.Store(true)
+	defer upgrading.Store(false)
 
 	//search for package in cache
 	img, found := getNewVersion(pkg)
@@ -386,6 +411,8 @@ func UpgradeAll() error {
 		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
+	upgrading.Store(true)
+	defer upgrading.Store(false)
 
 	//For full upgrade, first update all dkpg packages before containers.
 	//This is done to upgrade first calaos-container package that includes all services units

@@ -58,10 +58,7 @@ func (a *AppServer) apiNetIntfConfigure(c *fiber.Ctx) (err error) {
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"error": false,
-		"msg":   "ok",
-	})
+	return legacyOK(c)
 }
 
 func (a *AppServer) v2NetList(c *fiber.Ctx) error {

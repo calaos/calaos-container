@@ -1,0 +1,4 @@
+status: 500
+content-type: application/json
+
+{"error":true,"msg":"E: Sub-process /usr/bin/dpkg returned an error code (1)"}

@@ -17,6 +17,7 @@ var (
 	interfaceExists       = models.InterfaceExists
 	configureNetInterface = models.ConfigureNetInterface
 	startLoggedCommand    = models.StartLoggedCommand
+	rebootGuard           = models.RebootGuard
 
 	installLogFile      = INSTALL_LOG_FILE
 	installExitCodeFile = INSTALL_EXIT_CODE_FILE
