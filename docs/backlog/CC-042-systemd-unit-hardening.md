@@ -1,13 +1,16 @@
 # CC-042: systemd unit hardening
 
+> **Amended by the admin plan** ([`docs/admin/PLAN.md`](https://github.com/calaos/calaos_base/blob/docs/admin-webui-plan/docs/admin/PLAN.md)): `Restart=always` is kept (a self-upgrade exits 0 and must be relaunched); the ticket absorbs CC4 and owns the new postinst. Where the text below says otherwise, this note wins.
+
 - **Phase:** P4
 - **Priority:** P2
 - **Size:** S
 - **Status:** Backlog
 - **Depends on:** CC-014 (reliable graceful shutdown makes `Restart=`/`TimeoutStopSec=` meaningful). Runs in parallel with CC-040 and CC-041 (disjoint files).
-- **Blocks:** —
+- **Blocks:** ADM-CC2
 - **Files owned (exclusive for this phase):**
   - `debian/calaos-container.service`
+  - `debian/calaos-container.postinst` (new)
   - `debian/calaos-boot.service`
   - `debian/btrfs-scrub@.service`
   - `debian/grub-btrfsd.service`
@@ -23,10 +26,18 @@ systemd unit hardening is essentially absent:
 - `debian/usb-serial-touchscreen@.service` — `Restart=always`, no hardening.
 - `debian/btrfs-scrub@.service` — the only unit with any resource care (`Nice=19`, `IOSchedulingClass=idle`).
 
+## Admin plan amendments
+
+- **`Restart=always`, not `on-failure`.** `Restart=on-failure` would not restart after a clean exit 0 following a self-upgrade. Drop every `Restart=on-failure` item below for `calaos-container.service`.
+- **Unit.** `ExecStartPre=-/usr/bin/dpkg --configure -a` (leading `-`: a broken dpkg must not prevent the daemon from starting), `KillMode=process`, `TimeoutStopSec`, and a long `TimeoutStartSec` (30min) so the pre-start `dpkg --configure` is not killed.
+- **Postinst with deferred restart.** New `debian/calaos-container.postinst` restarts the daemon only when the dpkg lock is free, no job is running and the binary is stale. It never blocks daemon startup and never runs a restart inside a dpkg run.
+- Absorbs CC4 of the admin plan; CC5 (apt in a transient unit) only if this proves insufficient at acceptance.
+- Blocks ADM-CC2.
+
 ## Work items
 
-- [ ] For `calaos-container.service`: add the directives that are **compatible** with its need to run privileged operations, and explicitly document (as unit comments) why the aggressive ones are omitted. Reasonable candidates: `Restart=on-failure` (instead of `always`), `RestartSec=`, `TimeoutStopSec=`, `ProtectHome=read-only`, `ProtectKernelTunables=`, `ProtectControlGroups=`, `RestrictSUIDSGID=`, `NoNewPrivileges=no` (must stay no — it shells out to privileged tools), keeping `ReadWritePaths` broad. Test each on a real target: any directive that breaks apt/podman/dd/systemctl must be reverted and its omission noted.
-- [ ] Add `Restart=on-failure` + `TimeoutStopSec=` to the long-running units where appropriate (`usb-serial-touchscreen@`, `grub-btrfsd`).
+- [ ] For `calaos-container.service`: add the directives that are **compatible** with its need to run privileged operations, and explicitly document (as unit comments) why the aggressive ones are omitted. Reasonable candidates: `RestartSec=`, `TimeoutStopSec=`, `ProtectHome=read-only`, `ProtectKernelTunables=`, `ProtectControlGroups=`, `RestrictSUIDSGID=`, `NoNewPrivileges=no` (must stay no — it shells out to privileged tools), keeping `ReadWritePaths` broad. Test each on a real target: any directive that breaks apt/podman/dd/systemctl must be reverted and its omission noted.
+- [ ] Add `Restart=on-failure` + `TimeoutStopSec=` to the other long-running units where appropriate (`usb-serial-touchscreen@`, `grub-btrfsd`).
 - [ ] Leave `btrfs-scrub@` largely as-is (already reasonable); add hardening only if it does not interfere.
 - [ ] Do not change what the units execute or their install wiring.
 
@@ -44,7 +55,9 @@ None expected, but each directive must be validated on real hardware/VM because 
 
 - [ ] `systemd-analyze verify` passes for each changed unit.
 - [ ] `calaos-container.service` still successfully runs an apt upgrade, a podman operation, and (in a VM) an install, with the new directives applied.
-- [ ] `Restart=on-failure` + `TimeoutStopSec` present; a clean `systemctl stop` completes within the timeout.
+- [ ] `Restart=always`, `KillMode=process`, `TimeoutStopSec` and `TimeoutStartSec` present; a clean `systemctl stop` completes within the timeout.
+- [ ] Postinst: no restart while the dpkg lock is held or a job is running; never blocks startup.
+- [ ] `ExecStartPre=-/usr/bin/dpkg --configure -a` does not prevent startup when dpkg is broken.
 - [ ] Omitted directives are documented with rationale.
 
 ## Verification notes

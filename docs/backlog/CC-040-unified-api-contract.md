@@ -1,5 +1,7 @@
 # CC-040: Unified API contract (envelope, status codes, error sanitization) + CLI lockstep
 
+> **Amended by the admin plan** ([`docs/admin/PLAN.md`](https://github.com/calaos/calaos_base/blob/docs/admin-webui-plan/docs/admin/PLAN.md)): legacy routes stay byte-identical for at least one release; the new contract lives under a versioned prefix; `docs/API.md` gains the admin section. Where the text below says otherwise, this note wins.
+
 - **Phase:** P4
 - **Priority:** P1
 - **Size:** L
@@ -42,24 +44,32 @@ This ticket runs last among code changes precisely because it rewrites every `ap
 - Auth logic — CC-011 (this ticket may restyle the 401 body to the envelope, but not change auth behavior).
 - Adding tests — CC-051/052/055.
 
-## Breaking changes
+## Admin plan amendments
 
-**Significant, intentional, documented in `docs/API.md`:**
+- **Versioned prefix.** The envelope, the 409, `never_run`, error sanitization and every new route (`admin/*`, jobs) live under a versioned prefix chosen in this ticket (e.g. `/api/v2/`).
+- **Legacy routes untouched.** Current routes and response shapes (raw update JSON, 500 on concurrent upgrade, 400 on never-run install status, synchronous upgrade) are served byte-identical for at least one release, pinned by golden tests. Retiring them waits for CH1b.
+- **`docs/API.md` admin section.** Relay table, the three `admin/set` modes, error vocabulary, session rules, `X-Calaos-Client-IP`, 202 job shape, event names. Lands as the first commit of the ticket, merged alone, so calaos_base can start CB0.
+- Blocks ADM-CC2 and ADM-CC1 (in addition to CC-051, CC-052, CC-055).
+
+## Breaking changes (versioned prefix only)
+
+**Apply to the versioned prefix only; legacy routes are unchanged. Documented in `docs/API.md`:**
 - All responses now use a single envelope (update endpoints previously returned raw JSON).
 - "upgrade already in progress" is 409, not 500.
 - `install/status` never-run is 200 `{"status":"never_run"}`, not 400.
 - (Carried from earlier tickets, re-listed in API.md: `/update/images` removed — CC-002; install `confirm` required — CC-013.)
 
-External clients (calaos-home web UI) must be updated in step; the in-repo CLI is updated by this ticket.
+External clients (calaos-home web UI) keep working on the legacy routes; the in-repo CLI is updated by this ticket.
 
 ## Acceptance criteria
 
 - [ ] `git grep 'err.Error()' app/` returns no client-facing usage (only logging).
 - [ ] Every handler returns the same envelope shape (verify by curling each route).
-- [ ] Second concurrent `POST /update/upgrade-all` returns **409**, not 500.
-- [ ] `GET /system/install/status` on a fresh system returns 200 `never_run`.
+- [ ] Second concurrent upgrade under the versioned prefix returns **409**; the legacy `POST /update/upgrade-all` still returns its current response.
+- [ ] Golden tests show legacy routes and response shapes byte-identical to before.
+- [ ] `GET /system/install/status` on a fresh system returns 200 `never_run` under the versioned prefix (legacy unchanged).
 - [ ] `calaos-os` commands work end-to-end against the updated daemon (list, check-update, upgrade, network).
-- [ ] `docs/API.md` exists with the old→new mapping.
+- [ ] `docs/API.md` exists with the old→new mapping and the admin section.
 - [ ] `go vet ./...` and `cd cmd/calaos-os && go vet ./...` green.
 
 ## Verification notes
