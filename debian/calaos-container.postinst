@@ -3,13 +3,6 @@ set -e
 
 unit=calaos-container.service
 
-policy_allows() {
-    local rc=0
-    [ -x /usr/sbin/policy-rc.d ] || return 0
-    /usr/sbin/policy-rc.d "$unit" "$1" >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 101 ]
-}
-
 # Takes over the debhelper "deb-systemd-invoke start" of our unit below: its
 # plain "systemctl start" blocks dpkg, and when dpkg runs from the unit's own
 # ExecStartPre it waits on that very start job until TimeoutStartSec. There,
@@ -17,8 +10,13 @@ policy_allows() {
 # shellcheck disable=SC2329 # called from the debhelper section below
 deb-systemd-invoke() {
     if [ "$#" -eq 2 ] && [ "$1" = start ] && [ "$2" = "$unit" ]; then
-        if [ -z "${CALAOS_CT_STARTPRE:-}" ] && policy_allows start &&
-            systemctl --quiet is-enabled "$unit" 2>/dev/null; then
+        local rc=0
+        [ -z "${CALAOS_CT_STARTPRE:-}" ] || return 0
+        if [ -x /usr/sbin/policy-rc.d ]; then
+            /usr/sbin/policy-rc.d "$unit" start >/dev/null 2>&1 || rc=$?
+            [ "$rc" -ne 101 ] || return 0
+        fi
+        if systemctl --quiet is-enabled "$unit" 2>/dev/null; then
             systemctl --no-block start "$unit" || true
         fi
         return 0
@@ -31,10 +29,11 @@ deb-systemd-invoke() {
 # The daemon may be the process driving this very upgrade (apt is linked into
 # it), so it is not restarted here; a transient unit does it once dpkg and the
 # daemon's job are done. Our ExecStartPre needs nothing: ExecStart follows.
+# policy-rc.d is not consulted: SD images still ship Docker's exit-101 stub.
 case "$1" in
 configure|abort-upgrade)
     if [ -z "${CALAOS_CT_STARTPRE:-}" ] && [ -z "${DPKG_ROOT:-}" ] &&
-        [ -d /run/systemd/system ] && policy_allows restart; then
+        [ -d /run/systemd/system ]; then
         # Fails harmlessly when a waiter from an earlier run is still active.
         systemd-run --quiet --no-block --collect \
             --unit=calaos-container-deferred-restart \

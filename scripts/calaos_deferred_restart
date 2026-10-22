@@ -11,7 +11,8 @@ unit=calaos-container.service
 conf=/etc/calaos-container.toml
 token_file=/run/calaos/calaos-ct.token
 poll=5
-give_up=$((SECONDS + 2 * 60 * 60))
+budget=$((2 * 60 * 60))
+give_up=$((SECONDS + budget))
 
 addr=127.0.0.1
 port=8000
@@ -38,12 +39,18 @@ dpkg_busy() {
         grep -qxE '/var/lib/dpkg/lock(-frontend)?'
 }
 
-# 1.7.0 reports an empty status until its first job.
-job_idle() {
-    local token
-    token=$(cat "$token_file" 2>/dev/null) || return 1
-    curl -fsS --max-time 10 -H "Authorization: Bearer $token" "$status_url" 2>/dev/null |
-        jq -e '.status == "idle" or .status == ""' >/dev/null 2>&1
+# Prints idle, busy or unreachable. 1.7.0 reports an empty status until its
+# first job.
+job_state() {
+    local token body
+    if ! token=$(cat "$token_file" 2>/dev/null) ||
+        ! body=$(curl -fsS --max-time 10 -H "Authorization: Bearer $token" "$status_url" 2>/dev/null); then
+        echo unreachable
+    elif jq -e '.status == "idle" or .status == ""' >/dev/null 2>&1 <<<"$body"; then
+        echo idle
+    else
+        echo busy
+    fi
 }
 
 # Prints the daemon PID while it still runs a binary that dpkg has replaced.
@@ -56,6 +63,8 @@ stale_pid() {
     echo "$pid"
 }
 
+# Only an unreachable daemon uses up the budget: a long upgrade holds the dpkg
+# lock or keeps the daemon busy for as long as it needs.
 waiting=""
 quiet=0
 while :; do
@@ -66,12 +75,20 @@ while :; do
 
     if dpkg_busy; then
         reason="the dpkg lock"
-    elif ! job_idle; then
-        reason="the daemon job to finish (or the daemon to answer)"
     else
+        case "$(job_state)" in
+            busy) reason="the daemon job to finish" ;;
+            unreachable) reason="the daemon to answer" ;;
+            *) reason="" ;;
+        esac
+    fi
+
+    if [ -z "$reason" ]; then
         # Two quiet polls in a row: a daemon goes idle just before it answers
         # the request that ran the upgrade.
         if [ "$quiet" -eq 1 ]; then
+            # The daemon may have been restarted during the polls.
+            [ "$(systemctl show --property=MainPID --value "$unit")" = "$pid" ] || exit 0
             echo "restarting $unit: pid $pid runs a replaced binary"
             exec systemctl restart "$unit"
         fi
@@ -85,8 +102,10 @@ while :; do
         echo "waiting for $reason"
         waiting="$reason"
     fi
-    if [ "$SECONDS" -ge "$give_up" ]; then
-        echo "gave up after 2 h waiting for $reason; $unit (pid $pid) still runs the old binary" >&2
+    if [ "$reason" != "the daemon to answer" ]; then
+        give_up=$((SECONDS + budget))
+    elif [ "$SECONDS" -ge "$give_up" ]; then
+        echo "gave up: the daemon did not answer for 2 h; $unit (pid $pid) still runs the old binary" >&2
         exit 1
     fi
     sleep "$poll"
