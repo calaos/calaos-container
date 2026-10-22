@@ -62,7 +62,7 @@ _Gate to start: P1 + P2 + P3 merged._
 
 | ID | Title | Prio | Size | Deps | Status |
 |----|-------|------|------|------|--------|
-| CC-040 | Unified API contract under a versioned prefix + CLI lockstep, admin section of `API.md` | P1 | L | all P1 + P2 | ⬜ |
+| CC-040 | Unified API contract under a versioned prefix + CLI lockstep, admin section of `API.md` | P1 | L | all P1 + P2 | 🔵 |
 | CC-041 | Build & release engineering | P2 | M | P3 complete | ⬜ |
 | CC-042 | systemd unit hardening + postinst with deferred restart (absorbs CC4) | P2 | S | CC-014 | ⬜ |
 

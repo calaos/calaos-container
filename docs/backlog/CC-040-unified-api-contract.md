@@ -5,7 +5,7 @@
 - **Phase:** P4
 - **Priority:** P1
 - **Size:** L
-- **Status:** Backlog
+- **Status:** In Progress (`docs/API.md` contract first, implementation second)
 - **Depends on:** ALL of P1 and P2 (CC-010, CC-011, CC-012, CC-013, CC-014, CC-020, CC-021, CC-022, CC-023) — this ticket touches every HTTP handler and both CLI files, so it must run alone with respect to `app/` and `cmd/`
 - **Blocks:** CC-051, CC-052, CC-055
 - **Files owned (exclusive for this phase):**
