@@ -1,0 +1,4 @@
+status: 200
+content-type: application/json
+
+{"calaos-server":{"name":"calaos-server","version":"4.5.0","current_version":""}}

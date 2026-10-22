@@ -1,0 +1,4 @@
+status: 400
+content-type: application/json
+
+{"error":true,"msg":"invalid interface: \"eth0;rm\" must match ^[a-zA-Z0-9_.-]{1,15}$"}

@@ -1,13 +1,12 @@
 package app
 
 import (
-	"github.com/calaos/calaos-container/models"
 	"github.com/gofiber/fiber/v2"
 )
 
 func (a *AppServer) apiUpdateCheck(c *fiber.Ctx) (err error) {
 
-	err = models.CheckUpdates()
+	err = checkUpdates()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -15,15 +14,15 @@ func (a *AppServer) apiUpdateCheck(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(models.GetNewVersions())
+	return c.Status(fiber.StatusOK).JSON(getNewVersions())
 }
 
 func (a *AppServer) apiUpdateAvail(c *fiber.Ctx) (err error) {
-	return c.Status(fiber.StatusOK).JSON(models.GetNewVersions())
+	return c.Status(fiber.StatusOK).JSON(getNewVersions())
 }
 
 func (a *AppServer) apiUpdateInstalled(c *fiber.Ctx) (err error) {
-	m, err := models.GetInstalledCalaosPackages()
+	m, err := getInstalledPackages()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -36,7 +35,7 @@ func (a *AppServer) apiUpdateInstalled(c *fiber.Ctx) (err error) {
 
 func (a *AppServer) apiUpdateUpgradeAll(c *fiber.Ctx) (err error) {
 
-	err = models.UpgradeAll()
+	err = upgradeAll()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -51,7 +50,7 @@ func (a *AppServer) apiUpdateUpgradeAll(c *fiber.Ctx) (err error) {
 
 func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) (err error) {
 
-	err = models.Upgrade(c.Query("package"))
+	err = upgradePackage(c.Query("package"))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -65,7 +64,7 @@ func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) (err error) {
 }
 
 func (a *AppServer) apiUpdateStatus(c *fiber.Ctx) (err error) {
-	s, err := models.UpdateStatus()
+	s, err := updateStatus()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,

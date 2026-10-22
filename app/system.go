@@ -15,7 +15,7 @@ import (
 
 func (a *AppServer) apiSystemReboot(c *fiber.Ctx) (err error) {
 
-	_, err = models.RunCommand("systemctl", "reboot")
+	_, err = runCommand("systemctl", "reboot")
 
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -32,7 +32,7 @@ func (a *AppServer) apiSystemReboot(c *fiber.Ctx) (err error) {
 
 func (a *AppServer) apiSystemRestart(c *fiber.Ctx) (err error) {
 
-	_, err = models.RunCommand("systemctl", "restart", "calaos-home")
+	_, err = runCommand("systemctl", "restart", "calaos-home")
 
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -49,7 +49,7 @@ func (a *AppServer) apiSystemRestart(c *fiber.Ctx) (err error) {
 
 func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) (err error) {
 
-	out, err := models.RunCommand("findmnt", "--json", "/")
+	out, err := runCommand("findmnt", "--json", "/")
 
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -75,7 +75,7 @@ func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) (err error) {
 
 func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) (err error) {
 
-	_, err = models.RunCommand("calaos_rollback")
+	_, err = runCommand("calaos_rollback")
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -88,7 +88,7 @@ func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) (err error) {
 
 func (a *AppServer) apiSystemInstallListDevices(c *fiber.Ctx) (err error) {
 
-	out, err := models.RunCommand("lsblk", lsblkInventoryArgs...)
+	out, err := runCommand("lsblk", lsblkInventoryArgs...)
 
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -141,7 +141,7 @@ type lsblkInventory struct {
 // GET /system/install/list_devices and parses it into the typed device tree
 // used to validate install targets.
 func getBlockDeviceInventory() ([]lsblkDevice, error) {
-	out, err := models.RunCommand("lsblk", lsblkInventoryArgs...)
+	out, err := runCommand("lsblk", lsblkInventoryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -263,11 +263,11 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 	// The installer is started detached: it writes its output to
 	// INSTALL_LOG_FILE and its exit status to INSTALL_EXIT_CODE_FILE on its
 	// own, and runs to completion whatever happens to this request.
-	proc, err := models.StartLoggedCommand(models.LoggedCommand{
+	proc, err := startLoggedCommand(models.LoggedCommand{
 		Name:         "calaos_install",
 		Args:         []string{n.Device},
-		LogFile:      INSTALL_LOG_FILE,
-		ExitCodeFile: INSTALL_EXIT_CODE_FILE,
+		LogFile:      installLogFile,
+		ExitCodeFile: installExitCodeFile,
 	})
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -292,7 +292,7 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 
 		// Whatever ends the tail — client gone, server shutting down, install
 		// finished — only this stream is affected, never the installer.
-		if terr := models.TailFile(ctx, INSTALL_LOG_FILE, w, models.TailOptions{Until: installDone}); terr != nil {
+		if terr := models.TailFile(ctx, installLogFile, w, models.TailOptions{Until: installDone}); terr != nil {
 			logging.Debugf("install stream for pid %d ended: %v", proc.Pid(), terr)
 		}
 	})
@@ -322,7 +322,7 @@ func contextFromDone(done <-chan struct{}) (context.Context, context.CancelFunc)
 }
 
 func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
-	data, err := os.ReadFile(INSTALL_EXIT_CODE_FILE)
+	data, err := os.ReadFile(installExitCodeFile)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": true,
@@ -338,7 +338,7 @@ func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	data, err = os.ReadFile(INSTALL_LOG_FILE)
+	data, err = os.ReadFile(installLogFile)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": true,
@@ -355,7 +355,7 @@ func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
 }
 
 func (a *AppServer) apiSystemInfo(c *fiber.Ctx) (err error) {
-	info, err := models.GetSystemInfo()
+	info, err := getSystemInfo()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,

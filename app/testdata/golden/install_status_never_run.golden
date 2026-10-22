@@ -1,0 +1,4 @@
+status: 400
+content-type: application/json
+
+{"error":true,"msg":"open /nonexistent/calaos_install.code: no such file or directory"}

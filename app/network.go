@@ -11,7 +11,7 @@ import (
 
 func (a *AppServer) apiNetIntfList(c *fiber.Ctx) (err error) {
 
-	nets, err := models.GetAllNetInterfaces()
+	nets, err := getNetInterfaces()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -58,7 +58,7 @@ func (a *AppServer) apiNetIntfConfigure(c *fiber.Ctx) (err error) {
 
 	// A syntactically valid name is not enough: only interfaces that really
 	// exist can be configured.
-	exists, err := models.InterfaceExists(intf)
+	exists, err := interfaceExists(intf)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,
@@ -72,7 +72,7 @@ func (a *AppServer) apiNetIntfConfigure(c *fiber.Ctx) (err error) {
 		})
 	}
 
-	err = models.ConfigureNetInterface(intf, netConf)
+	err = configureNetInterface(intf, netConf)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": true,

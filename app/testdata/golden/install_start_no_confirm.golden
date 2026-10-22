@@ -1,0 +1,4 @@
+status: 400
+content-type: application/json
+
+{"error":true,"msg":"explicit confirmation required: set \"confirm\": true in the request body to proceed with this destructive operation"}
