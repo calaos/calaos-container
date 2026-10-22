@@ -39,7 +39,7 @@ Route list per tag checked with `git grep -n '/api' <tag> -- src/CalaosOsAPI.cpp
 
 `doPost`/`doGet` = system envelope (`{error,msg,output}`); `doPostRaw`/`doGetRaw` = raw document plus HTTP status.
 Success means no Qt network error (any 2xx) AND a body that parses as JSON (empty body accepted,
-`NetworkRequest.cpp:218-234`). Anything else is a failure.
+`NetworkRequest.cpp:212-216`). Anything else is a failure.
 
 | Route | Method | Where | Fields read |
 |---|---|---|---|
@@ -55,7 +55,7 @@ Success means no Qt network error (any 2xx) AND a body that parses as JSON (empt
 | `/api/system/install/status` | GET | `:104-137` | `error`, `exit_code` (int) |
 | `/api/update/check` | GET | `:186` | top-level object keyed by package name; per value `version`, `current_version`, `name` (`UpdateModel.cpp:68-105`, `UpdateManager.cpp:209`) |
 | `/api/update/available` | GET | `:194` | same shape as check |
-| `/api/update/installed` | GET | `:202` | object keyed by package, `name`, `version` (`UpdateModel.cpp:71-72`); HTTP status kept, 404 tolerated |
+| `/api/update/installed` | GET | `:202` | object keyed by package, `name`, `version` (`UpdateModel.cpp:71-72`); any failure only marks the installed list unavailable (`UpdateManager.cpp:187-197`) |
 | `/api/update/upgrade?package=<name>` | POST | `:212-218` | success/failure and `msg` on failure only |
 | `/api/update/upgrade-all` | POST | `:222` | same |
 | `/api/update/status` | GET | `:230` | status frame, see below |
@@ -129,7 +129,7 @@ talking to a `1.7.0` daemon already runs on polling only.
 - Token file path `/run/calaos/calaos-ct.token`, readable by the kiosk process; content a single URL-safe
   string (no `+ / = & %`), one trailing newline tolerated. Read once at kiosk start: rotation needs a kiosk restart.
 - `GET update/check|available|installed`: top-level object keyed by package name, values with
-  `version`, `current_version`, `name`; no extra top-level keys; 404 tolerated on `installed`.
+  `version`, `current_version`, `name`; no extra top-level keys.
 - `POST update/upgrade[-all]`: synchronous, 200 only when apt ends, error as 500 with `{"error":true,"msg":...}`.
   No 202 on these paths. `msg` must keep containing "in progress" (upgrade running) and "package not found".
   A refused concurrent upgrade stays an HTTP error status; 409 is acceptable as the kiosk handles any non-2xx
@@ -139,6 +139,7 @@ talking to a `1.7.0` daemon already runs on polling only.
   `pkg_index`, `pkg_count`, `error`, `packages[].{name,state,percent}` with `state` values `done`/`failed`.
   Connect-time snapshot as first frame. Additive fields and new event types are safe.
 - `system/*`, `network/*`: `{error,msg,output}` and `exit_code` on `install/status`; `install/start` streams raw text.
+- Kiosk container runs as root without a userns remap (see the last section).
 - Unlisted: the daemon exits and restarts during `upgrade-all` and kills the in-flight POST; CC3's "exit 0 after
   the legacy reply" must not regress the kiosk's resync logic (it tolerates both).
 
@@ -151,15 +152,19 @@ talking to a `1.7.0` daemon already runs on polling only.
 - Use the 202 job plus `/events` terminal event for upgrades instead of the blocking POST
   (`CalaosOsAPI.cpp:208-226`, `UpdateManager.cpp:305-395`), and handle 409 with a dedicated, non-string-matched
   branch in place of the substring checks on "in progress" and "package not found" (`:135`, `:152`, `:384`).
-- Re-read the token file on 401 or reconnect (today read once, `CalaosOsAPI.cpp:19-21`), since CC2 rotates it
-  at boot and a kiosk started before the new token would keep the old one.
+- Re-read the token file on 401 or reconnect (today read once, `CalaosOsAPI.cpp:19-21`), as a safeguard if the daemon restarts or the
+  token changes while the kiosk runs. It is not needed for the CC2 boot-time rewrite: the file is written only
+  if absent, at boot, and the kiosk unit's own `ExecStartPre=init_calaosfs` creates it before launch.
 - Treat only the documented `upgrade_progress` frames as snapshots and key on a new event type for jobs.
 - Estimate: stays at 0.75 d. The change is local to `CalaosOsAPI.cpp` (about 40 lines) and `UpdateManager.cpp`
   (job state machine replacing the POST-result logic), plus tests in `tests/`.
   Deployment is not blocked: nothing here is a prerequisite of the daemon upgrade, the legacy routes keep serving.
 
-## Open point to verify in CC2 (not established here)
+## Token file mode 0600 and the kiosk container
 
-CC2 moves the token file to mode 0600. The kiosk runs in a container on Calaos OS (`UpdateManager.cpp:183`);
-whether its process can read a root-owned 0600 file was not checked in this audit. A kiosk that cannot read
-it logs `unable to read` (`CalaosOsAPI.cpp:23`) and then sends an empty bearer on every call.
+A root-owned 0600 token works: `calaos-home.service` is a system unit, `start_calaos_home` runs
+`podman run --privileged --network=host -v /run/calaos:/run/calaos` with no `--user` or `--userns`, and the
+runner stage of the image has no `USER`, so the kiosk is uid 0 on the host too.
+Constraint for CC2 and CC-042: the kiosk container must stay root with no userns remap. `--user`,
+`--userns=auto` or a `USER` in the runner stage would give `unable to read` (`CalaosOsAPI.cpp:23`) and an
+empty bearer on every call.
