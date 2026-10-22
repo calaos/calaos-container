@@ -1,8 +1,9 @@
 #!/usr/bin/make -f
 
 DISTRIBUTION = $(shell sed -n "s/^VERSION_CODENAME=//p" /etc/os-release)
-VERSION = 1.0.0
-PACKAGEVERSION = $(VERSION)-0~$(DISTRIBUTION)0
+# Version comes from the git tag through the Makefile (CALAOS_VERSION overrides).
+UPSTREAM_VERSION = $(shell $(MAKE) -s --no-print-directory deb-version)
+PACKAGEVERSION = $(UPSTREAM_VERSION)-0~$(DISTRIBUTION)0
 
 %:
 	dh $@
@@ -17,3 +18,6 @@ override_dh_installsystemd:
 
 override_dh_gencontrol:
 	dh_gencontrol -- -v$(PACKAGEVERSION)
+
+# dwz cannot process Go's compressed DWARF and fails the build (compat >= 12).
+override_dh_dwz:

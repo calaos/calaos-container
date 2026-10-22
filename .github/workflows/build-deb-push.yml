@@ -1,8 +1,13 @@
 name: Build et release debian package
 
 on:
+  # Every push to main publishes a -dev.N prerelease (experimental channel);
+  # a manual dispatch publishes a stable major/minor/patch release.
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   workflow_dispatch:
     inputs:
       vincrement:
@@ -40,7 +45,9 @@ jobs:
         id: build
         with:
           image: ghcr.io/calaos/debian_deb_build_base
-          options: -v ${{ github.workspace }}:/work
+          # The image's build-deb.sh still seds a version into debian/rules;
+          # that is now a no-op, debian/rules reads CALAOS_VERSION instead.
+          options: -v ${{ github.workspace }}:/work -e CALAOS_VERSION=${{ steps.calaos_version.outputs.version_bumped }}
           run: /build-deb.sh ${{ steps.calaos_version.outputs.version_bumped }}
 
       - name: Upload artifacts
@@ -61,7 +68,9 @@ jobs:
           token: ${{ secrets.ACTION_DISPATCH }}
           tag: ${{ steps.calaos_version.outputs.version_bumped }}
           name: ${{ steps.calaos_version.outputs.version_bumped }}
-          prerelease: ${{ github.event.inputs.vincrement == '' }}
+          # Derived from the version itself so the flag cannot disagree with
+          # the tag: only -dev.N versions go to the experimental channel.
+          prerelease: ${{ contains(steps.calaos_version.outputs.version_bumped, '-') }}
           files: pkg/*.deb
           gzip: false
 
