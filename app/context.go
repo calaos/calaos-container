@@ -55,10 +55,10 @@ func NewTokenMiddleware() fiber.Handler {
 			}
 		}
 
-		// Browser WebSocket clients cannot set custom headers, so allow the
-		// token to be passed as a query parameter when the Authorization
-		// header is absent.
-		if token == "" {
+		// Published kiosks open the legacy /api/events with ?token= since
+		// they cannot set a header there. /api/v2 never had a query token.
+		v2 := isV2Path(c.Path())
+		if token == "" && !v2 {
 			token = c.Query("token")
 		}
 		c.Locals("token", token)
@@ -68,6 +68,9 @@ func NewTokenMiddleware() fiber.Handler {
 			// Fail closed: no valid token is available (file missing,
 			// unreadable, or empty after trimming). Reject every request
 			// rather than leaking OS error details to the client.
+			if v2 {
+				return sendAPIError(c, errBadBearer())
+			}
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": true,
 				"msg":   "unauthorized",
@@ -76,6 +79,9 @@ func NewTokenMiddleware() fiber.Handler {
 
 		//Check token validity (constant-time to avoid a timing side-channel)
 		if subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+			if v2 {
+				return sendAPIError(c, errBadBearer())
+			}
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": true,
 				"msg":   "wrong token",
@@ -144,4 +150,8 @@ func currentToken() (string, bool) {
 	tokenStr = trimmed
 	tokenValid = true
 	return tokenStr, true
+}
+
+func errBadBearer() *apiError {
+	return newAPIError(fiber.StatusUnauthorized, codeBadBearer, "unauthorized")
 }

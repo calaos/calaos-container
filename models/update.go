@@ -12,6 +12,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// The messages are part of the legacy API: old kiosks match "in progress"
+// and "package not found" in the error body.
+var (
+	ErrUpgradeInProgress = errors.New("upgrade already in progress")
+	ErrPackageNotFound   = errors.New("package not found")
+)
+
 // parseUpdateTime reads and validates general.update_time from the config. It
 // is called from Init() so that a bad value aborts startup with a clear error
 // instead of killing the process from inside a goroutine.
@@ -75,7 +82,7 @@ func CheckUpdates() error {
 func checkForUpdates() error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("checkForUpdates(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
+		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
 
@@ -335,7 +342,7 @@ func finishUpgrade(err error) {
 func Upgrade(pkg string) error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("Upgrade(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
+		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
 
@@ -345,7 +352,7 @@ func Upgrade(pkg string) error {
 		logging.WithFields(logrus.Fields{
 			"pkg": pkg,
 		}).Errorln("Package not found")
-		return fmt.Errorf("package not found")
+		return ErrPackageNotFound
 	}
 
 	initUpgradeStatus()
@@ -376,7 +383,7 @@ func Upgrade(pkg string) error {
 func UpgradeAll() error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("UpgradeAll(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
+		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
 

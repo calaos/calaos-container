@@ -139,6 +139,7 @@ type httpCase struct {
 	auth    string // full Authorization header; "-" for none
 	ctype   string
 	body    string
+	headers map[string]string
 	backend stubBackend
 }
 
@@ -160,6 +161,9 @@ func doCase(t *testing.T, a *AppServer, tc httpCase) (*http.Response, []byte) {
 	if tc.ctype != "" {
 		req.Header.Set("Content-Type", tc.ctype)
 	}
+	for k, v := range tc.headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := a.appFiber.Test(req, -1)
 	if err != nil {
@@ -172,8 +176,6 @@ func doCase(t *testing.T, a *AppServer, tc httpCase) (*http.Response, []byte) {
 	}
 	return resp, b
 }
-
-func strp(s string) *string { return &s }
 
 const goldenLsblkInventory = `{"blockdevices":[` +
 	`{"name":"/dev/sda","path":"/dev/sda","type":"disk","mountpoint":null,"mountpoints":[null],"children":[` +
@@ -220,6 +222,11 @@ func legacyCases(t *testing.T) []httpCase {
 
 		{name: "system_reboot_ok", method: "POST", path: "/api/system/reboot",
 			backend: stubBackend{commands: map[string]stubResult{"systemctl reboot": {}}}},
+		// Deliberate legacy change: no reboot while dpkg runs.
+		{name: "system_reboot_in_progress", method: "POST", path: "/api/system/reboot",
+			backend: stubBackend{status: upgrading}},
+		{name: "system_rollback_in_progress", method: "POST", path: "/api/system/rollback_snapshot",
+			backend: stubBackend{status: upgrading, commands: map[string]stubResult{"calaos_rollback": {}, "systemctl reboot": {}}}},
 		{name: "system_reboot_err", method: "POST", path: "/api/system/reboot",
 			backend: stubBackend{commands: map[string]stubResult{"systemctl reboot": {err: boom}}}},
 		{name: "system_restart_ok", method: "POST", path: "/api/system/restart",
@@ -315,15 +322,15 @@ func TestLegacyGolden(t *testing.T) {
 
 			path := filepath.Join("testdata", "golden", tc.name+".golden")
 			if *updateGolden {
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, got, 0o644); err != nil {
+				if err := os.WriteFile(path, got, 0o600); err != nil {
 					t.Fatal(err)
 				}
 				return
 			}
-			want, err := os.ReadFile(path)
+			want, err := os.ReadFile(path) //nolint:gosec // path built from a test case name
 			if err != nil {
 				t.Fatalf("missing golden file (run with -update on the frozen code): %v", err)
 			}
