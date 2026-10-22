@@ -1,5 +1,7 @@
 # CC-055: CLI client tests
 
+> **Absorbed by ADM-CC3** (admin plan): the cases below become part of that ticket's test checklist, written against the new behaviour. Not scheduled on its own.
+
 - **Phase:** P5
 - **Priority:** P2
 - **Size:** M

@@ -3,7 +3,7 @@
 - **Phase:** P3
 - **Priority:** P3
 - **Size:** S
-- **Status:** Backlog
+- **Status:** Done
 - **Depends on:** CC-001 (the `.shellcheckrc` exclusion list must already exist)
 - **Blocks:** CC-035
 - **Files owned (exclusive for this phase):**

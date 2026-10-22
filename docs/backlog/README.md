@@ -39,6 +39,9 @@ CC-013 ─→ CC-021        (app/system.go install path)
 CC-014 ─→ CC-042        (graceful shutdown → Restart/TimeoutStop)
 P3 done ─→ CC-041       (Makefile last touched by CC-030)
 
+Admin plan (P6): CC-040, CC-042, ADM-CH1a → ADM-CC2 → ADM-CC1 → ADM-CC3 (ADM-CC2b conditional)
+  CC-052 absorbed by ADM-CC2; CC-050, CC-055 absorbed by ADM-CC3
+
 P5 test deps:
   CC-050 ← CC-010, CC-020, CC-021
   CC-051 ← CC-012, CC-040
@@ -135,9 +138,9 @@ they are touched by **at most one ticket per phase**:
 | CC-040 | Unified API contract + CLI lockstep | P4 | P1 | L |
 | CC-041 | Build & release engineering | P4 | P2 | M |
 | CC-042 | systemd unit hardening | P4 | P2 | S |
-| CC-050 | Update subsystem tests | P5 | P1 | M |
+| CC-050 | Update subsystem tests (absorbed by ADM-CC3) | P5 | P1 | M |
 | CC-051 | Network validation tests | P5 | P1 | M |
-| CC-052 | Auth middleware tests | P5 | P1 | S |
+| CC-052 | Auth middleware tests (absorbed by ADM-CC2) | P5 | P1 | S |
 | CC-053 | Config & lifecycle tests | P5 | P2 | S |
 | CC-054 | Command exec & system info tests | P5 | P1 | M |
-| CC-055 | CLI client tests | P5 | P2 | M |
+| CC-055 | CLI client tests (absorbed by ADM-CC3) | P5 | P2 | M |

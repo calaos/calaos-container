@@ -1,5 +1,7 @@
 # CC-052: Auth middleware tests
 
+> **Absorbed by ADM-CC2** (admin plan): the cases below become part of that ticket's test checklist, written against the new behaviour. Not scheduled on its own.
+
 - **Phase:** P5
 - **Priority:** P1
 - **Size:** S
