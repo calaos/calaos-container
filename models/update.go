@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,16 +25,26 @@ var (
 // snapshots included, so RebootGuard can tell an upgrade from a version check.
 var upgrading atomic.Bool
 
+// rebootLockWait bounds how long RebootGuard waits for a version check to
+// release upgradeLock.
+var rebootLockWait = 30 * time.Second
+
 // RebootGuard runs fn, a reboot or a rollback, unless an upgrade holds
 // upgradeLock. On success the lock stays held: the system is going down and
-// no upgrade may start meanwhile. A version check holding the lock does not
-// block it: cutting apt-get update is harmless.
+// no upgrade may start meanwhile. Behind a version check it waits for the
+// lock; a queued waiter makes TryAcquire fail, so no upgrade slips in. A
+// holder that does not release in time is treated as an upgrade that has not
+// raised its flag yet.
 func RebootGuard(fn func() error) error {
 	if !upgradeLock.TryAcquire(1) {
 		if upgrading.Load() {
 			return ErrUpgradeInProgress
 		}
-		return fn()
+		ctx, cancel := context.WithTimeout(context.Background(), rebootLockWait)
+		defer cancel()
+		if err := upgradeLock.Acquire(ctx, 1); err != nil {
+			return ErrUpgradeInProgress
+		}
 	}
 	if err := fn(); err != nil {
 		upgradeLock.Release(1)
