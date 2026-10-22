@@ -9,6 +9,8 @@ PACKAGEVERSION = $(UPSTREAM_VERSION)-0~$(DISTRIBUTION)0
 	dh $@
 
 export GOCACHE=/tmp
+# compat 13 resets HOME, so the CI's git safe.directory is not seen by go's VCS stamping.
+export GOFLAGS=-buildvcs=false
 
 override_dh_installsystemd:
 	dh_installsystemd --name=calaos-container --no-stop-on-upgrade
