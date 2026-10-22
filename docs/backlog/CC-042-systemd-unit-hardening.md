@@ -29,7 +29,7 @@ systemd unit hardening is essentially absent:
 ## Admin plan amendments
 
 - **`Restart=always`, not `on-failure`.** `Restart=on-failure` would not restart after a clean exit 0 following a self-upgrade. Drop every `Restart=on-failure` item below for `calaos-container.service`.
-- **Unit.** `ExecStartPre=-/usr/bin/dpkg --configure -a` (leading `-`: a broken dpkg must not prevent the daemon from starting), `KillMode=process`, `TimeoutStopSec`, and a long `TimeoutStartSec` (30min) so the pre-start `dpkg --configure` is not killed.
+- **Unit.** `ExecStartPre=-/usr/bin/env CALAOS_CT_STARTPRE=1 /usr/bin/dpkg --configure -a` (leading `-`: a broken dpkg must not prevent the daemon from starting), `KillMode=process`, `TimeoutStopSec`, and a long `TimeoutStartSec` (30min) so the pre-start `dpkg --configure` is not killed.
 - **Postinst with deferred restart.** New `debian/calaos-container.postinst` (`--no-stop-on-upgrade` stays in `debian/rules`, owned by CC-041). It starts a deferred restart in a `systemd-run` transient unit. That unit waits until the dpkg lock is free, then until `GET /api/update/status` returns `status: "idle"`. It retries every 5 s while the daemon is unreachable and gives up with a log entry after 2 h. It restarts only if `/proc/<pid>/exe` is marked deleted. The postinst never waits for calaos-container to start: it uses `--no-block`, or does nothing when `$CALAOS_CT_STARTPRE` is set. The ExecStartPre exports that variable, e.g. `ExecStartPre=-/usr/bin/env CALAOS_CT_STARTPRE=1 /usr/bin/dpkg --configure -a`.
 - Absorbs CC4 of the admin plan; CC5 (apt in a transient unit) only if this proves insufficient at acceptance.
 - Blocks ADM-CC2.
@@ -57,7 +57,7 @@ None expected, but each directive must be validated on real hardware/VM because 
 - [ ] `calaos-container.service` still successfully runs an apt upgrade, a podman operation, and (in a VM) an install, with the new directives applied.
 - [ ] `Restart=always`, `KillMode=process`, `TimeoutStopSec` and `TimeoutStartSec=30min` present; a clean `systemctl stop` completes within the timeout.
 - [ ] Postinst: no restart while the dpkg lock is held or a job is running; never blocks startup.
-- [ ] `ExecStartPre=-/usr/bin/dpkg --configure -a` does not prevent startup when dpkg is broken.
+- [ ] `ExecStartPre=-/usr/bin/env CALAOS_CT_STARTPRE=1 /usr/bin/dpkg --configure -a` does not prevent startup when dpkg is broken.
 - [ ] `dpkg --configure -a` run from ExecStartPre with a pending calaos-container postinst completes without waiting on the unit.
 - [ ] Omitted directives are documented with rationale.
 

@@ -27,6 +27,6 @@
 
 - [ ] 10 concurrent `init_calaosfs` runs leave one 0600 token and no temp file.
 - [ ] Token is hex; `?token=` works on `/events` and gives 401 elsewhere.
-- [ ] Token file is 0600, 32 random bytes, not rewritten when present.
+- [ ] Token file is 0600, 32 urandom bytes hex-encoded (64 chars), not rewritten when present.
 - [ ] `go test -race ./app/ -run 'Token|Auth'` green, including the CC-052 checklist.
 - [ ] `/etc/ola` is created on a fresh system.
