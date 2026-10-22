@@ -16,6 +16,7 @@
   - `cmd/calaos-os/api/api.go`
   - `cmd/calaos-os/calaos-os.go`
   - `docs/API.md` (new)
+  - `app/*_golden_test.go`, `app/testdata/golden/` (legacy golden tests)
 
 ## Context
 
@@ -30,9 +31,9 @@ This ticket runs last among code changes precisely because it rewrites every `ap
 
 ## Work items
 
-- [ ] Define one response envelope (e.g. `{"error": bool, "msg": string, "data": <payload>}`) and apply it to **every** handler consistently, including the update endpoints.
+- [ ] Define one response envelope (e.g. `{"error": bool, "msg": string, "data": <payload>}`) and apply it to every handler **under the versioned prefix**, including the update endpoints.
 - [ ] Add a central Fiber error handler (`fiber.Config{ErrorHandler: ...}`) and/or a helper so handlers `return err`/`return apiError(c, code, msg)` instead of repeating the 500 block ~15×. Remove all the duplicated blocks.
-- [ ] **Never send `err.Error()` to clients.** Return a generic, stable client message; log the detailed error server-side (with the request path/id).
+- [ ] **Never send `err.Error()` to clients on versioned routes.** Return a generic, stable client message; log the detailed error server-side (with the request path/id). Legacy routes keep their current bodies (golden tests).
 - [ ] Map `models` "upgrade already in progress" to **409**; map other error classes to appropriate codes (400 validation, 404 not-found, 409 conflict, 500 internal).
 - [ ] `GET /system/install/status` with no prior install → **200** with `{"status":"never_run"}` (or the envelope equivalent), not 400.
 - [ ] Update the CLI client SDK (`cmd/calaos-os/api/api.go`) and command layer (`cmd/calaos-os/calaos-os.go`) to parse the single envelope for all endpoints; remove the per-endpoint special-casing.
@@ -42,7 +43,7 @@ This ticket runs last among code changes precisely because it rewrites every `ap
 
 - Business logic in `models/*` — frozen by the time this runs; only the handler ↔ model boundary (error mapping) is touched here, not model internals.
 - Auth logic — CC-011 (this ticket may restyle the 401 body to the envelope, but not change auth behavior).
-- Adding tests — CC-051/052/055.
+- Adding tests beyond the legacy golden tests — CC-051 (CC-052 moves to ADM-CC2, CC-055 to ADM-CC3).
 
 ## Admin plan amendments
 
@@ -63,8 +64,8 @@ External clients (calaos-home web UI) keep working on the legacy routes; the in-
 
 ## Acceptance criteria
 
-- [ ] `git grep 'err.Error()' app/` returns no client-facing usage (only logging).
-- [ ] Every handler returns the same envelope shape (verify by curling each route).
+- [ ] `git grep 'err.Error()' app/` shows no client-facing usage outside the legacy handlers pinned by golden tests.
+- [ ] Every versioned-prefix handler returns the same envelope shape (verify by curling each route).
 - [ ] Second concurrent upgrade under the versioned prefix returns **409**; the legacy `POST /update/upgrade-all` still returns its current response.
 - [ ] Golden tests show legacy routes and response shapes byte-identical to before.
 - [ ] `GET /system/install/status` on a fresh system returns 200 `never_run` under the versioned prefix (legacy unchanged).
