@@ -8,3 +8,4 @@ grub-btrfs/grub-btrfsd usr/bin
 debian/btrfs-scrub@.service lib/systemd/system
 debian/btrfs-scrub@.timer lib/systemd/system
 debian/usb-serial-touchscreen@.service lib/systemd/system
+scripts/calaos_deferred_restart usr/lib/calaos-container

@@ -6,8 +6,18 @@ Before=olad.service
 [Service]
 Type=simple
 ExecStartPre=/usr/sbin/init_calaosfs
+# Finishes a package run that was cut short (power loss, daemon killed while
+# driving apt). "-": a broken dpkg must not keep the daemon down. The variable
+# keeps our postinst from waiting on this very start job.
+ExecStartPre=-/usr/bin/env CALAOS_CT_STARTPRE=1 DEBIAN_FRONTEND=noninteractive /usr/bin/dpkg --force-confdef --force-confold --configure -a
 ExecStart=/usr/bin/calaos-container
+# A self-upgrade exits 0 and must be relaunched as well.
 Restart=always
+# Covers the dpkg run above: configuring calaos-server pulls its image.
+TimeoutStartSec=30min
+TimeoutStopSec=30s
+# dpkg spawned by the daemon must outlive a stop or restart of the daemon.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
