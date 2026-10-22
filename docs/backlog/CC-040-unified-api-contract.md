@@ -5,7 +5,7 @@
 - **Phase:** P4
 - **Priority:** P1
 - **Size:** L
-- **Status:** In Progress (`docs/API.md` contract first, implementation second)
+- **Status:** Done (contract in #3, implementation in the follow-up PR)
 - **Depends on:** ALL of P1 and P2 (CC-010, CC-011, CC-012, CC-013, CC-014, CC-020, CC-021, CC-022, CC-023) — this ticket touches every HTTP handler and both CLI files, so it must run alone with respect to `app/` and `cmd/`
 - **Blocks:** CC-051, CC-052, CC-055
 - **Files owned (exclusive for this phase):**
@@ -31,13 +31,13 @@ This ticket runs last among code changes precisely because it rewrites every `ap
 
 ## Work items
 
-- [ ] Define one response envelope (e.g. `{"error": bool, "msg": string, "data": <payload>}`) and apply it to every handler **under the versioned prefix**, including the update endpoints.
-- [ ] Add a central Fiber error handler (`fiber.Config{ErrorHandler: ...}`) and/or a helper so handlers `return err`/`return apiError(c, code, msg)` instead of repeating the 500 block ~15×. Remove all the duplicated blocks.
-- [ ] **Never send `err.Error()` to clients on versioned routes.** Return a generic, stable client message; log the detailed error server-side (with the request path/id). Legacy routes keep their current bodies (golden tests).
-- [ ] Map `models` "upgrade already in progress" to **409**; map other error classes to appropriate codes (400 validation, 404 not-found, 409 conflict, 500 internal).
-- [ ] `GET /system/install/status` with no prior install → **200** with `{"status":"never_run"}` (or the envelope equivalent), not 400.
-- [ ] Update the CLI client SDK (`cmd/calaos-os/api/api.go`) and command layer (`cmd/calaos-os/calaos-os.go`) to parse the single envelope for all endpoints; remove the per-endpoint special-casing.
-- [ ] Write `docs/API.md`: document every route, request/response schema, status codes, the auth header, and an **old→new mapping** table for the breaking changes (envelope, 409, never_run, removed `/update/images` from CC-002, install `confirm` field from CC-013).
+- [x] Define one response envelope (e.g. `{"error": bool, "msg": string, "data": <payload>}`) and apply it to every handler **under the versioned prefix**, including the update endpoints.
+- [x] Add a central Fiber error handler (`fiber.Config{ErrorHandler: ...}`) and/or a helper so handlers `return err`/`return apiError(c, code, msg)` instead of repeating the 500 block ~15×. Remove all the duplicated blocks.
+- [x] **Never send `err.Error()` to clients on versioned routes.** Return a generic, stable client message; log the detailed error server-side (with the request path/id). Legacy routes keep their current bodies (golden tests).
+- [x] Map `models` "upgrade already in progress" to **409**; map other error classes to appropriate codes (400 validation, 404 not-found, 409 conflict, 500 internal).
+- [x] `GET /system/install/status` with no prior install → **200** with `{"status":"never_run"}` (or the envelope equivalent), not 400.
+- [x] Update the CLI client SDK (`cmd/calaos-os/api/api.go`) and command layer (`cmd/calaos-os/calaos-os.go`) to parse the single envelope for all endpoints; remove the per-endpoint special-casing.
+- [x] Write `docs/API.md`: document every route, request/response schema, status codes, the auth header, and an **old→new mapping** table for the breaking changes (envelope, 409, never_run, removed `/update/images` from CC-002, install `confirm` field from CC-013).
 
 ## Out of scope
 
@@ -64,15 +64,21 @@ External clients (calaos-home web UI) keep working on the legacy routes; the in-
 
 ## Acceptance criteria
 
-- [ ] `git grep 'err.Error()' app/` shows no client-facing usage outside the legacy handlers pinned by golden tests.
-- [ ] Every versioned-prefix handler returns the same envelope shape (verify by curling each route).
-- [ ] `GET /api/v2/update/check` during a legacy run returns `409 upgrade_in_progress`; the legacy `POST /update/upgrade-all` still returns its current response. (A second concurrent v2 upgrade returning 409 moves to ADM-CC3, which adds the v2 upgrade routes.)
-- [ ] Golden tests show legacy routes and response shapes byte-identical to before.
-- [ ] `GET /system/install/status` on a fresh system returns 200 `never_run` under the versioned prefix (legacy unchanged).
-- [ ] `calaos-os` commands work end-to-end against the updated daemon (list, check-update, upgrade, network).
-- [ ] `docs/API.md` exists with the old→new mapping and the admin section.
-- [ ] `go vet ./...` and `cd cmd/calaos-os && go vet ./...` green.
+- [x] `git grep 'err.Error()' app/` shows no client-facing usage outside the legacy handlers pinned by golden tests.
+- [x] Every versioned-prefix handler returns the same envelope shape (verify by curling each route).
+- [x] `GET /api/v2/update/check` during a legacy run returns `409 upgrade_in_progress`; the legacy `POST /update/upgrade-all` still returns its current response. (A second concurrent v2 upgrade returning 409 moves to ADM-CC3, which adds the v2 upgrade routes.)
+- [x] Golden tests show legacy routes and response shapes byte-identical to before.
+- [x] `GET /system/install/status` on a fresh system returns 200 `never_run` under the versioned prefix (legacy unchanged).
+- [ ] `calaos-os` commands work end-to-end against the updated daemon (list, check-update, upgrade, network). Partly: see verification notes; a real upgrade and `network` need a box or the RC1 VM.
+- [x] `docs/API.md` exists with the old→new mapping and the admin section.
+- [x] `go vet ./...` and `cd cmd/calaos-os && go vet ./...` green.
 
 ## Verification notes
 
-_(filled by the implementing agent)_
+- Prefix `/api/v2`. Routes: `update/{check,available,installed,status}`, `system/{reboot,restart,info,fs_status,rollback_snapshot}`, `system/install/{list_devices,start,status}`, `network/{list,:intf}`, `events`. No v2 upgrade route until ADM-CC3; the CLI upgrades through the legacy routes.
+- `app/legacy_golden_test.go` + `app/testdata/golden/` (52 cases) pin status, content type and body of every legacy route. The goldens were recorded before the refactor and none changed; two were added: legacy `system/reboot` answers 409 during a run (deliberate, ADM-CH1a), legacy `rollback_snapshot` keeps rebooting during a run (accepted risk).
+- `app/v2_test.go`: exact envelope per route, 409, `never_run`/`running`/`finished`, no internal text in any v2 error, `bad_bearer`, `?token=` refused on v2, session header (`bad_session`, empty header, `not_allowed` on bearer-only routes), 404/405/426 envelopes, `/api/v2/events`.
+- `models` only gained `ErrUpgradeInProgress` and `ErrPackageNotFound`, with the same messages.
+- CLI: `/api/v2` envelope with a fallback to the legacy routes when the daemon in memory predates `/api/v2`; `/api/v2/events`, then `/api/events`. Tests in `cmd/calaos-os/api/api_v2_test.go`.
+- `go vet`, `golangci-lint` (v2.12.2) and `go test -race ./...` green in `ghcr.io/calaos/debian_deb_build_base`.
+- End to end in that container (daemon + CLI): `calaos-os list`, `check-update`, `upgrade no-such-pkg` (package not found, exit 4) work; `network list` fails there only because the image has no `networkctl` (legacy fails the same way, with the raw error text).

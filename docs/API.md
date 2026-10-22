@@ -52,7 +52,9 @@ Error:
 - `code` is present on every error and absent on success. Its values form the closed vocabulary
   below. Clients branch on `code`, never on `msg`.
 - `msg` is a short, stable English sentence for logs and fallbacks. It never contains a Go
-  error string, subprocess output or a file path: the details go to the daemon log only.
+  error string, subprocess output or a file path: the details go to the daemon log only. On
+  `invalid_request` it may say what is wrong with the client's own input (field, interface,
+  device).
 - `data` carries the payload on success. On an error it is absent, or holds the code-specific
   details listed in the vocabulary.
 - `Content-Type: application/json` on every enveloped response.
@@ -444,6 +446,52 @@ vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_n
   not active yet.
 - The legacy `GET /api/update/status` returns `status: "idle"` whenever no run is in progress:
   the deferred restart of the package (CC-042) waits on it.
+
+## Legacy API (frozen)
+
+These routes answer exactly as they did before `/api/v2/`. `app/testdata/golden/` pins their
+status, content type and body, and `app/legacy_golden_test.go` fails on any change. `<err>` is
+the raw Go error text.
+
+| Method | Path | Success | Error |
+|---|---|---|---|
+| POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
+| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/install/start` | 200 `text/plain` log stream | 400 or 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/system/install/status` | 200 `{"error":false,"msg":"ok","exit_code":<int>,"log":<text>}` | 400 `{"error":true,"msg":<err>}`, including "never ran" |
+| GET | `/api/system/info` | 200 `{"error":false,"msg":"ok","output":{hostname, uptime, cpu_usage, mem_usage}}` | 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/network/list` | 200 `{"error":false,"msg":"ok","output":[...]}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/network/{intf}` | 200 `{"error":false,"msg":"ok"}` | 400 or 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/update/check` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress" during a run) |
+| GET | `/api/update/available` | 200 raw object keyed by package | none |
+| GET | `/api/update/installed` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/update/upgrade-all` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress") |
+| POST | `/api/update/upgrade?package=<name>` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("package not found", "upgrade already in progress") |
+| GET | `/api/update/status` | 200 raw `<Status>` | none |
+| GET (WS) | `/api/events` | 101, frames as in Events | 426 `Upgrade Required` (text) on a plain `GET` |
+
+Unknown legacy paths answer fiber's plain-text `404 Cannot GET ...` and `405 Method Not Allowed`.
+A bearer failure answers `401 {"error":true,"msg":"wrong token"}`, or `"unauthorized"` when no
+token is provisioned.
+
+### Old → new mapping
+
+| Legacy | `/api/v2/` |
+|---|---|
+| raw JSON on `update/*`, `{error, msg, output}` on `system/*` and `network/*` | one envelope, payload in `data` |
+| `500` "upgrade already in progress" | `409 upgrade_in_progress` |
+| `400` on `install/status` before any install | `200 {"status":"never_run"}`; `running` while the installer runs |
+| `msg` = raw Go or subprocess error | `code` + sanitized `msg`; details in the daemon log |
+| fiber plain-text `404`, `405`, `426` | `not_found`, `method_not_allowed`, `upgrade_required` envelopes |
+| `401 {"msg":"wrong token"}` | `401 bad_bearer` |
+| `?token=` accepted | header only |
+| `POST update/upgrade?package=` and `upgrade-all`, synchronous | `202` job, body `{"package"}` (ADM-CC3) |
+| `GET update/status` = `<Status>` | `{"progress": <Status>, "job": <Job> or null}` |
+| `/update/images` (removed earlier, CC-002) | none |
+| `install/start` without `confirm` (refused since CC-013) | same rule: `"confirm": true` required |
 
 ## Rollout
 
