@@ -306,10 +306,12 @@ synchronous behaviour: they answer when apt ends.
 - `package` must match `^[A-Za-z0-9.+-]+$`, start with a letter or a digit, contain no `..` and
   be at most 128 characters long; otherwise `400 invalid_request`. A valid name without a
   pending update gives `404 package_not_found`, and no job.
-- The last job is persisted in `/run/calaos-container/last_job.json` (0600). It survives a daemon
-  restart, including the self-upgrade restart, and is gone after a reboot: being on tmpfs, it is
-  outside every snapshot, so a rollback never brings back an old job. `GET update/status`
-  returns the running job, or the last finished one, or `null` if none ran since boot.
+- The last job is persisted in `/var/log/calaos-container/last_job.json` (0600). `/var/log` is its
+  own btrfs subvolume: it survives daemon restarts and reboots, and no snapshot or rollback ever
+  restores it. `GET update/status` returns the running job, or the last finished one, or `null`
+  if none ever ran.
+- The job records the kernel boot id (`/proc/sys/kernel/random/boot_id`). Once the boot id
+  differs, the daemon reports `reboot_required: false` for it: the reboot has happened.
 - At start, before any route is served, a persisted job still `running` (crash, OOM kill)
   becomes `error` with `error: "interrupted"` and a `finished_at`. The interrupted dpkg run itself
   is resumed by the unit's `dpkg --configure -a`.
