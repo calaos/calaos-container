@@ -24,4 +24,6 @@
 ## Acceptance
 
 - [ ] Golden tests: legacy upgrade route unchanged.
+- [ ] A second concurrent upgrade under `/api/v2/` returns `409 upgrade_in_progress` with `job_id`.
+- [ ] A job persisted as `running` becomes `error` / `interrupted` at start, before any route is served.
 - [ ] CC-050 and CC-055 checklists covered.
