@@ -66,7 +66,7 @@ External clients (calaos-home web UI) keep working on the legacy routes; the in-
 
 - [ ] `git grep 'err.Error()' app/` shows no client-facing usage outside the legacy handlers pinned by golden tests.
 - [ ] Every versioned-prefix handler returns the same envelope shape (verify by curling each route).
-- [ ] Second concurrent upgrade under the versioned prefix returns **409**; the legacy `POST /update/upgrade-all` still returns its current response.
+- [ ] `GET /api/v2/update/check` during a legacy run returns `409 upgrade_in_progress`; the legacy `POST /update/upgrade-all` still returns its current response. (A second concurrent v2 upgrade returning 409 moves to ADM-CC3, which adds the v2 upgrade routes.)
 - [ ] Golden tests show legacy routes and response shapes byte-identical to before.
 - [ ] `GET /system/install/status` on a fresh system returns 200 `never_run` under the versioned prefix (legacy unchanged).
 - [ ] `calaos-os` commands work end-to-end against the updated daemon (list, check-update, upgrade, network).

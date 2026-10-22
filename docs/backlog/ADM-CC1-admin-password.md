@@ -22,3 +22,4 @@
 
 - [ ] Tests derive from the `docs/API.md` admin section.
 - [ ] Sessions survive a daemon restart; limiter answers 429 at once.
+- [ ] A present-but-empty `X-Calaos-Admin-Session` answers `401 bad_session` (`Request().Header.Peek` returns nil only when the header is absent).

@@ -121,7 +121,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk) |
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
-| POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, then reboots) |
+| POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, then reboots); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/install/list_devices` | bearer only | 200 | `lsblk --json --output-all` output |
 | POST | `/api/v2/system/install/start` | bearer only | 200 | `text/plain` log stream; body `{"device": "/dev/...", "confirm": true}` |
 | GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}` |
@@ -133,6 +133,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/admin/reset` | bearer only | 200 | `{"was_set": <bool>}` |
 | POST | `/api/v2/admin/alerts/ack` | bearer only | 200 | `{"acked": <int>}`; body `{"ids": ["..."]}` |
 | GET (WS) | `/api/v2/events` | bearer header only | 101 | event stream, see Events |
+| GET | `/api/v2/admin/push/{code_id}` | bearer only | 200 | phase 2: `{"token": "<push token>", "message": "<text>"}`, single use (a second call gives `404 not_found`) |
 
 "Bearer only" routes refuse a request that carries `X-Calaos-Admin-Session` (`403 not_allowed`):
 the session path (calaos_server) never reaches them.
@@ -159,15 +160,18 @@ keeps none: it relays the session the browser holds, in `X-Calaos-Admin-Session`
   container). Sessions survive a daemon restart, including the restart after the daemon upgrades
   itself, and die at reboot. The daemon stores a SHA-256 of each session, never the session.
 - **Bound:** at most 32 live sessions; issuing one more drops the oldest.
-- **Validation:** whenever the header is present, on any `/api/v2/` route, the daemon checks the
-  session before the route runs:
-  - empty, unknown, expired or invalidated: `401 bad_session`;
-  - valid, on a bearer-only route (`system/install/*`, `system/rollback_snapshot`,
-    `network/*`, `admin/reset`, `admin/alerts/ack`, recovery `admin/set`): `403 not_allowed`;
-  - valid otherwise: the route runs.
+- **Validation:** whenever the header is present, on any `/api/v2/` route, before the route runs:
+  - on a bearer-only route (`system/install/*`, `system/rollback_snapshot`, `network/*`,
+    `admin/reset`, `admin/alerts/ack`, `admin/push/*`, recovery `admin/set`): `403 not_allowed`,
+    without looking the session up;
+  - elsewhere, empty, unknown, expired or invalidated: `401 bad_session`;
+  - otherwise the route runs.
 
-  Without the header, the bearer alone authorizes the call: that is the CLI path. Deciding which
-  household actions need a session is calaos_server's job (see the relay table).
+  A header present with an empty value counts as present. calaos_server never sends an empty
+  header.
+
+  Without the header, the bearer alone authorizes the call: that is the CLI path. calaos_server
+  therefore never calls a session route without the header (see the relay table).
 - **Audit id:** the first 8 hex characters of the SHA-256 of the session. It is the only form of
   a session that ever appears in a log.
 
@@ -257,6 +261,9 @@ to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
 (`X-Calaos-Client-IP`, `local` or `invalid`), method and path, result (`ok` or the error
 `code`), session audit id. Never a password, a session or the bearer.
 
+`GET admin/status` without a session is not audited (calaos_server polls it). `audit.log` is
+rotated at 1 MiB, one old file kept.
+
 ## Upgrade jobs
 
 On `/api/v2/`, `POST update/upgrade-all` and `POST update/upgrade` start a job and answer at once:
@@ -287,13 +294,25 @@ synchronous behaviour: they answer when apt ends.
 
 - One upgrade at a time, whatever started it (versioned job, legacy synchronous route, CLI,
   kiosk). Every run is recorded as a job, so `update/status` shows a run started from the kiosk.
-- While a run is in progress, `POST update/upgrade*`, `GET update/check` and
-  `POST system/reboot` answer `409 upgrade_in_progress` with `data.job_id`.
+- While a run is in progress, `POST update/upgrade*`, `GET update/check`,
+  `POST system/reboot` and `POST system/rollback_snapshot` answer `409 upgrade_in_progress`
+  (with `data.job_id` once jobs exist).
+- Legacy routes during a run keep their current answers:
+  `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
+  `"package not found"` unchanged. One deliberate exception: the legacy `POST /api/system/reboot`
+  answers `409 {"error": true, "msg": "upgrade already in progress"}` during a run, so that an old
+  kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and ignore the reboot result.
+  The legacy `POST /api/system/rollback_snapshot` is unchanged.
 - `package` must match `^[A-Za-z0-9.+-]+$`, start with a letter or a digit, contain no `..` and
   be at most 128 characters long; otherwise `400 invalid_request`. A valid name without a
   pending update gives `404 package_not_found`, and no job.
-- The last job is persisted and survives a daemon restart. `GET update/status` returns the
-  running job, or the last finished one, or `null` if none ever ran.
+- The last job is persisted in `/run/calaos-container/last_job.json` (0600). It survives a daemon
+  restart, including the self-upgrade restart, and is gone after a reboot: being on tmpfs, it is
+  outside every snapshot, so a rollback never brings back an old job. `GET update/status`
+  returns the running job, or the last finished one, or `null` if none ran since boot.
+- At start, before any route is served, a persisted job still `running` (crash, OOM kill)
+  becomes `error` with `error: "interrupted"` and a `finished_at`. The interrupted dpkg run itself
+  is resumed by the unit's `dpkg --configure -a`.
 - Progress is published as `upgrade_progress` events, each job state change as `upgrade_job`
   (see Events). The terminal `upgrade_job` is published before the daemon exits for a
   self-upgrade, and after the legacy POST that started the run (if any) has been answered.
@@ -306,6 +325,9 @@ A client following a job:
    `status`;
 4. after any disconnection (including the daemon's own restart), reconnects with backoff and
    reads `GET update/status`: events are not replayed, the persisted job is the source of truth.
+
+If the terminal `upgrade_job` arrives before the POST answer, the client reads
+`GET update/status` once it has the `id`.
 
 ## Events
 
@@ -328,7 +350,7 @@ On connect the daemon sends, in order: one `upgrade_progress` with the current `
 | `upgrade_job` | `<Job>` | On job creation and on the terminal state |
 | `admin_set` | `{"id": "<16 hex>", "ts": "<RFC 3339>"}` | Alert, replayed until acknowledged |
 | `admin_reset` | `{"id": "<16 hex>", "ts": "<RFC 3339>"}` | Alert, replayed until acknowledged |
-| `push_code` | `{"approver_id": "...", "code_id": "..."}` | Phase 2. Carries neither token nor code; never relayed to household clients |
+| `push_code` | `{"approver_id": "...", "code_id": "..."}` | Phase 2. Carries neither token nor code; calaos_server fetches the message with `GET /api/v2/admin/push/{code_id}` |
 
 - Clients ignore types they do not know.
 - Delivery is best effort: a subscriber that falls behind loses events. Clients resynchronise
@@ -359,15 +381,19 @@ validated `package`.
 | phase 2: `approver_list`, `approver_enroll`, `approver_confirm`, `console_open` | routes named in this file when they land | yes |
 
 calaos_server's own calls, outside the table: `GET /api/v2/admin/status`,
-`POST /api/v2/admin/alerts/ack`, `GET /api/v2/events`.
+`POST /api/v2/admin/alerts/ack`, `GET /api/v2/events`, and in phase 2
+`GET /api/v2/admin/push/{code_id}`.
 
-`mcp_regenerate` never reaches the daemon, but still needs a live session: calaos_server first
-validates it with any session-allowed read (`GET /api/v2/admin/status` with the header) and acts
-only on a `200`.
+Actions calaos_server serves itself while admin is set (`config get/put`, `get_mcp_info`,
+`mcp_regenerate`) validate the session with `GET /api/v2/admin/status` carrying
+`X-Calaos-Admin-Session`, and proceed only on `200` with `admin_set: true`. For every row marked
+"yes" and for these actions, a missing or empty `admin_session` from the client is answered
+`bad_session` by calaos_server itself: the daemon call is never made without the header, because
+without it the bearer alone authorizes.
 
 Never relayed, whatever the client sends: `system/install/*`, `system/rollback_snapshot`,
-`system/fs_status`, `network/*`, `update/installed`, `admin/reset`, `admin/alerts/ack` (for a
-client), `admin/set` with `recovery`. The daemon refuses a session on the bearer-only ones as a second barrier.
+`system/fs_status`, `network/*`, `update/installed`, `admin/reset`, `admin/alerts/ack` and
+`admin/push/*` (for a client), `admin/set` with `recovery`. The daemon refuses a session on the bearer-only ones as a second barrier.
 
 `package` is checked by calaos_server with the same rule as the daemon (regex
 `^[A-Za-z0-9.+-]+$`, first character a letter or a digit, no `..`, at most 128 characters) and
@@ -376,15 +402,31 @@ sent in the JSON body, never in the path or the query.
 Every relayed call carries `X-Calaos-Client-IP`. calaos_server builds the daemon body itself from
 the fields above and drops anything else the client sent.
 
+### Relayed events
+
+calaos_server forwards to household clients, as `admin_event {type, ts, data}`, only:
+
+- `upgrade_progress`, `data` = `<Status>`;
+- `admin_set` and `admin_reset`, with `ts` only (`id` stripped, no `data`).
+
+`upgrade_job` is not forwarded: a client that resumes, or sees `upgrade_progress` reach `done` or
+`error`, reads the job through `update_status`. `push_code` is consumed by calaos_server
+(phase 2). Every other type is dropped.
+
 ### Error translation
 
 | Daemon answer | calaos_server code |
 |---|---|
 | connection refused, timeout, invalid answer | `daemon_unreachable` or `admin_unavailable`, per `AdminState` |
 | `401` without `code: bad_session`, after re-reading the token and one retry | `daemon_unreachable` |
-| `404` on `GET /api/v2/admin/status` (or on any `/api/v2/` route) | `daemon_too_old` |
+| `404` on `GET /api/v2/admin/status` (any body), or any `/api/v2/` `404` whose body is not an envelope with a `code` | `daemon_too_old` |
 | `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed` | same code |
-| `invalid_request`, `package_not_found`, `internal`, any other | passed through with the daemon `msg` (safe to display) |
+| `invalid_request`, `package_not_found` | same code, with the daemon `msg` (safe to display) |
+| `internal`, `not_found`, `method_not_allowed`, any unknown code | `internal` |
+
+`rate_limited` copies `retry_after`; `upgrade_in_progress` copies `job_id`. The calaos_server
+vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_not_found` and
+`internal`, and cites this file's `package` rule rather than the bare regex.
 
 ## Compatibility during the upgrade
 
@@ -395,6 +437,11 @@ the fields above and drops anything else the client sent.
   `daemon_too_old` until the new daemon is active.
 - A daemon that serves `/api/v2/` but not yet the admin routes answers `404 not_found` on
   `admin/status`, which also reads as `daemon_too_old`.
+- New CLI, old daemon still in memory (before the deferred restart): `/api/v2/` answers `404`;
+  the CLI falls back to the legacy routes, and `calaos-os admin` prints that the new daemon is
+  not active yet.
+- The legacy `GET /api/update/status` returns `status: "idle"` whenever no run is in progress:
+  the deferred restart of the package (CC-042) waits on it.
 
 ## Rollout
 
@@ -402,11 +449,11 @@ The contract above is complete; the daemon implements it in steps.
 
 | Part | Lands with |
 |---|---|
-| `/api/v2/` prefix, envelope, error vocabulary, `bad_bearer`, `never_run`, `409` on `update/check`, `update`, `system`, `network` routes, `/api/v2/events` | CC-040 |
-| 32-byte token, `?token=` limited to the legacy `/api/events` | ADM-CC2 |
+| `/api/v2/` prefix, envelope, error vocabulary, `bad_bearer`, `?token=` refused on `/api/v2/`, `never_run`, `update`, `system`, `network` routes, `/api/v2/events`, `409` on `update/check`, `system/reboot` (legacy too) and `system/rollback_snapshot` during a run, `X-Calaos-Admin-Session` checks (every session unknown until ADM-CC1) | CC-040 |
+| 32-byte token, `?token=` refused on every legacy route but `/api/events` | ADM-CC2 |
 | `admin/*` routes, sessions, `X-Calaos-Admin-Session`, rate limiting, alerts, audit, `calaos-os admin set|reset` | ADM-CC1 |
-| `202` upgrade jobs, `upgrade_job`, `job` in `update/status`, `409` on reboot, session checks on the non-admin routes | ADM-CC3 |
-| `push_code`, approver and console routes | phase 2 (AP1a, CO1) |
+| `202` upgrade jobs, `upgrade_job`, `job` in `update/status` and in `409` answers, interrupted jobs | ADM-CC3 |
+| `push_code`, `admin/push/{code_id}`, approver and console routes | phase 2 (AP1a, CO1) |
 
 Until ADM-CC3, `/api/v2/` has no upgrade route (`404`): the CLI upgrades through the legacy
 routes, and `update/status` returns `"job": null`.
