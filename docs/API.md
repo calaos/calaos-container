@@ -285,8 +285,8 @@ kept; the oldest goes first.
 
 ### Audit
 
-Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session` writes one line
-to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
+Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session`, except those
+refused with `bad_bearer` or `bad_session` (below), writes one line to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
 (`X-Calaos-Client-IP`, `local` or `invalid`), result (`ok` or the error `code`), session audit id,
 then method and path (quoted, cut at 128 bytes). Never a password, a session or the bearer.
 

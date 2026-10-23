@@ -53,8 +53,9 @@
   without waiting; 5 `verify` failures per rolling 60 s for the daemon, checked before hashing.
 - Audit: an app-level middleware before the bearer check. Lines: time, client (from
   `X-Calaos-Client-IP`: `local`, `invalid` or the normalised IP), result, session audit id, then
-  method and the path quoted and cut at 128 bytes. `bad_bearer` refusals go to the daemon log
-  only, one line per second with a suppressed count: 10 000 of them leave `audit.log` untouched.
+  method and the path quoted and cut at 128 bytes. `bad_bearer` and `bad_session` refusals go to
+  the daemon log only, one line per second with a suppressed count: 10 000 of either leave
+  `audit.log` untouched.
 - Alerts: persisted before they are published; replayed on `/api/v2/events` and `/api/events`
   after the `upgrade_progress` snapshot (the subscription is taken first, so none is lost); a
   pending alert a connection has not received is sent again at the next ping. A corrupt
