@@ -737,7 +737,7 @@ The contract above is complete; the daemon implements it in steps.
 | 32-byte token, `?token=` refused on every legacy route but `/api/events` | ADM-CC2 |
 | `admin/*` routes, sessions, `X-Calaos-Admin-Session`, rate limiting, alerts, audit, `calaos-os admin set|reset` | ADM-CC1 |
 | `202` upgrade jobs, `upgrade_job`, `job` in `update/status` and in `409` answers, interrupted jobs | ADM-CC3 |
-| approvers, push codes, `push_code`, `approver_set` and `approver_removed` alerts, `admin/push/{code_id}`, code required on change `admin/set` | AP1a |
+| approvers, push codes, `push_code`, `approver_set` and `approver_removed` alerts, `admin/push/{code_id}`, code required on change `admin/set` | AP1a, released together with AP1b and WA3: `admin/p7` merges to main only then, since against an older calaos_server the change-mode `admin/set` fails (`internal`) |
 | console routes | CO1 |
 
 A daemon that serves `/api/v2/` but predates ADM-CC3 answers `404 not_found` on the upgrade
