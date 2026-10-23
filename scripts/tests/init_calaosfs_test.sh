@@ -19,10 +19,9 @@ if [ "$(id -u)" -ne 0 ] || { [ ! -e /.dockerenv ] && [ ! -e /run/.containerenv ]
     exit 2
 fi
 
-if [ ! -e /usr/lib/calaos/calaos-common.sh ]; then
-    install -Dm644 "$here/../lib/calaos-common.sh" /usr/lib/calaos/calaos-common.sh
-fi
+install -Dm644 "$here/../lib/calaos-common.sh" /usr/lib/calaos/calaos-common.sh
 id olad >/dev/null 2>&1 || useradd --system --user-group olad
+id intruder >/dev/null 2>&1 || useradd --system --user-group intruder
 
 fail() {
     echo "FAIL: $*"
@@ -63,7 +62,8 @@ check_token() {
 watch_token() {
     local c first=
     while [ ! -e /tmp/stop-watch ]; do
-        c=$(cat "$token" 2>/dev/null) || continue
+        c=
+        { IFS= read -r c || :; } 2>/dev/null <"$token" || continue
         if ! [[ $c =~ ^[0-9a-f]{64}$ ]]; then
             echo "partial token read: '$c'" >>/tmp/watch.log
         elif [ -z "$first" ]; then
@@ -77,8 +77,12 @@ watch_token() {
 seen=()
 for round in $(seq "$rounds"); do
     rm -f "$token" /tmp/watch.log /tmp/stop-watch
-    rm -rf /etc/ola
-    mkdir -p /etc/ola
+    # A box whose olad config lives in a real /etc/ola directory.
+    rm -rf /etc/ola /mnt/calaos/ola
+    mkdir -p /etc/ola /mnt/calaos/ola
+    echo dmx >/etc/ola/ola-universe.conf
+    echo etc >/etc/ola/keep.conf
+    echo mnt >/mnt/calaos/ola/keep.conf
 
     watch_token &
     watcher=$!
@@ -96,17 +100,42 @@ for round in $(seq "$rounds"); do
         fail "round $round: an existing token was replaced"
 
     [ "$(readlink /etc/ola)" = /mnt/calaos/ola ] || fail "round $round: /etc/ola is not the OLA symlink"
+    [ "$(cat /mnt/calaos/ola/ola-universe.conf 2>/dev/null)" = dmx ] ||
+        fail "round $round: the olad config in /etc/ola was lost"
+    [ "$(cat /mnt/calaos/ola/keep.conf)" = mnt ] ||
+        fail "round $round: /mnt/calaos/ola/keep.conf was overwritten"
 done
 
 [ "$(printf '%s\n' "${seen[@]}" | sort -u | wc -l)" -eq "$rounds" ] ||
     fail "the same token was generated twice"
 
-# An upgraded box keeps its old weak token, mode included, until the reboot.
+# An upgraded box keeps its old weak token until the reboot, now 0600.
 printf '1729000000-123456789-12345\n' >"$token"
 chmod 644 "$token"
 run_parallel
-[ "$(stat -c '%a' "$token") $(cat "$token")" = "644 1729000000-123456789-12345" ] ||
-    fail "the token of an upgraded box was rewritten"
+[ "$(stat -c '%a' "$token") $(cat "$token")" = "600 1729000000-123456789-12345" ] ||
+    fail "the token of an upgraded box was rewritten or left 0644"
+
+# A token nobody but root could have written properly is replaced, never
+# followed: a symlink, a file owned by another user, an empty file.
+rm -f /tmp/evil
+echo attacker-known-token >/tmp/evil
+chown intruder: /tmp/evil
+for kind in symlink foreign empty; do
+    rm -f "$token"
+    case $kind in
+        symlink) ln -s /tmp/evil "$token" ;;
+        foreign) cp /tmp/evil "$token" && chown intruder: "$token" ;;
+        empty) : >"$token" ;;
+    esac
+    run_parallel
+    check_token "untrusted $kind token"
+    [ "$(stat -c '%U' /tmp/evil) $(cat /tmp/evil)" = "intruder attacker-known-token" ] ||
+        fail "untrusted $kind token: the symlink target was touched"
+done
+
+[ "$(find /run/calaos -mindepth 1 -maxdepth 1 -name '.*' | wc -l)" -eq 0 ] ||
+    fail "hidden files left in /run/calaos: $(ls -a /run/calaos)"
 
 if [ "$fails" -ne 0 ]; then
     echo "$fails failure(s)"

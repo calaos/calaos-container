@@ -43,8 +43,9 @@ dpkg_busy() {
 # first job.
 job_state() {
     local token body
+    # The header goes on stdin: on the command line, /proc/*/cmdline shows it.
     if ! token=$(cat "$token_file" 2>/dev/null) ||
-        ! body=$(curl -fsS --max-time 10 -H "Authorization: Bearer $token" "$status_url" 2>/dev/null); then
+        ! body=$(curl -fsS --max-time 10 -H @- "$status_url" 2>/dev/null <<<"Authorization: Bearer $token"); then
         echo unreachable
     elif jq -e '.status == "idle" or .status == ""' >/dev/null 2>&1 <<<"$body"; then
         echo idle

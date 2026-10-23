@@ -30,8 +30,9 @@ Authorization: Bearer <token>
   request that only carries `?token=`.
 - `init_calaosfs` writes the file at boot when it is absent: 32 bytes from `/dev/urandom`,
   hex-encoded (64 characters and a newline), owned by root, mode `0600`. Kiosks append the
-  token to a URL without percent-encoding it, so it stays hex. An existing file is never
-  rewritten: after an upgrade without reboot the previous token stays valid until the next boot.
+  token to a URL without percent-encoding it, so it stays hex. An existing non-empty regular file
+  owned by root keeps its value (only its mode is set to `0600`): after an upgrade without reboot
+  the previous token stays valid until the next boot. Anything else at that path is replaced.
 - Every reader must run as root on the host: the kiosk container (privileged, no `--user`, no
   userns remap), calaos_server and `calaos-os`. A kiosk run under another uid or a userns remap
   cannot read the token and sends an empty bearer.

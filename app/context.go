@@ -62,7 +62,6 @@ func NewTokenMiddleware() fiber.Handler {
 		if token == "" && isLegacyEventsPath(c.Path()) {
 			token = c.Query("token")
 		}
-		c.Locals("token", token)
 
 		expected, ok := currentToken()
 		if !ok {
