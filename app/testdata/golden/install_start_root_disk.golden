@@ -1,0 +1,4 @@
+status: 400
+content-type: application/json
+
+{"error":true,"msg":"device \"/dev/sda\" hosts the root filesystem and cannot be used as an install target"}

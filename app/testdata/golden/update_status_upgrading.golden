@@ -1,0 +1,4 @@
+status: 200
+content-type: application/json
+
+{"status":"upgrading","current_pkg":"calaos-server","progress":1,"progress_total":2,"total_percent":40,"current_step":"unpack","current_percent":50,"pkg_index":1,"pkg_count":2,"packages":[{"name":"calaos-server","state":"unpacking","percent":50},{"name":"calaos-container","state":"pending","percent":0}]}

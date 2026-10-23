@@ -46,6 +46,8 @@ type AppServer struct {
 	// hub is the event bus streamed over GET /api/events. It defaults to the
 	// package-level events.Default hub; tests may override it.
 	hub *events.Hub
+
+	sessions sessionValidator
 }
 
 var logging *logrus.Entry
@@ -69,7 +71,8 @@ func NewApp() (a *AppServer, err error) {
 	}
 
 	a = &AppServer{
-		hub: events.Default,
+		hub:      events.Default,
+		sessions: noSessions{},
 		appFiber: fiber.New(fiber.Config{
 			ServerHeader:          "Calaos Container (Linux)",
 			ReadTimeout:           readTimeout,
@@ -78,6 +81,7 @@ func NewApp() (a *AppServer, err error) {
 			DisableStartupMessage: true,
 			EnablePrintRoutes:     false,
 			BodyLimit:             maxBodySize,
+			ErrorHandler:          errorHandler,
 		}),
 	}
 
@@ -164,18 +168,54 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiUpdateStatus(c)
 	})
 
-	// Generic event bus over WebSocket. The global Bearer middleware already
-	// authenticated the HTTP upgrade request (header or ?token=). Reject plain
-	// GET requests that are not a WebSocket upgrade with 426.
-	api.Use("/events", func(c *fiber.Ctx) error {
+	a.registerEvents(api)
+
+	a.registerV2(api.Group("/v2"))
+
+	return
+}
+
+// registerV2 serves the versioned API (docs/API.md). Every route is either
+// sessionAllowed (calaos_server may relay it) or bearerOnly.
+func (a *AppServer) registerV2(v2 fiber.Router) {
+	s := a.sessionAllowed
+
+	v2.Get("/update/check", s, a.v2UpdateCheck)
+	v2.Get("/update/available", s, a.v2UpdateAvailable)
+	v2.Get("/update/installed", s, a.v2UpdateInstalled)
+	v2.Get("/update/status", s, a.v2UpdateStatus)
+
+	v2.Post("/system/reboot", s, a.v2SystemReboot)
+	v2.Post("/system/restart", s, a.v2SystemRestart)
+	v2.Get("/system/info", s, a.v2SystemInfo)
+	v2.Get("/system/fs_status", s, a.v2SystemFsStatus)
+	v2.Post("/system/rollback_snapshot", bearerOnly, a.v2SystemRollbackSnapshot)
+	v2.Get("/system/install/list_devices", bearerOnly, a.v2InstallListDevices)
+	v2.Post("/system/install/start", bearerOnly, a.v2InstallStart)
+	v2.Get("/system/install/status", bearerOnly, a.v2InstallStatus)
+
+	v2.Get("/network/list", bearerOnly, a.v2NetList)
+	v2.Post("/network/:intf", bearerOnly, a.v2NetConfigure)
+
+	a.registerEvents(v2, s)
+}
+
+// registerEvents serves the event bus over WebSocket. The global Bearer
+// middleware already authenticated the HTTP upgrade request; guards run next,
+// then plain GET requests that are not a WebSocket upgrade get 426.
+func (a *AppServer) registerEvents(r fiber.Router, guards ...fiber.Handler) {
+	args := []interface{}{"/events"}
+	for _, g := range guards {
+		args = append(args, g)
+	}
+	args = append(args, fiber.Handler(func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()
 		}
 		return fiber.ErrUpgradeRequired
-	})
-	api.Get("/events", websocket.New(a.apiEvents))
-
-	return
+	}))
+	r.Use(args...)
+	r.Get("/events", websocket.New(a.apiEvents))
 }
 
 // Start runs the HTTP server in a background goroutine.

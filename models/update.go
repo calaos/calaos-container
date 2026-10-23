@@ -1,9 +1,11 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/calaos/calaos-container/apt"
@@ -11,6 +13,45 @@ import (
 	"github.com/calaos/calaos-container/models/structs"
 	"github.com/sirupsen/logrus"
 )
+
+// The messages are part of the legacy API: old kiosks match "in progress"
+// and "package not found" in the error body.
+var (
+	ErrUpgradeInProgress = errors.New("upgrade already in progress")
+	ErrPackageNotFound   = errors.New("package not found")
+)
+
+// upgrading is true for the whole locked section of Upgrade and UpgradeAll,
+// snapshots included, so RebootGuard can tell an upgrade from a version check.
+var upgrading atomic.Bool
+
+// rebootLockWait bounds how long RebootGuard waits for a version check to
+// release upgradeLock.
+var rebootLockWait = 30 * time.Second
+
+// RebootGuard runs fn, a reboot or a rollback, unless an upgrade holds
+// upgradeLock. On success the lock stays held: the system is going down and
+// no upgrade may start meanwhile. Behind a version check it waits for the
+// lock; a queued waiter makes TryAcquire fail, so no upgrade slips in. A
+// holder that does not release in time is treated as an upgrade that has not
+// raised its flag yet.
+func RebootGuard(fn func() error) error {
+	if !upgradeLock.TryAcquire(1) {
+		if upgrading.Load() {
+			return ErrUpgradeInProgress
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), rebootLockWait)
+		defer cancel()
+		if err := upgradeLock.Acquire(ctx, 1); err != nil {
+			return ErrUpgradeInProgress
+		}
+	}
+	if err := fn(); err != nil {
+		upgradeLock.Release(1)
+		return err
+	}
+	return nil
+}
 
 // parseUpdateTime reads and validates general.update_time from the config. It
 // is called from Init() so that a bad value aborts startup with a clear error
@@ -75,7 +116,7 @@ func CheckUpdates() error {
 func checkForUpdates() error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("checkForUpdates(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
+		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
 
@@ -335,9 +376,11 @@ func finishUpgrade(err error) {
 func Upgrade(pkg string) error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("Upgrade(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
+		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
+	upgrading.Store(true)
+	defer upgrading.Store(false)
 
 	//search for package in cache
 	img, found := getNewVersion(pkg)
@@ -345,7 +388,7 @@ func Upgrade(pkg string) error {
 		logging.WithFields(logrus.Fields{
 			"pkg": pkg,
 		}).Errorln("Package not found")
-		return fmt.Errorf("package not found")
+		return ErrPackageNotFound
 	}
 
 	initUpgradeStatus()
@@ -376,9 +419,11 @@ func Upgrade(pkg string) error {
 func UpgradeAll() error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("UpgradeAll(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
+		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
+	upgrading.Store(true)
+	defer upgrading.Store(false)
 
 	//For full upgrade, first update all dkpg packages before containers.
 	//This is done to upgrade first calaos-container package that includes all services units

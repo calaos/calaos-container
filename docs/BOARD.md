@@ -62,7 +62,7 @@ _Gate to start: P1 + P2 + P3 merged._
 
 | ID | Title | Prio | Size | Deps | Status |
 |----|-------|------|------|------|--------|
-| CC-040 | Unified API contract under a versioned prefix + CLI lockstep, admin section of `API.md` | P1 | L | all P1 + P2 | 🔵 |
+| CC-040 | Unified API contract under a versioned prefix + CLI lockstep, admin section of `API.md` | P1 | L | all P1 + P2 | ✅ |
 | CC-041 | Build & release engineering | P2 | M | P3 complete | ✅ |
 | CC-042 | systemd unit hardening + postinst with deferred restart (absorbs CC4) | P2 | S | CC-014 | ⬜ |
 | [CC-043](backlog/CC-043-initramfs-overlay-hook-path.md) | grub-btrfs-overlay initramfs hook/script installed as directories, never run | P2 | S | CC-041 | ⬜ |
@@ -112,3 +112,4 @@ _Gate to start: CC-040 and CC-042 merged, ADM-CH1a done. Sequential: CC2, CC1, C
 | CC-033 | `031bc97` | 2026-08-05 | On main, see `git log` |
 | CC-034 | `6725eb6` | 2026-08-05 | On main, see `git log` |
 | CC-035 | `e1e266d` | 2026-08-05 | On main, see `git log` |
+| CC-040 | `67a3999` + implementation PR | 2026-10-22 | `/api/v2` contract and implementation; legacy routes pinned by golden tests |

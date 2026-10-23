@@ -6,7 +6,6 @@ import (
 	"github.com/gofiber/contrib/websocket"
 
 	"github.com/calaos/calaos-container/events"
-	"github.com/calaos/calaos-container/models"
 )
 
 const (
@@ -32,7 +31,7 @@ func (a *AppServer) apiEvents(c *websocket.Conn) {
 
 	// Initial snapshot so a freshly connected client immediately knows the
 	// current state without waiting for the next event.
-	if st, err := models.UpdateStatus(); err == nil {
+	if st, err := updateStatus(); err == nil {
 		_ = c.SetWriteDeadline(time.Now().Add(wsWriteWait))
 		if err := c.WriteJSON(events.Event{Type: events.EventUpgradeProgress, Data: st}); err != nil {
 			return

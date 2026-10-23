@@ -1,0 +1,4 @@
+status: 500
+content-type: application/json
+
+{"error":true,"msg":"invalid character 'o' in literal null (expecting 'u')"}
