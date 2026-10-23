@@ -72,16 +72,28 @@ fi
 
 # Admin password store: a plain directory, not a subvolume, so a rollback
 # brings back the admin password of that time like the household one.
+# Failures here must not stop the units that wait on this script: the daemon
+# reports the admin routes as broken instead. Called in an || list, so set -e
+# and the ERR trap are off inside: every step checks its own status.
 admindir="${fs}/admin"
-if [ -L "$admindir" ] || { [ -e "$admindir" ] && [ ! -d "$admindir" ]; }; then
-    warn "Replacing unexpected $admindir"
-    rm -f "$admindir"
-fi
-if [ ! -d "$admindir" ]; then
-    (umask 077 && mkdir "$admindir")
-fi
-chown root:root "$admindir"
-chmod 0700 "$admindir"
+prepare_admindir() {
+    local aside
+    if [ -L "$admindir" ]; then
+        warn "Removing the symlink at $admindir"
+        rm -f "$admindir" || return 1
+    elif [ -e "$admindir" ] && [ ! -d "$admindir" ]; then
+        aside="$admindir.bak-$(date +%s)"
+        warn "Moving unexpected $admindir to $aside"
+        mv -T -- "$admindir" "$aside" || return 1
+    fi
+    if [ ! -d "$admindir" ]; then
+        (umask 077 && mkdir "$admindir") || return 1
+    fi
+    [ -d "$admindir" ] && [ ! -L "$admindir" ] || return 1
+    chown root:root "$admindir" || return 1
+    chmod 0700 "$admindir"
+}
+prepare_admindir || warn "Cannot prepare $admindir; the admin routes will report an error"
 
 if [ -e /.calaos-live ]; then
     touch "$rundir/calaos-live"

@@ -7,16 +7,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
+	"unicode/utf8"
 
 	cli "github.com/jawher/mow.cli"
 	"golang.org/x/term"
 
+	"github.com/calaos/calaos-container/app/admin"
 	"github.com/calaos/calaos-container/cmd/calaos-os/api"
 )
 
 const (
-	adminMinLength   = 10
-	adminMaxBytes    = 1024
+	adminMaxBytes    = admin.MaxPasswordBytes
 	adminInputBuffer = 4096
 )
 
@@ -35,9 +38,17 @@ func cmdAdminSet(cmd *cli.Cmd) {
 		}
 
 		fd := int(os.Stdin.Fd()) //nolint:gosec // a file descriptor fits in an int
-		pw, err := readNewPassword(os.Stdin, os.Stderr, term.IsTerminal(fd), func() ([]byte, error) {
+		tty := term.IsTerminal(fd)
+		stop := func() {}
+		if tty {
+			if st, err := term.GetState(fd); err == nil {
+				stop = restoreOnSignal(func() { _ = term.Restore(fd, st) }, os.Exit)
+			}
+		}
+		pw, err := readNewPassword(os.Stdin, os.Stderr, tty, func() ([]byte, error) {
 			return term.ReadPassword(fd)
 		})
+		stop()
 		if err != nil {
 			exit(err, ExitUsage)
 		}
@@ -79,7 +90,7 @@ func exitAdminErr(err error) {
 	case errors.Is(err, api.ErrNoAdmin):
 		exit(err, ExitServer)
 	case errors.As(err, &ae) && ae.Code == "password_too_short":
-		exit(fmt.Errorf("the admin password needs at least %d characters", adminMinLength), ExitUsage)
+		exit(fmt.Errorf("the admin password needs at least %d characters", admin.MinPasswordLength), ExitUsage)
 	case errors.As(err, &ae) && ae.Code == "invalid_request":
 		exit(err, ExitUsage)
 	case errors.As(err, &ae) && ae.Code == "rate_limited":
@@ -135,5 +146,31 @@ func checkPasswordInput(b []byte) (string, error) {
 	if len(b) > adminMaxBytes {
 		return "", fmt.Errorf("the admin password is longer than %d bytes", adminMaxBytes)
 	}
+	// JSON would turn invalid bytes into U+FFFD: a password nobody can type.
+	if !utf8.Valid(b) {
+		return "", errors.New("the admin password is not valid UTF-8")
+	}
 	return string(b), nil
+}
+
+// restoreOnSignal puts the terminal back if the user interrupts the prompt:
+// ReadPassword only restores the echo when it returns, and the default signal
+// action exits before that.
+func restoreOnSignal(restore func(), exit func(int)) (stop func()) {
+	sig := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		select {
+		case <-sig:
+			restore()
+			_, _ = fmt.Fprintln(os.Stderr)
+			exit(130)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sig)
+		close(done)
+	}
 }

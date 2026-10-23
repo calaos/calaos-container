@@ -296,13 +296,12 @@ func TestAdminAudit(t *testing.T) {
 
 	sid := admin.SessionAuditID(s)
 	want := []string{
-		"client=192.168.1.5 POST /api/v2/admin/set result=ok session=-",
-		"client=fe80::1 POST /api/v2/admin/verify result=bad_password session=-",
-		"client=local POST /api/v2/admin/verify result=ok session=" + sid,
-		"client=invalid GET /api/v2/update/status result=ok session=" + sid,
-		"client=invalid GET /api/v2/admin/status result=ok session=" + sid,
-		"client=invalid GET /api/v2/network/list result=not_allowed session=" + sid,
-		"client=10.1.1.1 POST /api/v2/admin/reset result=bad_bearer session=-",
+		`client=192.168.1.5 result=ok session=- POST "/api/v2/admin/set"`,
+		`client=fe80::1 result=bad_password session=- POST "/api/v2/admin/verify"`,
+		`client=local result=ok session=` + sid + ` POST "/api/v2/admin/verify"`,
+		`client=invalid result=ok session=` + sid + ` GET "/api/v2/update/status"`,
+		`client=invalid result=ok session=` + sid + ` GET "/api/v2/admin/status"`,
+		`client=invalid result=not_allowed session=` + sid + ` GET "/api/v2/network/list"`,
 	}
 	lines := strings.Split(strings.TrimSuffix(readAudit(t), "\n"), "\n")
 	if len(lines) != len(want) {
@@ -459,4 +458,60 @@ func TestAdminConcurrentRequests(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// Anything on the host can call the daemon without the bearer: those calls
+// must not rotate the real entries out of audit.log.
+func TestAdminAuditFlood(t *testing.T) {
+	c := newAdminApp(t)
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
+
+	long := "/api/v2/admin/" + strings.Repeat("a", 3000)
+	for i := 0; i < 10000; i++ {
+		tc := httpCase{method: "GET", path: long, auth: "-", headers: session("x")}
+		if i%2 == 1 {
+			tc = httpCase{method: "POST", path: "/api/v2/admin/verify", auth: "Bearer nope", body: `{"password":"x"}`}
+		}
+		if resp, _ := doCase(t, c.a, tc); resp.StatusCode != 401 {
+			t.Fatalf("request %d: %d", i, resp.StatusCode)
+		}
+	}
+
+	log := readAudit(t)
+	if !strings.Contains(log, `result=ok session=- POST "/api/v2/admin/set"`) || strings.Contains(log, codeBadBearer) {
+		t.Fatalf("audit log after the flood:\n%.500s", log)
+	}
+	if _, err := os.Stat(filepath.Join(adminDataDir, "audit.log.1")); !os.IsNotExist(err) {
+		t.Fatalf("audit log rotated by unauthenticated calls: %v", err)
+	}
+}
+
+// A live alert lost by the hub reaches the connected peer at the next ping.
+func TestAdminAlertRedelivered(t *testing.T) {
+	prevPing, prevPublish := wsPingPeriod, publishAdmin
+	wsPingPeriod = 100 * time.Millisecond
+	publishAdmin = func(*events.Hub, string, any) {}
+	defer func() { wsPingPeriod, publishAdmin = prevPing, prevPublish }()
+
+	(&stubBackend{status: idleStatus()}).install(t)
+	a, addr, cleanup := newTestServer(t)
+	defer cleanup()
+	c := adminClient{t: t, a: a}
+
+	conn := dialEvents(t, addr, "/api/v2/events")
+	defer func() { _ = conn.Close() }()
+	readAlert(t, conn)
+
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
+	f := readAlert(t, conn)
+	if f.Type != admin.EventAdminSet {
+		t.Fatalf("got %+v", f)
+	}
+
+	// Sent once per connection, not at every ping.
+	_ = conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+	var extra map[string]any
+	if err := conn.ReadJSON(&extra); err == nil {
+		t.Fatalf("alert sent again: %v", extra)
+	}
 }

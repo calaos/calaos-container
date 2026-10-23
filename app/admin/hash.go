@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -22,9 +23,10 @@ type HashParams struct {
 	Threads   uint8
 }
 
-// DefaultHashParams sits at the top of the range in the plan: one hash at a
-// time, so 64 MiB is the whole memory cost.
-var DefaultHashParams = HashParams{MemoryKiB: 64 * 1024, Time: 3, Threads: 1}
+// DefaultHashParams is the low end of the plan's memory range: Calaos OS also
+// runs on RPi 3 class boxes with 1 GiB of RAM, where the pure-Go argon2 takes
+// seconds and the GC would otherwise hold two arenas at once.
+var DefaultHashParams = HashParams{MemoryKiB: 32 * 1024, Time: 3, Threads: 1}
 
 const (
 	saltLen = 16
@@ -50,6 +52,7 @@ func hashPassword(p HashParams, password string) (string, error) {
 		return "", err
 	}
 	key := argon2.IDKey([]byte(password), salt, p.Time, p.MemoryKiB, p.Threads, keyLen)
+	debug.FreeOSMemory()
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, p.MemoryKiB, p.Time, p.Threads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
 }
@@ -73,6 +76,8 @@ func verifyPassword(encoded, password string) (bool, error) {
 		return false, errBadHash
 	}
 	got := argon2.IDKey([]byte(password), salt, p.Time, p.MemoryKiB, p.Threads, uint32(len(key))) //nolint:gosec // len(key) <= 64
+	// Hands the arena back at once, so two hashes in a row never peak at 2x m.
+	debug.FreeOSMemory()
 	return subtle.ConstantTimeCompare(got, key) == 1, nil
 }
 

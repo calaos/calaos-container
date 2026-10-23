@@ -259,7 +259,8 @@ calls it after it has recorded the alert (push sent, `EventPushNotification` sto
 ### Alerts
 
 `admin_set` and `admin_reset` are persisted in `/mnt/calaos/admin/` when they happen, then
-published on the event bus and replayed to every new `/events` subscriber until acknowledged.
+published on the event bus and replayed to every new `/events` subscriber until acknowledged. A
+connected subscriber that missed one (full buffer) gets it again at the next ping (30 s).
 An alert raised while calaos_server is stopped is delivered when it reconnects.
 
 Delivery is at least once: if calaos_server stops between recording and acknowledging an alert,
@@ -270,8 +271,11 @@ kept; the oldest goes first.
 
 Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session` writes one line
 to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
-(`X-Calaos-Client-IP`, `local` or `invalid`), method and path, result (`ok` or the error
-`code`), session audit id. Never a password, a session or the bearer.
+(`X-Calaos-Client-IP`, `local` or `invalid`), result (`ok` or the error `code`), session audit id,
+then method and path (quoted, cut at 128 bytes). Never a password, a session or the bearer.
+
+A call refused with `bad_bearer` goes to the daemon log only, at most one line per second: anything
+on the host can send those, and in `audit.log` they would rotate the real entries away.
 
 `GET admin/status` without a session is not audited (calaos_server polls it). `audit.log` is
 rotated at 1 MiB, one old file kept.

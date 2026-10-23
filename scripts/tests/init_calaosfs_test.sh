@@ -157,18 +157,40 @@ run_parallel
 check_admin "loose admin directory"
 [ "$(cat "$admindir/password.hash" 2>/dev/null)" = hash ] || fail "loose admin directory: content lost"
 for kind in symlink file; do
-    rm -rf "$admindir"
+    rm -rf "$admindir" /mnt/calaos/admin.bak-*
     mkdir -p /tmp/evil-admin
     chown intruder: /tmp/evil-admin
     case $kind in
         symlink) ln -s /tmp/evil-admin "$admindir" ;;
-        file) echo x >"$admindir" ;;
+        file) echo user-data >"$admindir" ;;
     esac
     run_parallel
     check_admin "admin $kind"
     [ "$(stat -c '%U %a' /tmp/evil-admin)" = "intruder 755" ] ||
         fail "admin $kind: the symlink target was touched"
 done
+# A regular file at that path is kept aside, exactly once.
+set -- /mnt/calaos/admin.bak-*
+if [ $# -ne 1 ] || [ "$(cat "$1" 2>/dev/null)" != user-data ]; then
+    fail "admin file: not moved aside once with its content: $*"
+fi
+rm -f /mnt/calaos/admin.bak-*
+
+# A broken admin directory must not fail the script: every other unit waits
+# on it. chmod fails on that path only.
+mkdir -p /tmp/fakebin
+cat >/tmp/fakebin/chmod <<'FAKE'
+#!/bin/sh
+case "$*" in *"/mnt/calaos/admin"*) echo "chmod: read-only" >&2; exit 1 ;; esac
+exec /bin/chmod "$@"
+FAKE
+/bin/chmod 755 /tmp/fakebin/chmod
+rm -rf "$admindir" "$token" /etc/ola
+PATH=/tmp/fakebin:$PATH run_parallel
+check_token "admin directory failing"
+[ "$(readlink /etc/ola)" = /mnt/calaos/ola ] || fail "admin directory failing: the rest of the script did not run"
+grep -q "Cannot prepare $admindir" /tmp/init_calaosfs.1.log || fail "admin directory failing: no warning"
+rm -rf /tmp/fakebin
 
 [ "$(find /run/calaos -mindepth 1 -maxdepth 1 -name '.*' | wc -l)" -eq 0 ] ||
     fail "hidden files left in /run/calaos: $(ls -a /run/calaos)"

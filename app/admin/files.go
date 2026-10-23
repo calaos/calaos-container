@@ -83,7 +83,12 @@ func publishExclusive(tmp, final string) error {
 	if err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(final))
+	// Published already: failing now would make the client retry into
+	// admin_already_set.
+	if err := syncDir(filepath.Dir(final)); err != nil {
+		logging.Warnf("syncing the admin directory: %v", err)
+	}
+	return nil
 }
 
 func syncDir(dir string) error {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -75,12 +76,22 @@ type Manager struct {
 
 	limiter *limiter
 	audit   auditLog
+	refused refusedThrottle
 
 	// mu serializes every change of the hash file, the sessions and the
 	// alerts. argon2id never runs under it.
-	mu       sync.Mutex
-	sessions sessionStore
-	alerts   alertStore
+	mu        sync.Mutex
+	sessions  sessionStore
+	alerts    alertStore
+	hashCache hashCache
+}
+
+type hashCache struct {
+	valid bool
+	ino   uint64
+	size  int64
+	mtime time.Time
+	enc   string
 }
 
 var logging *logrus.Entry
@@ -127,17 +138,23 @@ func New(o Options) *Manager {
 		}
 	}
 
-	enc, _, err := m.readHash()
-	if err != nil {
+	// An unreadable hash leaves the session file alone: liveSession refuses
+	// those sessions until the hash reads again.
+	if enc, found, err := m.readHash(); err != nil && found {
 		logging.Errorf("reading the admin password hash: %v", err)
-	}
-	if err := m.sessions.load(m.now(), fingerprintOf(enc)); err != nil {
+	} else if err := m.sessions.load(m.now(), fingerprintOf(enc)); err != nil {
 		logging.Warnf("dropping stored admin sessions: %v", err)
 		m.sessions.list = nil
 		_ = m.sessions.invalidateAll()
 	}
 	if err := m.alerts.load(); err != nil {
-		logging.Errorf("reading the admin alerts: %v", err)
+		// Kept aside: the next alert would otherwise overwrite the
+		// unacknowledged ones.
+		logging.Errorf("reading the admin alerts, moved to %s.corrupt: %v", m.alerts.path, err)
+		m.alerts.list = nil
+		if rerr := os.Rename(m.alerts.path, m.alerts.path+".corrupt"); rerr != nil {
+			logging.Errorf("moving the admin alerts aside: %v", rerr)
+		}
 	}
 	return m
 }
@@ -151,12 +168,33 @@ func fingerprintOf(enc string) string {
 
 // readHash reports whether a hash file exists; an existing but unreadable or
 // empty file still counts as set, so it can only be replaced by recovery.
+// Every session check calls it: the content is cached while the inode, size
+// and mtime stay the same (every write publishes a new inode). Needs m.mu.
 func (m *Manager) readHash() (string, bool, error) {
-	b, found, err := readSmallFile(m.hashPath, 4096)
+	fi, err := os.Lstat(m.hashPath)
+	if os.IsNotExist(err) {
+		m.hashCache = hashCache{}
+		return "", false, nil
+	}
 	if err != nil {
+		return "", true, err
+	}
+	st, _ := fi.Sys().(*syscall.Stat_t)
+	c := m.hashCache
+	if c.valid && st != nil && c.ino == st.Ino && c.size == fi.Size() && c.mtime.Equal(fi.ModTime()) {
+		return c.enc, true, nil
+	}
+
+	b, found, err := readSmallFile(m.hashPath, 4096)
+	m.hashCache = hashCache{}
+	if err != nil || !found {
 		return "", found, err
 	}
-	return strings.TrimSpace(string(b)), found, nil
+	enc := strings.TrimSpace(string(b))
+	if st != nil {
+		m.hashCache = hashCache{valid: true, ino: st.Ino, size: fi.Size(), mtime: fi.ModTime(), enc: enc}
+	}
+	return enc, true, nil
 }
 
 func checkLength(password string) error {
@@ -325,9 +363,7 @@ func (m *Manager) checkSetState(mode Mode, session string) error {
 			return ErrAlreadySet
 		}
 	case ModeChange:
-		if !found {
-			return ErrNotSet
-		}
+		// No hash: liveSession above already answered bad_session.
 	case ModeRecovery:
 	default:
 		return fmt.Errorf("unknown admin/set mode %q", mode)

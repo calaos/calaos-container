@@ -24,7 +24,7 @@ const (
 
 type session struct {
 	Hash         string    `json:"hash"`
-	Password     string    `json:"password"`
+	Password     string    `json:"pw_fp"`
 	Issued       time.Time `json:"issued"`
 	Expires      time.Time `json:"expires"`
 	PushFailures int       `json:"push_failures,omitempty"`

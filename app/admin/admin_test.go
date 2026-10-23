@@ -721,8 +721,8 @@ func TestAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "2026-10-23T10:00:00Z client=192.168.1.5 POST /api/v2/admin/verify?forged?line result=bad_password session=-\n" +
-		"2026-10-23T10:00:00Z client=local GET /api/v2/admin/status result=ok session=0123abcd\n"
+	want := "2026-10-23T10:00:00Z client=192.168.1.5 result=bad_password session=- POST \"/api/v2/admin/verify\\nforged line\"\n" +
+		"2026-10-23T10:00:00Z client=local result=ok session=0123abcd GET \"/api/v2/admin/status\"\n"
 	if string(b) != want {
 		t.Fatalf("audit log\n%s\nwant\n%s", b, want)
 	}
@@ -738,7 +738,7 @@ func TestAudit(t *testing.T) {
 	m.Audit(AuditEntry{Client: "local", Method: "POST", Path: "/api/v2/admin/reset", Result: "ok"})
 	old, _ := os.ReadFile(filepath.Join(e.data, auditFileName+".1"))
 	cur, _ := os.ReadFile(filepath.Join(e.data, auditFileName))
-	if string(old) != big || !strings.HasSuffix(string(cur), "admin/reset result=ok session=-\n") || len(cur) > 200 {
+	if string(old) != big || !strings.HasSuffix(string(cur), "result=ok session=- POST \"/api/v2/admin/reset\"\n") || len(cur) > 200 {
 		t.Fatalf("rotation: old %d bytes, current %q", len(old), cur)
 	}
 }
@@ -756,5 +756,60 @@ func TestSessionDiesWithHashRemovedOutOfBand(t *testing.T) {
 	}
 	if err := m.Set(ModeChange, otherPassword, s); !errors.Is(err, ErrBadSession) {
 		t.Fatalf("change without a hash: %v", err)
+	}
+}
+
+func TestAuditPathBounded(t *testing.T) {
+	long := "/api/v2/admin/" + strings.Repeat("a", 4000) + " result=ok"
+	l := AuditEntry{Client: "local", Method: "GET", Path: long, Result: "not_found"}.line(newClock().Now())
+	if len(l) > 250 || !strings.Contains(l, "result=not_found session=- GET \"/api/v2/admin/aaa") || strings.Count(l, "result=") != 1 {
+		t.Fatalf("line %d bytes: %s", len(l), l)
+	}
+}
+
+func TestCorruptAlertsKeptAside(t *testing.T) {
+	e := newEnv(t)
+	e.manager()
+	path := filepath.Join(e.data, alertsFileName)
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := e.manager()
+	mustSet(t, m, ModeBootstrap, goodPassword, "")
+	if b, _ := os.ReadFile(path + ".corrupt"); string(b) != "{not json" { //nolint:gosec // test directory
+		t.Fatalf("corrupt alerts not kept aside: %q", b)
+	}
+	if got := e.manager().PendingAlerts(); len(got) != 1 || got[0].Type != EventAdminSet {
+		t.Fatalf("pending %+v", got)
+	}
+}
+
+// An unreadable hash at start leaves the sessions on disk; the next start
+// with the same hash finds them.
+func TestUnreadableHashKeepsSessions(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager()
+	mustSet(t, m, ModeBootstrap, goodPassword, "")
+	s := mustVerify(t, m, goodPassword)
+	hash := filepath.Join(e.data, hashFileName)
+	saved, _ := os.ReadFile(hash) //nolint:gosec // test directory
+	if err := os.Remove(hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(hash, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	broken := e.manager()
+	if broken.Valid(s) {
+		t.Fatal("session valid with an unreadable hash")
+	}
+	if err := os.Remove(hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hash, saved, 0o600); err != nil { //nolint:gosec // test directory
+		t.Fatal(err)
+	}
+	if !e.manager().Valid(s) {
+		t.Fatal("sessions lost after a transient hash read error")
 	}
 }

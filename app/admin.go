@@ -6,11 +6,13 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/utils"
 
 	"github.com/calaos/calaos-container/app/admin"
+	"github.com/calaos/calaos-container/events"
 )
 
 const (
@@ -25,6 +27,9 @@ var (
 	adminDataDir    = admin.DefaultDataDir
 	adminRuntimeDir = admin.DefaultRuntimeDir
 	adminHashParams admin.HashParams
+
+	// publishAdmin lets tests lose a live alert, as a full subscriber would.
+	publishAdmin = func(h *events.Hub, evType string, data any) { h.Publish(evType, data) }
 )
 
 func (a *AppServer) registerAdmin(v2 fiber.Router) {
@@ -83,6 +88,9 @@ func parsePasswordBody(c *fiber.Ctx) (passwordBody, error) {
 	}
 	if len(*b.Password) > admin.MaxPasswordBytes {
 		return b, errPasswordTooLong()
+	}
+	if !utf8.ValidString(*b.Password) {
+		return b, errInvalid("invalid password: not UTF-8")
 	}
 	return b, nil
 }
@@ -190,8 +198,9 @@ func isAdminStatusPath(p string) bool {
 	return strings.TrimRight(strings.ToLower(p), "/") == apiV2Prefix+"/admin/status"
 }
 
-// auditMiddleware runs before the bearer check, so refused calls are audited
-// too. calaos_server polls admin/status without a session: not audited.
+// auditMiddleware runs before the bearer check, so refused calls reach the
+// daemon log too. calaos_server polls admin/status without a session: not
+// audited.
 func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	path := utils.CopyString(c.Path())
 	session, hasSession := adminSession(c)
@@ -212,7 +221,13 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	} else if id, ok := c.Locals(localIssuedSession).(string); ok {
 		e.Session = id
 	}
-	a.admin.Audit(e)
+	// Anything on the host can send these without the bearer: in audit.log
+	// they would rotate the real entries away.
+	if e.Result == codeBadBearer {
+		a.admin.AuditRefused(e)
+	} else {
+		a.admin.Audit(e)
+	}
 	return err
 }
 
@@ -220,20 +235,11 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 // rendered yet: errorHandler maps it the same way.
 func auditResult(c *fiber.Ctx, err error) string {
 	if err != nil {
-		var ae *apiError
-		if errors.As(err, &ae) {
-			return ae.code
+		if e := v2Error(err); e != nil {
+			return e.code
 		}
 		var fe *fiber.Error
 		if errors.As(err, &fe) {
-			switch fe.Code {
-			case fiber.StatusNotFound:
-				return codeNotFound
-			case fiber.StatusMethodNotAllowed:
-				return codeMethodNotAllowed
-			case fiber.StatusUpgradeRequired:
-				return codeUpgradeRequired
-			}
 			return "http_" + strconv.Itoa(fe.Code)
 		}
 		return codeInternal

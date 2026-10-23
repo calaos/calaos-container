@@ -3,8 +3,11 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func noTTY() ([]byte, error) { return nil, errors.New("not a terminal") }
@@ -23,6 +26,7 @@ func TestReadNewPasswordFromPipe(t *testing.T) {
 		{in: strings.Repeat("x", adminMaxBytes+1) + "\n", wantErr: true},
 		{in: strings.Repeat("x", 10*adminInputBuffer), wantErr: true},
 		{in: "\n", wantErr: true},
+		{in: "latin1 mot de passe tr\xe8s long\n", wantErr: true},
 		{in: "", wantErr: true},
 	}
 	for _, c := range cases {
@@ -88,5 +92,39 @@ func TestReadNewPasswordOnTerminal(t *testing.T) {
 		if got, err := readNewPassword(stdin, io.Discard, true, ask); err == nil {
 			t.Errorf("%s: accepted %q", name, got)
 		}
+	}
+}
+
+func TestRestoreOnSignal(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+		restored := make(chan struct{})
+		code := make(chan int, 1)
+		stop := restoreOnSignal(func() { close(restored) }, func(c int) { code <- c })
+		if err := syscall.Kill(os.Getpid(), sig); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case c := <-code:
+			if c != 130 {
+				t.Fatalf("%v: exit %d", sig, c)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%v: no exit", sig)
+		}
+		select {
+		case <-restored:
+		default:
+			t.Fatalf("%v: terminal not restored before exit", sig)
+		}
+		stop()
+	}
+
+	// Once stopped, the guard neither restores nor exits.
+	called := false
+	stop := restoreOnSignal(func() { called = true }, func(int) { called = true })
+	stop()
+	time.Sleep(10 * time.Millisecond)
+	if called {
+		t.Fatal("stopped guard fired")
 	}
 }

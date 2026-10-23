@@ -3,13 +3,17 @@ package admin
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-const auditMaxSize = 1 << 20
+const (
+	auditMaxSize = 1 << 20
+	auditMaxPath = 128
+)
 
 // AuditEntry is one audited request. Session is the audit id, never the
 // session itself.
@@ -36,14 +40,20 @@ func sanitize(s string) string {
 	}, s)
 }
 
+// The path comes from the client: truncated so a request cannot fill the log,
+// quoted and last so it cannot pass for another field.
 func (e AuditEntry) line(now time.Time) string {
 	sid := e.Session
 	if sid == "" {
 		sid = "-"
 	}
-	return fmt.Sprintf("%s client=%s %s %s result=%s session=%s",
-		now.UTC().Format(time.RFC3339), sanitize(e.Client), sanitize(e.Method), sanitize(e.Path),
-		sanitize(e.Result), sanitize(sid))
+	path := e.Path
+	if len(path) > auditMaxPath {
+		path = path[:auditMaxPath]
+	}
+	return fmt.Sprintf("%s client=%s result=%s session=%s %s %s",
+		now.UTC().Format(time.RFC3339), sanitize(e.Client), sanitize(e.Result), sanitize(sid),
+		sanitize(e.Method), strconv.QuoteToASCII(path))
 }
 
 // write appends line to audit.log, rotated at 1 MiB with one old file kept.
@@ -66,4 +76,30 @@ func (al *auditLog) write(line string) error {
 		return werr
 	}
 	return cerr
+}
+
+const refusedInterval = time.Second
+
+type refusedThrottle struct {
+	mu      sync.Mutex
+	last    time.Time
+	dropped int
+}
+
+// AuditRefused logs a call refused for a bad bearer to the daemon log only,
+// at most one line per second.
+func (m *Manager) AuditRefused(e AuditEntry) {
+	t := &m.refused
+	now := m.now()
+	t.mu.Lock()
+	if !t.last.IsZero() && now.Sub(t.last) < refusedInterval {
+		t.dropped++
+		t.mu.Unlock()
+		return
+	}
+	t.last = now
+	dropped := t.dropped
+	t.dropped = 0
+	t.mu.Unlock()
+	logging.Warnf("refused admin call: %s (%d more suppressed)", e.line(now), dropped)
 }
