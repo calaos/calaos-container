@@ -49,7 +49,8 @@ esac
 # The daemon may be the process driving this very upgrade (apt is linked into
 # it), so it is not restarted here; a transient unit does it once dpkg and the
 # daemon's job are done. Our ExecStartPre needs nothing: ExecStart follows.
-# policy-rc.d is not consulted: older SD images ship Docker's exit-101 stub.
+# policy-rc.d is not consulted: without this restart the upgraded daemon only
+# takes over at the next reboot.
 case "$1" in
 configure|abort-upgrade)
     if [ -z "${CALAOS_CT_STARTPRE:-}" ] && [ -z "${DPKG_ROOT:-}" ] &&

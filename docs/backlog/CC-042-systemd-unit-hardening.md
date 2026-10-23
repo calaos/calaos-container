@@ -83,7 +83,8 @@ None expected, but each directive must be validated on real hardware/VM because 
 
 **Findings.**
 - An idle 1.7.0 daemon reports `{"status":""}` until its first job. The helper treats `""` as idle.
-- SD-card images ship Docker's exit-101 `policy-rc.d`, so the deferred restart does not consult it. Whether to remove the stub in `create_sdimg.sh` is an open decision.
+- SD-card images shipped Docker's exit-101 `policy-rc.d`. Resolved by OS1: `create_sdimg.sh` no longer ships it, and the postinst removes that exact stub from existing boxes before the debhelper start. The deferred restart still does not consult `policy-rc.d`.
+- Accepted residual: with the stub gone, SD boxes now hit the "`ola` left half-configured" stall above, like HDD boxes. When the boot-time recovery replays an interrupted upgrade, `olad` is restarted and waits for us (`Before=olad.service`), up to the timeout, once. There is no loop.
 
 **Not done in part 1:** the sandboxing directives and the other units (work items above).
 
