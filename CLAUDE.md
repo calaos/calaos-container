@@ -25,4 +25,9 @@ Container/system management daemon for Calaos-OS (home automation). Go daemon ex
 ## Environment
 
 - The devcontainer is privileged with full systemd — running and restarting the daemon locally (even via systemd) is fine.
-- Daemon config: `/etc/calaos-container.toml` (override with `-c`); defaults: port 8000, update check every 12h, images from `https://releases.calaos.fr/v4/images`.
+- Daemon config: `/etc/calaos-container.toml` (override with `-c`, or `CALAOS_*` env vars); defaults: `127.0.0.1:8000`, update check every 12h. Updates are the `calaos-*` Debian packages, upgraded through libapt with snapper pre/post snapshots; there is no image release URL anymore.
+
+## API
+
+- The routes served today are the legacy unprefixed `/api/...` ones (`app/app.go`); their paths and bodies are frozen for deployed kiosks and CLIs.
+- `docs/API.md` is the contract of `/api/v2/` (envelope, error codes, admin sessions, upgrade jobs). It is not implemented yet: check the code before assuming a v2 route exists.
