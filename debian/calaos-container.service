@@ -6,8 +6,27 @@ Before=olad.service
 [Service]
 Type=simple
 ExecStartPre=/usr/sbin/init_calaosfs
+# Finishes a package run that was cut short (power loss, daemon killed while
+# driving apt). dpkg runs in its own unit: a start timeout only kills this
+# client, and the unit name keeps a retry from running the same scripts twice.
+# "-": a broken dpkg must not keep the daemon down. The variable keeps our
+# postinst from waiting on this very start job.
+ExecStartPre=-/usr/bin/systemd-run --quiet --wait --collect \
+    --unit=calaos-container-dpkg-recover \
+    --description="Finish an interrupted package run" \
+    --setenv=CALAOS_CT_STARTPRE=1 --setenv=DEBIAN_FRONTEND=noninteractive \
+    /usr/bin/dpkg --force-confdef --force-confold --configure -a
 ExecStart=/usr/bin/calaos-container
+# A self-upgrade exits 0 and must be relaunched as well.
 Restart=always
+# Keeps a crashing new binary under the start limit so retries go on.
+RestartSec=5s
+# Covers the dpkg run above: configuring calaos-server pulls its image.
+TimeoutStartSec=30min
+TimeoutStopSec=30s
+# Children (the detached installer, a shell-driven dpkg) are not killed with
+# the daemon.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

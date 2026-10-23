@@ -1,0 +1,4 @@
+status: 200
+content-type: application/json
+
+{"error":false,"msg":"ok","output":[{"name":"lo","ipv4":"127.0.0.1/8","is_loopback":true,"state":"carrier","dhcp":false},{"name":"eth0","ipv4":"192.168.1.10/24","gateway":"192.168.1.1","mac":"aa:bb:cc:dd:ee:ff","state":"routable","dhcp":true,"dns_servers":["192.168.1.1"]}]}

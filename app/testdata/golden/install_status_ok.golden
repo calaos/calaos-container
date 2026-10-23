@@ -1,0 +1,4 @@
+status: 200
+content-type: application/json
+
+{"error":false,"exit_code":0,"log":"line 1\nline 2\n","msg":"ok"}

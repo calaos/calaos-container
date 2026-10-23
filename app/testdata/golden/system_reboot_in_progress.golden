@@ -1,0 +1,4 @@
+status: 409
+content-type: application/json
+
+{"error":true,"msg":"upgrade already in progress"}

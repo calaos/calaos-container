@@ -53,14 +53,24 @@ func exit(err error, code int) {
 	cli.Exit(code)
 }
 
-// handleSignals blocks until the daemon is asked to stop (SIGINT/SIGTERM) or
-// the HTTP listener fails, then shuts everything down cleanly. The listener
-// error, if any, is returned so the caller can pick the exit code.
+// handleSignals blocks until the daemon is asked to stop (SIGINT/SIGTERM),
+// the HTTP listener fails or an upgrade job installed a new calaos-container,
+// then shuts everything down cleanly. The listener error, if any, is returned
+// so the caller can pick the exit code.
 func handleSignals(listenErr <-chan error) error {
 	sigint := make(chan os.Signal, 1)
 	signal.Notify(sigint, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigint)
 
+	return waitAndStop(sigint, listenErr, models.RestartRequested(), func() {
+		myApp.Shutdown()
+		models.Shutdown()
+	})
+}
+
+// waitAndStop returns nil after a self-upgrade: the exit status is 0 and
+// Restart=always starts the new binary.
+func waitAndStop(sigint <-chan os.Signal, listenErr <-chan error, restart <-chan struct{}, stop func()) error {
 	var err error
 
 	select {
@@ -69,10 +79,11 @@ func handleSignals(listenErr <-chan error) error {
 	case err = <-listenErr:
 		// A closed channel yields a nil error: the server stopped on its own
 		// without failing, shut the rest down as well.
+	case <-restart:
+		logging.Println("calaos-container was upgraded - exiting to start the new version")
 	}
 
-	myApp.Shutdown()
-	models.Shutdown()
+	stop()
 
 	return err
 }

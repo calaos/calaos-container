@@ -172,13 +172,14 @@ func TestApplyAptProgressMapping(t *testing.T) {
 	}
 
 	// Error on pkgB -> failed.
-	applyAptProgress(apt.Progress{Stage: "error", Pkg: "pkgB", PkgPercent: -1, TotalPercent: 65, Msg: "boom"})
+	applyAptProgress(apt.Progress{Stage: "error", Pkg: "pkgB", PkgPercent: -1, TotalPercent: 65, Msg: "E: http://deb.example/pool/x.deb: boom"})
 	st = upgradeStatus.GetStatus()
 	if st.Packages[1].State != structs.PkgStateFailed {
 		t.Fatalf("expected pkgB failed, got %q", st.Packages[1].State)
 	}
-	if st.Message != "boom" {
-		t.Fatalf("expected message 'boom', got %q", st.Message)
+	// apt messages stay in the journal: the progress goes to every subscriber.
+	if st.Message != "" {
+		t.Fatalf("apt message published: %q", st.Message)
 	}
 }
 
@@ -239,14 +240,16 @@ func TestFinishUpgradeError(t *testing.T) {
 	applyAptProgress(apt.Progress{Stage: "pending", Pkg: "p1", PkgPercent: -1, TotalPercent: 0})
 	applyAptProgress(apt.Progress{Stage: "download", Pkg: "p1", PkgPercent: 50, TotalPercent: 30})
 
-	finishUpgrade(errors.New("network down"))
+	applyAptProgress(apt.Progress{Stage: "error", Pkg: "p1", PkgPercent: -1, TotalPercent: 30})
+
+	finishUpgrade(errors.New("E: Failed to fetch http://deb.example/pool/p1.deb  /var/cache/apt/archives/partial"))
 
 	st := upgradeStatus.GetStatus()
 	if st.Status != "error" {
 		t.Fatalf("expected status error, got %q", st.Status)
 	}
-	if st.Error != "network down" {
-		t.Fatalf("expected error 'network down', got %q", st.Error)
+	if st.Error != "upgrade failed: p1" {
+		t.Fatalf("progress error %q, want the sanitized summary", st.Error)
 	}
 	// A failing package must not be forced to done.
 	if st.TotalPercent == 100 {
@@ -343,5 +346,28 @@ func TestSetStatusThrottling(t *testing.T) {
 	}
 	if !foundDone {
 		t.Fatalf("expected terminal 'done' event to be published, got %+v", got)
+	}
+}
+
+// A step or status outside the vocabulary never carries a package name out.
+func TestSetStatusClampsVocabulary(t *testing.T) {
+	resetSharedStatus()
+	initUpgradeStatus()
+	t.Cleanup(resetSharedStatus)
+
+	applyAptProgress(apt.Progress{Stage: "pending", Pkg: "pkgA", PkgPercent: -1})
+	applyAptProgress(apt.Progress{Stage: "trigger:pkgA", Pkg: "pkgA", PkgPercent: -1})
+	if st := upgradeStatus.GetStatus(); st.CurrentStep != "install" || st.Status != "upgrading" {
+		t.Fatalf("unknown stage: step=%q status=%q", st.CurrentStep, st.Status)
+	}
+	upgradeStatus.SetStatus(structs.Status{Status: "error:pkgA", CurrentStep: "configure"})
+	if st := upgradeStatus.GetStatus(); st.Status != "upgrading" || st.CurrentStep != "configure" {
+		t.Fatalf("unknown status: step=%q status=%q", st.CurrentStep, st.Status)
+	}
+	for _, step := range []string{"pending", "download", "unpack", "configure", "install", "done", "error"} {
+		upgradeStatus.SetStatus(structs.Status{Status: "upgrading", CurrentStep: step})
+		if got := upgradeStatus.GetStatus().CurrentStep; got != step {
+			t.Fatalf("step %q became %q", step, got)
+		}
 	}
 }

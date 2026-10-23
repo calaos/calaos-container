@@ -5,8 +5,8 @@ import (
 
 	"github.com/gofiber/contrib/websocket"
 
+	"github.com/calaos/calaos-container/app/admin"
 	"github.com/calaos/calaos-container/events"
-	"github.com/calaos/calaos-container/models"
 )
 
 const (
@@ -15,15 +15,25 @@ const (
 	// wsPongWait is how long we wait for the next pong from the peer before
 	// considering the connection dead.
 	wsPongWait = 60 * time.Second
-	// wsPingPeriod is how often we send pings to the peer. Must be less than
-	// wsPongWait.
-	wsPingPeriod = 30 * time.Second
 )
+
+// wsPingPeriod is how often we ping the peer and resend the pending alerts it
+// missed. Must be less than wsPongWait.
+var wsPingPeriod = 30 * time.Second
 
 // apiEvents is the WebSocket handler for GET /api/events. It streams typed
 // events from the in-process hub to the connected client. The connection has
 // already been authenticated by the global Bearer middleware.
 func (a *AppServer) apiEvents(c *websocket.Conn) {
+	a.wsMu.Lock()
+	if a.wsClosing {
+		a.wsMu.Unlock()
+		return
+	}
+	a.wsConns.Add(1)
+	a.wsMu.Unlock()
+	defer a.wsConns.Done()
+
 	sub := a.hub.Subscribe()
 	defer func() {
 		a.hub.Unsubscribe(sub)
@@ -32,11 +42,34 @@ func (a *AppServer) apiEvents(c *websocket.Conn) {
 
 	// Initial snapshot so a freshly connected client immediately knows the
 	// current state without waiting for the next event.
-	if st, err := models.UpdateStatus(); err == nil {
+	if st, err := updateStatus(); err == nil {
 		_ = c.SetWriteDeadline(time.Now().Add(wsWriteWait))
 		if err := c.WriteJSON(events.Event{Type: events.EventUpgradeProgress, Data: st}); err != nil {
 			return
 		}
+	}
+
+	// Subscribed above, so an alert raised meanwhile is sent twice rather
+	// than lost; calaos_server deduplicates on id. The hub drops events for a
+	// full subscriber, so pending alerts this peer has not seen are sent
+	// again at every ping until acked.
+	sent := map[string]bool{}
+	sendAlerts := func() bool {
+		seen := map[string]bool{}
+		for _, al := range a.admin.PendingAlerts() {
+			if !sent[al.ID] {
+				_ = c.SetWriteDeadline(time.Now().Add(wsWriteWait))
+				if err := c.WriteJSON(events.Event{Type: al.Type, Data: al.Data()}); err != nil {
+					return false
+				}
+			}
+			seen[al.ID] = true
+		}
+		sent = seen
+		return true
+	}
+	if !sendAlerts() {
+		return
 	}
 
 	// Reader goroutine: required to process control frames (pong/close) and to
@@ -76,9 +109,15 @@ func (a *AppServer) apiEvents(c *websocket.Conn) {
 			if err := c.WriteJSON(ev); err != nil {
 				return
 			}
+			if d, ok := ev.Data.(admin.AlertData); ok {
+				sent[d.ID] = true
+			}
 		case <-ticker.C:
 			_ = c.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			if err := c.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+				return
+			}
+			if !sendAlerts() {
 				return
 			}
 		case <-done:

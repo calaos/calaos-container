@@ -88,11 +88,12 @@ public:
             freePkg(p);
     }
 
-    void add(const char *name, const char *current, const char *newest)
+    void add(const char *name, const char *current, const char *newest, bool held)
     {
         Pkg p{strdup(name != nullptr ? name : ""),
               strdup(current != nullptr ? current : ""),
-              strdup(newest != nullptr ? newest : "")};
+              strdup(newest != nullptr ? newest : ""),
+              held ? 1 : 0};
 
         try
         {
@@ -201,7 +202,12 @@ void *aptCacheGetArray(char **errorMsg)
                 const char *current = pkg.CurVersion() == 0 ? "none" : pkg.CurVersion();
                 const char *newest = pkg.VersionList().end() ? "none" : pkg.VersionList().VerStr();
 
-                builder.add(pkg.Name(), current, newest);
+                // Upgradable() compares the candidate with the installed
+                // version: it stays true for a package the dist-upgrade kept
+                // back because of a hold.
+                const bool held = pkg->SelectedState == pkgCache::State::Hold;
+
+                builder.add(pkg.Name(), current, newest, held);
             }
         }
 

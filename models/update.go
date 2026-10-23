@@ -1,16 +1,60 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/calaos/calaos-container/apt"
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/models/structs"
-	"github.com/sirupsen/logrus"
 )
+
+// The messages are part of the legacy API: old kiosks match "in progress"
+// and "package not found" in the error body.
+var (
+	ErrUpgradeInProgress = errors.New("upgrade already in progress")
+	ErrPackageNotFound   = errors.New("package not found")
+)
+
+// ErrPackageHeld refuses a single-package upgrade of a package on hold.
+var ErrPackageHeld = errors.New("package held")
+
+// upgrading is true while a job holds upgradeLock, from StartJob to Complete,
+// so RebootGuard can tell an upgrade from a version check.
+var upgrading atomic.Bool
+
+// rebootLockWait bounds how long RebootGuard waits for a version check to
+// release upgradeLock.
+var rebootLockWait = 30 * time.Second
+
+// RebootGuard runs fn, a reboot or a rollback, unless an upgrade holds
+// upgradeLock. On success the lock stays held: the system is going down and
+// no upgrade may start meanwhile. Behind a version check it waits for the
+// lock; a queued waiter makes TryAcquire fail, so no upgrade slips in. A
+// holder that does not release in time is treated as an upgrade that has not
+// raised its flag yet.
+func RebootGuard(fn func() error) error {
+	if !upgradeLock.TryAcquire(1) {
+		if upgrading.Load() {
+			return ErrUpgradeInProgress
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), rebootLockWait)
+		defer cancel()
+		if err := upgradeLock.Acquire(ctx, 1); err != nil {
+			return ErrUpgradeInProgress
+		}
+	}
+	if err := fn(); err != nil {
+		upgradeLock.Release(1)
+		return err
+	}
+	return nil
+}
 
 // parseUpdateTime reads and validates general.update_time from the config. It
 // is called from Init() so that a bad value aborts startup with a clear error
@@ -69,13 +113,12 @@ func CheckUpdates() error {
 	return checkForUpdates()
 }
 
-// checkForUpdates refreshes the available versions under upgradeLock. Callers
-// that already hold upgradeLock (Upgrade/UpgradeAll) must call
-// refreshNewVersions() directly instead.
+// checkForUpdates refreshes the available versions under upgradeLock. A job,
+// which already holds upgradeLock, calls refreshNewVersions() directly.
 func checkForUpdates() error {
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("checkForUpdates(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
+		return ErrUpgradeInProgress
 	}
 	defer upgradeLock.Release(1)
 
@@ -97,22 +140,25 @@ func GetNewVersions() structs.ImageMap {
 	return m
 }
 
-// getNewVersion looks up a single package in the available versions.
-func getNewVersion(pkg string) (structs.Image, bool) {
+// getNewVersion looks up a single package in the available versions. held
+// reports a package left out of them because it is on hold.
+func getNewVersion(pkg string) (img structs.Image, found, held bool) {
 	newVersionsMu.RLock()
 	defer newVersionsMu.RUnlock()
 
-	img, ok := newVersions[pkg]
+	img, found = newVersions[pkg]
 
-	return img, ok
+	return img, found, heldPkgs[pkg]
 }
 
-// setNewVersions atomically replaces the shared available-versions map.
-func setNewVersions(m structs.ImageMap) {
+// setNewVersions atomically replaces the shared available versions and the
+// set of held packages.
+func setNewVersions(m structs.ImageMap, held map[string]bool) {
 	newVersionsMu.Lock()
 	defer newVersionsMu.Unlock()
 
 	newVersions = m
+	heldPkgs = held
 }
 
 // refreshNewVersions runs `apt-get update` and rebuilds the available versions
@@ -141,12 +187,13 @@ func refreshNewVersions() error {
 	}
 
 	versions := structs.ImageMap{}
+	held := map[string]bool{}
 
 	// A failing cache read leaves us without any trustworthy view of the
 	// available updates. Report it (so GET /update/check answers an error
 	// instead of "already up to date") and keep the previously known map: a
 	// transient apt/dpkg lock must not erase pending updates.
-	pkgs, cacheErr := apt.GetCachePackages()
+	pkgs, cacheErr := currentHooks().Apt.GetCachePackages()
 	if cacheErr != nil {
 		logging.Errorf("Failed to read the apt cache: %v", cacheErr)
 
@@ -159,6 +206,12 @@ func refreshNewVersions() error {
 	}
 
 	for _, p := range pkgs {
+		// An upgrade-all keeps a held package back, so it is no pending update.
+		if p.Held {
+			logging.Infof("%s: %s  -->  %s (held)\n", p.Name, p.VersionCurrent, p.VersionNew)
+			held[p.Name] = true
+			continue
+		}
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
 		versions[p.Name] = structs.Image{
@@ -168,7 +221,7 @@ func refreshNewVersions() error {
 		}
 	}
 
-	setNewVersions(versions)
+	setNewVersions(versions, held)
 
 	if aptErr != nil {
 		return fmt.Errorf("apt-get update failed: %w", aptErr)
@@ -194,6 +247,9 @@ func (m *MultiError) Error() string {
 // events emitted by the C++ layer (the exact transaction, dependencies
 // included).
 func initUpgradeStatus() {
+	removedMu.Lock()
+	removedPkgs = map[string]bool{}
+	removedMu.Unlock()
 	upgradeStatus.SetStatus(structs.Status{
 		Status:        "upgrading",
 		TotalPercent:  0,
@@ -223,7 +279,7 @@ func pkgStateForStage(stage string) string {
 	}
 }
 
-// applyAptProgress is the callback passed to apt.UpgradeAll / apt.InstallPackage.
+// applyAptProgress is the progress callback of the apt transactions.
 // It maps one apt.Progress event onto the shared upgrade Status and publishes
 // it on the hub (through SetStatus).
 //
@@ -248,6 +304,11 @@ func applyAptProgress(p apt.Progress) {
 
 	// A "pending" event declares a package that is part of the transaction.
 	if p.Stage == "pending" {
+		if p.Msg == "remove" {
+			removedMu.Lock()
+			removedPkgs[p.Pkg] = true
+			removedMu.Unlock()
+		}
 		st.Packages = append(st.Packages, structs.PkgStatus{
 			Name:  p.Pkg,
 			State: structs.PkgStatePending,
@@ -298,7 +359,9 @@ func applyAptProgress(p apt.Progress) {
 		st.CurrentPercent = p.PkgPercent
 	}
 	st.TotalPercent = p.TotalPercent
-	st.Message = p.Msg
+	// apt messages carry repository URLs and archive paths: they stay in the
+	// journal, the progress goes to every event subscriber.
+	logging.Debugf("apt %s %s: %s", p.Stage, p.Pkg, p.Msg)
 
 	// Retro-compat with the old coarse progress fields.
 	st.Progress = st.PkgIndex
@@ -307,7 +370,21 @@ func applyAptProgress(p apt.Progress) {
 	upgradeStatus.SetStatus(st)
 }
 
+// removedPkgs are the packages the current transaction removes, guarded by
+// removedMu: apt reports them done like the installed ones.
+var (
+	removedMu   sync.Mutex
+	removedPkgs = map[string]bool{}
+)
+
+func isRemoved(name string) bool {
+	removedMu.Lock()
+	defer removedMu.Unlock()
+	return removedPkgs[name]
+}
+
 // finishUpgrade writes the terminal status (done/error) on the shared Status.
+// Error gets the job's summary: the apt error itself is only logged.
 // It MUST be called before resetStatus() so the terminal event is published
 // on the hub before the return-to-idle event.
 func finishUpgrade(err error) {
@@ -315,7 +392,7 @@ func finishUpgrade(err error) {
 
 	if err != nil {
 		st.Status = "error"
-		st.Error = err.Error()
+		st.Error = jobErrorSummary(st)
 		upgradeStatus.SetStatus(st)
 		return
 	}
@@ -330,80 +407,4 @@ func finishUpgrade(err error) {
 	}
 	st.Error = ""
 	upgradeStatus.SetStatus(st)
-}
-
-func Upgrade(pkg string) error {
-	if !upgradeLock.TryAcquire(1) {
-		logging.Debugln("Upgrade(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
-	}
-	defer upgradeLock.Release(1)
-
-	//search for package in cache
-	img, found := getNewVersion(pkg)
-	if !found {
-		logging.WithFields(logrus.Fields{
-			"pkg": pkg,
-		}).Errorln("Package not found")
-		return fmt.Errorf("package not found")
-	}
-
-	initUpgradeStatus()
-
-	snapperNum := createSnapperPreSnapshot("Calaos upgrade " + pkg + " " + img.Version)
-
-	err := apt.InstallPackage(img.Name, applyAptProgress)
-
-	// Publish the terminal (done/error) status BEFORE returning to idle: the
-	// CLI exits on the terminal event, the reset comes after.
-	finishUpgrade(err)
-
-	createSnapperPostSnapshot(snapperNum, "Calaos upgrade "+pkg+" "+img.Version)
-
-	if err == nil {
-		// Refresh the available versions now that the upgrade succeeded. The
-		// upgradeLock is still held here, so call the lock-free refresh.
-		if rerr := refreshNewVersions(); rerr != nil {
-			logging.Warnf("Failed to refresh versions after upgrade: %v", rerr)
-		}
-	}
-
-	resetStatus()
-
-	return err
-}
-
-func UpgradeAll() error {
-	if !upgradeLock.TryAcquire(1) {
-		logging.Debugln("UpgradeAll(): Upgrade already in progress")
-		return errors.New("upgrade already in progress")
-	}
-	defer upgradeLock.Release(1)
-
-	//For full upgrade, first update all dkpg packages before containers.
-	//This is done to upgrade first calaos-container package that includes all services units
-
-	initUpgradeStatus()
-
-	snapperNum := createSnapperPreSnapshot("Calaos upgrade all")
-
-	//Upgrade dpkg packages
-	err := apt.UpgradeAll(applyAptProgress)
-
-	// Publish the terminal (done/error) status BEFORE returning to idle.
-	finishUpgrade(err)
-
-	createSnapperPostSnapshot(snapperNum, "Calaos upgrade all")
-
-	if err == nil {
-		// Refresh the available versions now that the upgrade succeeded. The
-		// upgradeLock is still held here, so call the lock-free refresh.
-		if rerr := refreshNewVersions(); rerr != nil {
-			logging.Warnf("Failed to refresh versions after upgrade: %v", rerr)
-		}
-	}
-
-	resetStatus()
-
-	return err
 }

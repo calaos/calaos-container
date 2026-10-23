@@ -64,8 +64,8 @@ func TestParseUpdateTime(t *testing.T) {
 func TestGetNewVersionsReturnsCopy(t *testing.T) {
 	setNewVersions(structs.ImageMap{
 		"calaos-container": {Name: "calaos-container", Version: "2.0", CurrentVersion: "1.0"},
-	})
-	t.Cleanup(func() { setNewVersions(structs.ImageMap{}) })
+	}, nil)
+	t.Cleanup(func() { setNewVersions(structs.ImageMap{}, nil) })
 
 	got := GetNewVersions()
 	got["injected"] = structs.Image{Name: "injected"}
@@ -85,7 +85,7 @@ func TestGetNewVersionsReturnsCopy(t *testing.T) {
 // a check was rebuilding it. Run under -race, readers and writers must not
 // race. It exercises both accessor paths (whole-map copy and single lookup).
 func TestNewVersionsConcurrentReadWrite(t *testing.T) {
-	t.Cleanup(func() { setNewVersions(structs.ImageMap{}) })
+	t.Cleanup(func() { setNewVersions(structs.ImageMap{}, nil) })
 
 	const (
 		readers    = 16
@@ -105,7 +105,7 @@ func TestNewVersionsConcurrentReadWrite(t *testing.T) {
 					name := "pkg" + string(rune('a'+k))
 					m[name] = structs.Image{Name: name, Version: "1.0", CurrentVersion: "0.9"}
 				}
-				setNewVersions(m)
+				setNewVersions(m, map[string]bool{"pkgz": true})
 			}
 		}(w)
 	}

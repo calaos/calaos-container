@@ -62,9 +62,10 @@ _Gate to start: P1 + P2 + P3 merged._
 
 | ID | Title | Prio | Size | Deps | Status |
 |----|-------|------|------|------|--------|
-| CC-040 | Unified API contract under a versioned prefix + CLI lockstep, admin section of `API.md` | P1 | L | all P1 + P2 | 🔵 |
-| CC-041 | Build & release engineering | P2 | M | P3 complete | ⬜ |
+| CC-040 | Unified API contract under a versioned prefix + CLI lockstep, admin section of `API.md` | P1 | L | all P1 + P2 | ✅ |
+| CC-041 | Build & release engineering | P2 | M | P3 complete | ✅ |
 | CC-042 | systemd unit hardening + postinst with deferred restart (absorbs CC4) | P2 | S | CC-014 | ⬜ |
+| [CC-043](backlog/CC-043-initramfs-overlay-hook-path.md) | grub-btrfs-overlay initramfs hook/script installed as directories, never run | P2 | S | CC-041 | ⬜ |
 
 ## P5 — Tests
 _Gate to start: P4 merged. 6 parallel tickets (new files only)._
@@ -83,9 +84,9 @@ _Gate to start: CC-040 and CC-042 merged, ADM-CH1a done. Sequential: CC2, CC1, C
 
 | ID | Title | Prio | Size | Deps | Status |
 |----|-------|------|------|------|--------|
-| [ADM-CC2](backlog/ADM-CC2-admin-token.md) | 32-byte urandom token, `?token=` scoping; absorbs CC-052 | P1 | S | CC-040, CC-042, ADM-CH1a | ⬜ |
-| [ADM-CC1](backlog/ADM-CC1-admin-password.md) | Admin password, sessions, `admin/*` routes, CLI `set/reset` | P1 | M | CC-040, ADM-CC2 | ⬜ |
-| [ADM-CC3](backlog/ADM-CC3-async-upgrade.md) | Async versioned upgrade (202 + job), `reboot_required`; absorbs CC-050, CC-055 | P1 | L | ADM-CC1 | ⬜ |
+| [ADM-CC2](backlog/ADM-CC2-admin-token.md) | 32-byte urandom token, `?token=` scoping; absorbs CC-052 | P1 | S | CC-040, CC-042, ADM-CH1a | ✅ |
+| [ADM-CC1](backlog/ADM-CC1-admin-password.md) | Admin password, sessions, `admin/*` routes, CLI `set/reset` | P1 | M | CC-040, ADM-CC2 | ✅ |
+| [ADM-CC3](backlog/ADM-CC3-async-upgrade.md) | Async versioned upgrade (202 + job), `reboot_required`; absorbs CC-050, CC-055 | P1 | L | ADM-CC1 | ✅ |
 | [ADM-CC2b](backlog/ADM-CC2b-retire-query-token.md) | Drop `?token=` on `/events` (conditional) | P3 | S | ADM-CH1a finding, CH1b + one release | ⬜ |
 
 ---
@@ -111,3 +112,7 @@ _Gate to start: CC-040 and CC-042 merged, ADM-CH1a done. Sequential: CC2, CC1, C
 | CC-033 | `031bc97` | 2026-08-05 | On main, see `git log` |
 | CC-034 | `6725eb6` | 2026-08-05 | On main, see `git log` |
 | CC-035 | `e1e266d` | 2026-08-05 | On main, see `git log` |
+| CC-040 | `67a3999` + implementation PR | 2026-10-22 | `/api/v2` contract and implementation; legacy routes pinned by golden tests |
+| ADM-CC2 | PR on `admin/p6` | 2026-10-23 | 32-byte 0600 token created atomically, `?token=` on `/api/events` only, `/etc/ola` set up; absorbs CC-052 |
+| ADM-CC1 | PR on `admin/p6` | 2026-10-23 | argon2id admin password in `/mnt/calaos/admin`, three `admin/set` modes, sessions in `/run/calaos-container`, limiter, alerts, audit, `calaos-os admin set/reset` |
+| ADM-CC3 | PR on `admin/p6` | 2026-10-23 | `/api/v2` upgrades as `202` jobs persisted in `/var/log/calaos-container/last_job.json`, legacy routes synchronous and recorded as jobs, `upgrade_job` events, exit 0 after a self-upgrade, CLI on jobs with legacy fallback; absorbs CC-050, CC-055 |

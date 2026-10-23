@@ -1,0 +1,4 @@
+status: 500
+content-type: application/json
+
+{"error":true,"msg":"GetSystemInfo: open /proc/uptime: no such file or directory"}

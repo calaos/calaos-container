@@ -2,6 +2,7 @@ package models
 
 import (
 	"sync"
+	"time"
 
 	logger "github.com/calaos/calaos-container/log"
 	cimg "github.com/calaos/calaos-container/models/structs"
@@ -13,13 +14,14 @@ import (
 // Concurrency model of the update subsystem:
 //
 //   - upgradeLock (semaphore, capacity 1) serializes the long-running
-//     operations: checkForUpdates, Upgrade and UpgradeAll. It is acquired with
-//     TryAcquire, so a second caller is rejected with "upgrade already in
-//     progress" instead of piling up behind the first one.
-//   - newVersionsMu protects the newVersions map only. It is held for map
-//     access alone: never across an apt-get run, a cgo call or an upgradeLock
-//     acquisition. Readers go through GetNewVersions()/getNewVersion(), the
-//     writer through setNewVersions().
+//     operations: checkForUpdates and the upgrade jobs (StartJob to
+//     Complete). It is acquired with TryAcquire, so a second caller is
+//     rejected with "upgrade already in progress" instead of piling up
+//     behind the first one.
+//   - newVersionsMu protects the newVersions and heldPkgs maps only. It is
+//     held for map access alone: never across an apt-get run, a cgo call or
+//     an upgradeLock acquisition. Readers go through GetNewVersions()/
+//     getNewVersion(), the writer through setNewVersions().
 //   - Lock ordering: upgradeLock is always taken before newVersionsMu, never
 //     the other way around, so the two cannot deadlock.
 //   - upgradeStatus (models/status.go) carries its own mutex and is
@@ -39,6 +41,7 @@ var (
 	//Stored new available versions, guarded by newVersionsMu
 	newVersionsMu sync.RWMutex
 	newVersions   = cimg.ImageMap{}
+	heldPkgs      = map[string]bool{}
 )
 
 func init() {
@@ -47,6 +50,9 @@ func init() {
 
 // Init models
 func Init() (err error) {
+	// Before any route is served, so no client ever sees a job "running"
+	// that nothing runs.
+	loadLastJob()
 
 	// Initialize the shared upgrade status to "idle" so /api/update/status and
 	// the /api/events snapshot report a well-defined state before any upgrade.
@@ -84,4 +90,21 @@ func Shutdown() {
 	lifecycleMu.Unlock()
 
 	wgDone.Wait()
+
+	// apt cannot be cancelled: give a running job the chance to end, short of
+	// the unit's 30 s stop timeout. Past that it is cut and reads interrupted
+	// at the next start.
+	done := make(chan struct{})
+	go func() {
+		jobsWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownJobWait):
+		logging.Warnln("upgrade job still running at shutdown")
+	}
 }
+
+// shutdownJobWait is a variable for tests.
+var shutdownJobWait = 25 * time.Second

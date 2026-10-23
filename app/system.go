@@ -4,111 +4,99 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/calaos/calaos-container/models"
 	"github.com/gofiber/fiber/v2"
 )
 
-func (a *AppServer) apiSystemReboot(c *fiber.Ctx) (err error) {
-
-	_, err = models.RunCommand("systemctl", "reboot")
-
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
-	}
-
+func legacyOK(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"error": false,
 		"msg":   "ok",
 	})
 }
 
-func (a *AppServer) apiSystemRestart(c *fiber.Ctx) (err error) {
-
-	_, err = models.RunCommand("systemctl", "restart", "calaos-home")
-
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
-	}
-
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"error": false,
-		"msg":   "ok",
-	})
+func reboot() error {
+	_, err := runCommand("systemctl", "reboot")
+	return err
 }
 
-func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) (err error) {
-
-	out, err := models.RunCommand("findmnt", "--json", "/")
-
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+// apiSystemReboot answers 409 during an upgrade, the one deliberate change to
+// a legacy route: a reboot there would cut dpkg, and old kiosks handle any
+// non-2xx the same way.
+func (a *AppServer) apiSystemReboot(c *fiber.Ctx) error {
+	if err := rebootGuard(reboot); err != nil {
+		if errors.Is(err, models.ErrUpgradeInProgress) {
+			return legacyError(c, fiber.StatusConflict, err)
+		}
+		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
-
-	var parsedData map[string]interface{}
-	if err = json.Unmarshal([]byte(out), &parsedData); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
-	}
-
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"error":  false,
-		"msg":    "ok",
-		"output": parsedData,
-	})
+	return legacyOK(c)
 }
 
-func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) (err error) {
-
-	_, err = models.RunCommand("calaos_rollback")
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+func (a *AppServer) apiSystemRestart(c *fiber.Ctx) error {
+	if _, err := runCommand("systemctl", "restart", "calaos-home"); err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
-
-	return a.apiSystemReboot(c)
+	return legacyOK(c)
 }
 
-func (a *AppServer) apiSystemInstallListDevices(c *fiber.Ctx) (err error) {
-
-	out, err := models.RunCommand("lsblk", lsblkInventoryArgs...)
-
+// runJSONCommand runs a command printing a JSON object and decodes it.
+func runJSONCommand(name string, args ...string) (map[string]interface{}, error) {
+	out, err := runCommand(name, args...)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return nil, err
 	}
 
-	var parsedData map[string]interface{}
-	if err = json.Unmarshal([]byte(out), &parsedData); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, err
+	}
+	return parsed, nil
+}
+
+func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) error {
+	parsed, err := runJSONCommand("findmnt", "--json", "/")
+	if err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"error":  false,
 		"msg":    "ok",
-		"output": parsedData,
+		"output": parsed,
+	})
+}
+
+// apiSystemRollbackSnapshot keeps its legacy behaviour during an upgrade (no
+// 409), an accepted risk until old kiosks are gone.
+func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) error {
+	if _, err := runCommand("calaos_rollback"); err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
+	}
+	if err := reboot(); err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
+	}
+	return legacyOK(c)
+}
+
+func (a *AppServer) apiSystemInstallListDevices(c *fiber.Ctx) error {
+	parsed, err := runJSONCommand("lsblk", lsblkInventoryArgs...)
+	if err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"error":  false,
+		"msg":    "ok",
+		"output": parsed,
 	})
 }
 
@@ -141,7 +129,7 @@ type lsblkInventory struct {
 // GET /system/install/list_devices and parses it into the typed device tree
 // used to validate install targets.
 func getBlockDeviceInventory() ([]lsblkDevice, error) {
-	out, err := models.RunCommand("lsblk", lsblkInventoryArgs...)
+	out, err := runCommand("lsblk", lsblkInventoryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -235,46 +223,43 @@ const (
 	INSTALL_EXIT_CODE_FILE = "/run/calaos/calaos_install.code"
 )
 
-func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
-
+func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) error {
 	n := new(InstallOpts)
 	if err := c.BodyParser(n); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return legacyError(c, fiber.StatusBadRequest, err)
 	}
 
 	devices, err := getBlockDeviceInventory()
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 
 	if verr := validateInstallDevice(*n, devices); verr != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": true,
-			"msg":   verr.Error(),
-		})
+		return legacyError(c, fiber.StatusBadRequest, verr)
 	}
 
+	if err := streamInstall(c, n.Device); err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
+	}
+	return nil
+}
+
+// streamInstall starts the installer on device and streams its log as the
+// response body.
+func streamInstall(c *fiber.Ctx, device string) error {
 	// The installer is started detached: it writes its output to
-	// INSTALL_LOG_FILE and its exit status to INSTALL_EXIT_CODE_FILE on its
+	// installLogFile and its exit status to installExitCodeFile on its
 	// own, and runs to completion whatever happens to this request.
-	proc, err := models.StartLoggedCommand(models.LoggedCommand{
+	proc, err := startLoggedCommand(models.LoggedCommand{
 		Name:         "calaos_install",
-		Args:         []string{n.Device},
-		LogFile:      INSTALL_LOG_FILE,
-		ExitCodeFile: INSTALL_EXIT_CODE_FILE,
+		Args:         []string{device},
+		LogFile:      installLogFile,
+		ExitCodeFile: installExitCodeFile,
 	})
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return err
 	}
+	setInstallProc(proc)
 
 	// Streaming is a read-only view on that log file. Capture what the tail
 	// needs *before* returning: the body stream writer runs after the handler
@@ -284,6 +269,7 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 	// to keep; a disconnected client is detected by the write to w failing.
 	serverDone := c.Context().Done()
 	installDone := proc.Done()
+	logFile := installLogFile
 
 	c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
 	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
@@ -292,7 +278,7 @@ func (a *AppServer) apiSystemInstallStart(c *fiber.Ctx) (err error) {
 
 		// Whatever ends the tail — client gone, server shutting down, install
 		// finished — only this stream is affected, never the installer.
-		if terr := models.TailFile(ctx, INSTALL_LOG_FILE, w, models.TailOptions{Until: installDone}); terr != nil {
+		if terr := models.TailFile(ctx, logFile, w, models.TailOptions{Until: installDone}); terr != nil {
 			logging.Debugf("install stream for pid %d ended: %v", proc.Pid(), terr)
 		}
 	})
@@ -321,29 +307,20 @@ func contextFromDone(done <-chan struct{}) (context.Context, context.CancelFunc)
 	return ctx, cancel
 }
 
-func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
-	data, err := os.ReadFile(INSTALL_EXIT_CODE_FILE)
+func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) error {
+	data, err := os.ReadFile(installExitCodeFile)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return legacyError(c, fiber.StatusBadRequest, err)
 	}
 
 	exitCode, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return legacyError(c, fiber.StatusBadRequest, err)
 	}
 
-	data, err = os.ReadFile(INSTALL_LOG_FILE)
+	data, err = os.ReadFile(installLogFile)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return legacyError(c, fiber.StatusBadRequest, err)
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -354,18 +331,164 @@ func (a *AppServer) apiSystemLastInstallStatus(c *fiber.Ctx) (err error) {
 	})
 }
 
-func (a *AppServer) apiSystemInfo(c *fiber.Ctx) (err error) {
-	info, err := models.GetSystemInfo()
+func (a *AppServer) apiSystemInfo(c *fiber.Ctx) error {
+	info, err := getSystemInfo()
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": true,
-			"msg":   err.Error(),
-		})
+		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"error":  false,
 		"msg":    "ok",
 		"output": info,
+	})
+}
+
+// guardedError maps a RebootGuard failure to the v2 vocabulary.
+func guardedError(err error) error {
+	if errors.Is(err, models.ErrUpgradeInProgress) {
+		return errUpgradeInProgress(err)
+	}
+	return errInternal(err)
+}
+
+func (a *AppServer) v2SystemReboot(c *fiber.Ctx) error {
+	if err := rebootGuard(reboot); err != nil {
+		return guardedError(err)
+	}
+	return sendOK(c, fiber.StatusOK, nil)
+}
+
+func (a *AppServer) v2SystemRestart(c *fiber.Ctx) error {
+	if _, err := runCommand("systemctl", "restart", "calaos-home"); err != nil {
+		return errInternal(err)
+	}
+	return sendOK(c, fiber.StatusOK, nil)
+}
+
+func (a *AppServer) v2SystemInfo(c *fiber.Ctx) error {
+	info, err := getSystemInfo()
+	if err != nil {
+		return errInternal(err)
+	}
+	return sendOK(c, fiber.StatusOK, info)
+}
+
+func (a *AppServer) v2SystemFsStatus(c *fiber.Ctx) error {
+	parsed, err := runJSONCommand("findmnt", "--json", "/")
+	if err != nil {
+		return errInternal(err)
+	}
+	return sendOK(c, fiber.StatusOK, parsed)
+}
+
+// v2SystemRollbackSnapshot guards rollback and reboot together, so an
+// upgrade can never start between them.
+func (a *AppServer) v2SystemRollbackSnapshot(c *fiber.Ctx) error {
+	err := rebootGuard(func() error {
+		if _, err := runCommand("calaos_rollback"); err != nil {
+			return err
+		}
+		return reboot()
+	})
+	if err != nil {
+		return guardedError(err)
+	}
+	return sendOK(c, fiber.StatusOK, nil)
+}
+
+func (a *AppServer) v2InstallListDevices(c *fiber.Ctx) error {
+	parsed, err := runJSONCommand("lsblk", lsblkInventoryArgs...)
+	if err != nil {
+		return errInternal(err)
+	}
+	return sendOK(c, fiber.StatusOK, parsed)
+}
+
+// v2InstallStart returns the validateInstallDevice text as msg: it only
+// describes the requested device.
+func (a *AppServer) v2InstallStart(c *fiber.Ctx) error {
+	n := new(InstallOpts)
+	if err := c.BodyParser(n); err != nil {
+		return errInvalid("invalid JSON body")
+	}
+
+	devices, err := getBlockDeviceInventory()
+	if err != nil {
+		return errInternal(err)
+	}
+
+	if verr := validateInstallDevice(*n, devices); verr != nil {
+		return errInvalid(verr.Error())
+	}
+
+	if err := streamInstall(c, n.Device); err != nil {
+		return errInternal(err)
+	}
+	return nil
+}
+
+var (
+	installMu   sync.Mutex
+	installProc models.Process
+)
+
+func setInstallProc(p models.Process) {
+	installMu.Lock()
+	installProc = p
+	installMu.Unlock()
+}
+
+// installRunning reports an installer started by this daemon and still alive.
+func installRunning() bool {
+	installMu.Lock()
+	p := installProc
+	installMu.Unlock()
+	if p == nil {
+		return false
+	}
+	select {
+	case <-p.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+// v2InstallStatus derives the state from the files the installer writes: the
+// log is created at start, the exit code at the end. A log without exit code
+// and without a live process is an installer that failed to start or outlived
+// a daemon restart: it never writes its code, so it reads as finished, -1.
+func (a *AppServer) v2InstallStatus(c *fiber.Ctx) error {
+	code, codeErr := os.ReadFile(installExitCodeFile)
+	if codeErr != nil && !errors.Is(codeErr, fs.ErrNotExist) {
+		return errInternal(codeErr)
+	}
+
+	log, logErr := os.ReadFile(installLogFile)
+	if logErr != nil && !errors.Is(logErr, fs.ErrNotExist) {
+		return errInternal(logErr)
+	}
+
+	if codeErr != nil {
+		switch {
+		case logErr != nil:
+			return sendOK(c, fiber.StatusOK, fiber.Map{"status": "never_run"})
+		case installRunning():
+			return sendOK(c, fiber.StatusOK, fiber.Map{"status": "running"})
+		default:
+			return sendOK(c, fiber.StatusOK, fiber.Map{"status": "finished", "exit_code": -1, "log": string(log)})
+		}
+	}
+
+	exitCode, err := strconv.Atoi(strings.TrimSpace(string(code)))
+	if err != nil {
+		return errInternal(fmt.Errorf("parse %s: %w", installExitCodeFile, err))
+	}
+
+	return sendOK(c, fiber.StatusOK, fiber.Map{
+		"status":    "finished",
+		"exit_code": exitCode,
+		"log":       string(log),
 	})
 }

@@ -1,0 +1,6 @@
+status: 200
+content-type: text/plain; charset=utf-8
+
+partitioning /dev/sdb
+done
+

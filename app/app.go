@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	fiberLog "github.com/gofiber/fiber/v2/middleware/logger"
 
+	"github.com/calaos/calaos-container/app/admin"
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/events"
 	logger "github.com/calaos/calaos-container/log"
@@ -46,6 +47,16 @@ type AppServer struct {
 	// hub is the event bus streamed over GET /api/events. It defaults to the
 	// package-level events.Default hub; tests may override it.
 	hub *events.Hub
+
+	sessions sessionValidator
+
+	admin *admin.Manager
+
+	// wsConns counts the event streams, so Shutdown lets them flush the
+	// last events before the process exits. No Add once wsClosing is set.
+	wsMu      sync.Mutex
+	wsClosing bool
+	wsConns   sync.WaitGroup
 }
 
 var logging *logrus.Entry
@@ -78,11 +89,22 @@ func NewApp() (a *AppServer, err error) {
 			DisableStartupMessage: true,
 			EnablePrintRoutes:     false,
 			BodyLimit:             maxBodySize,
+			ErrorHandler:          errorHandler,
 		}),
 	}
 
+	// Reads a.hub at publish time: tests swap the hub after NewApp.
+	a.admin = admin.New(admin.Options{
+		DataDir:    adminDataDir,
+		RuntimeDir: adminRuntimeDir,
+		Hash:       adminHashParams,
+		Publish:    func(evType string, data any) { publishAdmin(a.hub, evType, data) },
+	})
+	a.sessions = a.admin
+
 	a.appFiber.
 		Use(fiberLog.New(fiberLog.Config{})).
+		Use(a.auditMiddleware).
 		Use(NewTokenMiddleware())
 
 	a.appFiber.Use(cors.New(cors.Config{
@@ -164,18 +186,58 @@ func NewApp() (a *AppServer, err error) {
 		return a.apiUpdateStatus(c)
 	})
 
-	// Generic event bus over WebSocket. The global Bearer middleware already
-	// authenticated the HTTP upgrade request (header or ?token=). Reject plain
-	// GET requests that are not a WebSocket upgrade with 426.
-	api.Use("/events", func(c *fiber.Ctx) error {
+	a.registerEvents(api)
+
+	a.registerV2(api.Group("/v2"))
+
+	return
+}
+
+// registerV2 serves the versioned API (docs/API.md). Every route is either
+// sessionAllowed (calaos_server may relay it) or bearerOnly.
+func (a *AppServer) registerV2(v2 fiber.Router) {
+	s := a.sessionAllowed
+
+	v2.Get("/update/check", s, a.v2UpdateCheck)
+	v2.Get("/update/available", s, a.v2UpdateAvailable)
+	v2.Get("/update/installed", s, a.v2UpdateInstalled)
+	v2.Get("/update/status", s, a.v2UpdateStatus)
+	v2.Post("/update/upgrade-all", s, a.v2UpdateUpgradeAll)
+	v2.Post("/update/upgrade", s, a.v2UpdateUpgrade)
+
+	v2.Post("/system/reboot", s, a.v2SystemReboot)
+	v2.Post("/system/restart", s, a.v2SystemRestart)
+	v2.Get("/system/info", s, a.v2SystemInfo)
+	v2.Get("/system/fs_status", s, a.v2SystemFsStatus)
+	v2.Post("/system/rollback_snapshot", bearerOnly, a.v2SystemRollbackSnapshot)
+	v2.Get("/system/install/list_devices", bearerOnly, a.v2InstallListDevices)
+	v2.Post("/system/install/start", bearerOnly, a.v2InstallStart)
+	v2.Get("/system/install/status", bearerOnly, a.v2InstallStatus)
+
+	v2.Get("/network/list", bearerOnly, a.v2NetList)
+	v2.Post("/network/:intf", bearerOnly, a.v2NetConfigure)
+
+	a.registerAdmin(v2)
+
+	a.registerEvents(v2, s)
+}
+
+// registerEvents serves the event bus over WebSocket. The global Bearer
+// middleware already authenticated the HTTP upgrade request; guards run next,
+// then plain GET requests that are not a WebSocket upgrade get 426.
+func (a *AppServer) registerEvents(r fiber.Router, guards ...fiber.Handler) {
+	args := []interface{}{"/events"}
+	for _, g := range guards {
+		args = append(args, g)
+	}
+	args = append(args, fiber.Handler(func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()
 		}
 		return fiber.ErrUpgradeRequired
-	})
-	api.Get("/events", websocket.New(a.apiEvents))
-
-	return
+	}))
+	r.Use(args...)
+	r.Get("/events", websocket.New(a.apiEvents))
 }
 
 // Start runs the HTTP server in a background goroutine.
@@ -279,10 +341,25 @@ func validateOrigins(origins string) error {
 
 // Stop the app
 func (a *AppServer) Shutdown() {
+	a.wsMu.Lock()
+	a.wsClosing = true
+	a.wsMu.Unlock()
+
 	// Close the event hub first: hijacked WebSocket connections are not
 	// closed by fiber's Shutdown, so closing the subscriber channels is what
 	// makes the WS handlers return.
 	a.hub.Close()
 	_ = a.appFiber.Shutdown()
 	a.wgDone.Wait()
+
+	flushed := make(chan struct{})
+	go func() {
+		a.wsConns.Wait()
+		close(flushed)
+	}()
+	select {
+	case <-flushed:
+	case <-time.After(wsWriteWait):
+		logging.Warnln("event streams still open at shutdown")
+	}
 }

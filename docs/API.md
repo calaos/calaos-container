@@ -23,9 +23,19 @@ Authorization: Bearer <token>
 - The scheme is compared case-insensitively (old kiosks send `bearer`).
 - The token is re-read when the file changes; a client that gets a bearer 401 re-reads the file
   and retries once.
-- An empty or missing token file rejects every request (fail closed).
+- An empty, missing or unreadable token file rejects every request (fail closed). The token is
+  compared in constant time.
 - `?token=<token>` is accepted only on the legacy `GET /api/events` WebSocket, because published
-  kiosks open it without a header. It is never accepted on `/api/v2/`.
+  kiosks open it without a header. Every other route, legacy or `/api/v2/`, answers `401` to a
+  request that only carries `?token=`.
+- `init_calaosfs` writes the file at boot when it is absent: 32 bytes from `/dev/urandom`,
+  hex-encoded (64 characters and a newline), owned by root, mode `0600`. Kiosks append the
+  token to a URL without percent-encoding it, so it stays hex. An existing non-empty regular file
+  owned by root keeps its value (only its mode is set to `0600`): after an upgrade without reboot
+  the previous token stays valid until the next boot. Anything else at that path is replaced.
+- Every reader must run as root on the host: the kiosk container (privileged, no `--user`, no
+  userns remap), calaos_server and `calaos-os`. A kiosk run under another uid or a userns remap
+  cannot read the token and sends an empty bearer.
 
 On `/api/v2/` a bearer failure answers `401` with the code `bad_bearer` (see the error
 vocabulary). A `401` is never anything but `bad_bearer` or `bad_session`: a client that gets a
@@ -52,7 +62,9 @@ Error:
 - `code` is present on every error and absent on success. Its values form the closed vocabulary
   below. Clients branch on `code`, never on `msg`.
 - `msg` is a short, stable English sentence for logs and fallbacks. It never contains a Go
-  error string, subprocess output or a file path: the details go to the daemon log only.
+  error string, subprocess output or a file path: the details go to the daemon log only. On
+  `invalid_request` it may say what is wrong with the client's own input (field, interface,
+  device).
 - `data` carries the payload on success. On an error it is absent, or holds the code-specific
   details listed in the vocabulary.
 - `Content-Type: application/json` on every enveloped response.
@@ -78,11 +90,12 @@ ignored.
 | `password_too_short` | 400 | admin password under 10 characters | `{"min_length": 10}` |
 | `invalid_request` | 400 | malformed JSON, missing or invalid field, invalid `package` or interface name | none |
 | `package_not_found` | 404 | the package has no pending update | none |
+| `package_held` | 409 | single-package upgrade of a package on hold (`apt-mark hold`) | none |
 | `not_found` | 404 | unknown `/api/v2/` route | none |
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
-| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot | `{"job_id": "..."}` once upgrade jobs exist |
+| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
 | `rate_limited` | 429 | admin password limiter (see Rate limiting) | `{"retry_after": <seconds>}` |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
@@ -124,7 +137,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, then reboots); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/install/list_devices` | bearer only | 200 | `lsblk --json --output-all` output |
 | POST | `/api/v2/system/install/start` | bearer only | 200 | `text/plain` log stream; body `{"device": "/dev/...", "confirm": true}` |
-| GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}` |
+| GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}`; `exit_code` is `-1` when the installer ended without an exit status (failed start, daemon restarted under it) |
 | GET | `/api/v2/network/list` | bearer only | 200 | array of interfaces |
 | POST | `/api/v2/network/{intf}` | bearer only | 200 | `null`; body `{ipv4, gateway, dns_servers, search_domains, dhcp}` |
 | GET | `/api/v2/admin/status` | bearer, session allowed | 200 | `{"admin_set": <bool>}` |
@@ -141,6 +154,22 @@ the session path (calaos_server) never reaches them.
 `<Status>` is the upgrade progress object of the legacy `GET /api/update/status`, unchanged
 (`status`, `total_percent`, `current_pkg`, `current_step`, `current_percent`, `pkg_index`,
 `pkg_count`, `packages[]`, `message`, `error`, ...).
+
+What each `<Status>` field carries, on every surface (REST, `/api/events`, `/api/v2/events`):
+
+| Field | Content |
+|---|---|
+| `status` | one of `idle`, `upgrading`, `done`, `error`; anything else the daemon would produce is sent as `upgrading` |
+| `current_step` | absent, or one of `pending`, `download`, `unpack`, `configure`, `install`, `done`, `error`; anything else is sent as `install` |
+| `total_percent`, `current_percent`, `pkg_index`, `pkg_count`, `progress`, `progress_total` | counters, no text from apt |
+| `current_pkg`, `packages[].name` | Debian package names of the transaction (no version, path or URL): the box's package inventory |
+| `packages[].state`, `packages[].percent` | per-package state and counter |
+| `error` | on `error`: the job's summary (`upgrade failed` or `upgrade failed: <failed packages>`), never apt or dpkg output |
+| `message` | never filled: apt messages (repository URLs, archive paths) go to the daemon log only |
+
+A relay that must not expose the inventory drops `current_pkg` and `packages[].name`; nothing
+else in `<Status>` comes from apt. The legacy `POST /api/update/upgrade*` error body still carries
+the raw apt error (frozen, bearer only).
 
 ## Sessions
 
@@ -247,7 +276,8 @@ calls it after it has recorded the alert (push sent, `EventPushNotification` sto
 ### Alerts
 
 `admin_set` and `admin_reset` are persisted in `/mnt/calaos/admin/` when they happen, then
-published on the event bus and replayed to every new `/events` subscriber until acknowledged.
+published on the event bus and replayed to every new `/events` subscriber until acknowledged. A
+connected subscriber that missed one (full buffer) gets it again at the next ping (30 s).
 An alert raised while calaos_server is stopped is delivered when it reconnects.
 
 Delivery is at least once: if calaos_server stops between recording and acknowledging an alert,
@@ -256,10 +286,14 @@ kept; the oldest goes first.
 
 ### Audit
 
-Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session` writes one line
-to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
-(`X-Calaos-Client-IP`, `local` or `invalid`), method and path, result (`ok` or the error
-`code`), session audit id. Never a password, a session or the bearer.
+Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session`, except those
+refused with `bad_bearer` or `bad_session` (below), writes one line to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
+(`X-Calaos-Client-IP`, `local` or `invalid`), result (`ok` or the error `code`), session audit id,
+then method and path (quoted, cut at 128 bytes). Never a password, a session or the bearer.
+
+A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
+second: anything on the host can send the first, calaos_server relays a household client's guessed
+session on `update_status`, and in `audit.log` they would rotate the real entries away.
 
 `GET admin/status` without a session is not audited (calaos_server polls it). `audit.log` is
 rotated at 1 MiB, one old file kept.
@@ -285,9 +319,9 @@ synchronous behaviour: they answer when apt ends.
 | `kind` | string | `upgrade_all` or `upgrade` |
 | `package` | string | for `upgrade` only |
 | `status` | string | `running`, `done` or `error` |
-| `error` | string | on `error`: a short summary, without apt or dpkg output (the journal has it) |
-| `reboot_required` | bool | computed by the daemon from what was installed, not from snapshots |
-| `daemon_restart` | bool | the run upgraded calaos-container itself: the daemon exits after the terminal event and systemd starts the new binary |
+| `error` | string | on `error`: a short summary, without apt or dpkg output (the journal has it): `interrupted`, `upgrade failed`, or `upgrade failed: <failed packages>` |
+| `reboot_required` | bool | computed by the daemon from what was installed (removals excluded), not from snapshots: a kernel, firmware or microcode package (`linux-image*`, `linux-firmware*`, `firmware-linux`, `firmware-linux-nonfree`, `intel-microcode`, `amd64-microcode`, `raspberrypi-kernel`, `raspberrypi-bootloader`, `raspi-firmware`) |
+| `daemon_restart` | bool | the run replaced the running calaos-container binary: the daemon exits after the terminal event and systemd starts the new binary, whose `dpkg --configure -a` finishes a half-configured package |
 | `started_at`, `finished_at` | string | RFC 3339, UTC; `finished_at` once terminal |
 
 **Rules**
@@ -296,28 +330,50 @@ synchronous behaviour: they answer when apt ends.
   kiosk). Every run is recorded as a job, so `update/status` shows a run started from the kiosk.
 - While a run is in progress, `POST update/upgrade*`, `GET update/check`,
   `POST system/reboot` and `POST system/rollback_snapshot` answer `409 upgrade_in_progress`
-  (with `data.job_id` once jobs exist).
+  (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
   `"package not found"` unchanged. One deliberate exception: the legacy `POST /api/system/reboot`
   answers `409 {"error": true, "msg": "upgrade already in progress"}` during a run, so that an old
   kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and ignore the reboot result.
   The legacy `POST /api/system/rollback_snapshot` is unchanged.
-- `package` must match `^[A-Za-z0-9.+-]+$`, start with a letter or a digit, contain no `..` and
-  be at most 128 characters long; otherwise `400 invalid_request`. A valid name without a
+- `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
+  digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
+  The legacy `POST /api/update/upgrade?package=` applies the same rule and answers its
+  `"package not found"` body. A valid name without a
   pending update gives `404 package_not_found`, and no job.
-- The last job is persisted in `/var/log/calaos-container/last_job.json` (0600). `/var/log` is its
+- A package on hold (`apt-mark hold`) is not an available update: `update/check` and
+  `update/available` omit it, on both the versioned and the legacy routes, and `upgrade-all`
+  keeps it back. `POST /api/v2/update/upgrade` on it answers `409 package_held`, and no job;
+  the legacy `upgrade?package=` answers its `"package not found"` body. A hold set after the
+  last check makes the job fail. A hold released after the last check keeps answering
+  `409 package_held` until a new `update/check`. An apt pin with a negative priority already hides the
+  version from apt itself.
+- The last job is persisted in `/var/log/calaos-container/last_job.json` (0600, in a 0700
+  directory owned by the daemon; neither is used through a symlink). `/var/log` is its
   own btrfs subvolume: it survives daemon restarts and reboots, and no snapshot or rollback ever
   restores it. `GET update/status` returns the running job, or the last finished one, or `null`
   if none ever ran.
-- The job records the kernel boot id (`/proc/sys/kernel/random/boot_id`). Once the boot id
-  differs, the daemon reports `reboot_required: false` for it: the reboot has happened.
+- The job records the kernel boot id (`/proc/sys/kernel/random/boot_id`, else the `btime` of
+  `/proc/stat`). Once the boot id differs, the daemon reports `reboot_required: false` for it: the
+  reboot has happened. A job started while the previous one still requires a reboot on the same
+  boot requires it too, whatever it installs.
 - At start, before any route is served, a persisted job still `running` (crash, OOM kill)
   becomes `error` with `error: "interrupted"` and a `finished_at`. The interrupted dpkg run itself
   is resumed by the unit's `dpkg --configure -a`.
 - Progress is published as `upgrade_progress` events, each job state change as `upgrade_job`
   (see Events). The terminal `upgrade_job` is published before the daemon exits for a
-  self-upgrade, and after the legacy POST that started the run (if any) has been answered.
+  self-upgrade. A legacy run completes (lock released, terminal `upgrade_job`) before its POST is
+  answered, so the next POST of a kiosk queue never finds it in progress; the daemon exits only
+  after that POST has been answered, on a connection it closes.
+- After a self-upgrade, until it exits, the daemon keeps the run's lock (runs, checks and reboots
+  are refused as during a run, without `job_id`) and the progress stays at its terminal `status`: the
+  deferred restart of the package (CC-042) never sees it idle, so it never restarts it a second
+  time.
+- A daemon asked to stop while a job runs waits up to 25 s for apt to end; past that the job is
+  cut and reads `interrupted` at the next start. A legacy synchronous run keeps its request in
+  flight, so the HTTP shutdown waits on it unbounded: the unit's 30 s stop timeout cuts it, with
+  the same outcome.
 
 A client following a job:
 
@@ -326,7 +382,9 @@ A client following a job:
 3. renders `upgrade_progress`, and stops on the `upgrade_job` with that `id` and a terminal
    `status`;
 4. after any disconnection (including the daemon's own restart), reconnects with backoff and
-   reads `GET update/status`: events are not replayed, the persisted job is the source of truth.
+   reads `GET update/status`: events are not replayed, the persisted job is the source of truth;
+5. also reads `GET update/status` now and then (`calaos-os`: every 15 s), since a subscriber that
+   falls behind loses events, the terminal `upgrade_job` included.
 
 If the terminal `upgrade_job` arrives before the POST answer, the client reads
 `GET update/status` once it has the `id`.
@@ -423,12 +481,12 @@ calaos_server forwards to household clients, as `admin_event {type, ts, data}`, 
 | `401` without `code: bad_session`, after re-reading the token and one retry | `daemon_unreachable` |
 | `404` on `GET /api/v2/admin/status` (any body), or any `/api/v2/` `404` whose body is not an envelope with a `code` | `daemon_too_old` |
 | `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed` | same code |
-| `invalid_request`, `package_not_found` | same code, with the daemon `msg` (safe to display) |
+| `invalid_request`, `package_not_found`, `package_held` | same code, with the daemon `msg` (safe to display) |
 | `internal`, `not_found`, `method_not_allowed`, any unknown code | `internal` |
 
 `rate_limited` copies `retry_after`; `upgrade_in_progress` copies `job_id`. The calaos_server
-vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_not_found` and
-`internal`, and cites this file's `package` rule rather than the bare regex.
+vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_not_found`,
+`package_held` and `internal`, and cites this file's `package` rule rather than the bare regex.
 
 ## Compatibility during the upgrade
 
@@ -445,6 +503,53 @@ vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_n
 - The legacy `GET /api/update/status` returns `status: "idle"` whenever no run is in progress:
   the deferred restart of the package (CC-042) waits on it.
 
+## Legacy API (frozen)
+
+These routes answer exactly as they did before `/api/v2/`, except that `?token=` now only
+authenticates `/api/events` (see Authentication). `app/testdata/golden/` pins their status,
+content type and body, and `app/legacy_golden_test.go` fails on any change. `<err>` is the raw
+Go error text.
+
+| Method | Path | Success | Error |
+|---|---|---|---|
+| POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
+| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/install/start` | 200 `text/plain` log stream | 400 or 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/system/install/status` | 200 `{"error":false,"msg":"ok","exit_code":<int>,"log":<text>}` | 400 `{"error":true,"msg":<err>}`, including "never ran" |
+| GET | `/api/system/info` | 200 `{"error":false,"msg":"ok","output":{hostname, uptime, cpu_usage, mem_usage}}` | 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/network/list` | 200 `{"error":false,"msg":"ok","output":[...]}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/network/{intf}` | 200 `{"error":false,"msg":"ok"}` | 400 or 500 `{"error":true,"msg":<err>}` |
+| GET | `/api/update/check` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress" during a run) |
+| GET | `/api/update/available` | 200 raw object keyed by package | none |
+| GET | `/api/update/installed` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/update/upgrade-all` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress") |
+| POST | `/api/update/upgrade?package=<name>` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("package not found", "upgrade already in progress") |
+| GET | `/api/update/status` | 200 raw `<Status>` | none |
+| GET (WS) | `/api/events` | 101, frames as in Events | 426 `Upgrade Required` (text) on a plain `GET` |
+
+Unknown legacy paths answer fiber's plain-text `404 Cannot GET ...` and `405 Method Not Allowed`.
+A bearer failure answers `401 {"error":true,"msg":"wrong token"}`, or `"unauthorized"` when no
+token is provisioned.
+
+### Old → new mapping
+
+| Legacy | `/api/v2/` |
+|---|---|
+| raw JSON on `update/*`, `{error, msg, output}` on `system/*` and `network/*` | one envelope, payload in `data` |
+| `500` "upgrade already in progress" | `409 upgrade_in_progress` |
+| `400` on `install/status` before any install | `200 {"status":"never_run"}`; `running` while an installer started by this daemon is alive; `finished` with `exit_code: -1` when it ended without an exit status |
+| `msg` = raw Go or subprocess error | `code` + sanitized `msg`; details in the daemon log |
+| fiber plain-text `404`, `405`, `426` | `not_found`, `method_not_allowed`, `upgrade_required` envelopes |
+| `401 {"msg":"wrong token"}` | `401 bad_bearer` |
+| `?token=` accepted | header only |
+| `POST update/upgrade?package=` and `upgrade-all`, synchronous | `202` job, body `{"package"}` (ADM-CC3) |
+| `GET update/status` = `<Status>` | `{"progress": <Status>, "job": <Job> or null}` |
+| `/update/images` (removed earlier, CC-002) | none |
+| `install/start` without `confirm` (refused since CC-013) | same rule: `"confirm": true` required |
+
 ## Rollout
 
 The contract above is complete; the daemon implements it in steps.
@@ -457,5 +562,6 @@ The contract above is complete; the daemon implements it in steps.
 | `202` upgrade jobs, `upgrade_job`, `job` in `update/status` and in `409` answers, interrupted jobs | ADM-CC3 |
 | `push_code`, `admin/push/{code_id}`, approver and console routes | phase 2 (AP1a, CO1) |
 
-Until ADM-CC3, `/api/v2/` has no upgrade route (`404`): the CLI upgrades through the legacy
-routes, and `update/status` returns `"job": null`.
+A daemon that serves `/api/v2/` but predates ADM-CC3 answers `404 not_found` on the upgrade
+routes: the CLI then upgrades through the legacy routes, as it does against a daemon without
+`/api/v2/`.

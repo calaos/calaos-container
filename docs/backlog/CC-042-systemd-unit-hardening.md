@@ -5,12 +5,14 @@
 - **Phase:** P4
 - **Priority:** P2
 - **Size:** S
-- **Status:** Backlog
+- **Status:** In Progress (part 1, the admin plan amendments, in PR #5; the hardening work items stay open)
 - **Depends on:** CC-014 (reliable graceful shutdown makes `Restart=`/`TimeoutStopSec=` meaningful). Runs in parallel with CC-040 and CC-041 (disjoint files).
 - **Blocks:** ADM-CC2
 - **Files owned (exclusive for this phase):**
   - `debian/calaos-container.service`
   - `debian/calaos-container.postinst` (new)
+  - `scripts/calaos_deferred_restart` (new, the deferred restart run by the postinst)
+  - `debian/calaos-container.install` (the line installing that script only)
   - `debian/calaos-boot.service`
   - `debian/btrfs-scrub@.service`
   - `debian/grub-btrfsd.service`
@@ -45,7 +47,7 @@ systemd unit hardening is essentially absent:
 
 - Go daemon shutdown behavior — CC-014.
 - Packaging/version/Makefile — CC-041.
-- Unit installation paths / `debian/*.install` — not needed here.
+- Unit installation paths. `debian/calaos-container.install` only gains the line for `scripts/calaos_deferred_restart`.
 
 ## Breaking changes
 
@@ -63,4 +65,27 @@ None expected, but each directive must be validated on real hardware/VM because 
 
 ## Verification notes
 
-_(filled by the implementing agent)_
+### Part 1 (admin plan amendments, PR #5)
+
+**Tests.** Run in privileged containers from `calaos-os:latest`: systemd 252 as PID 1, 1.7.0 installed, offline local apt repo. A fixture package depends on calaos-container and has a postinst of tunable length.
+
+- **Shell apt upgrade, 1.7.0 → new**, with a 25 s fixture postinst: the restart happens after apt exits.
+- **Upgrade driven by the 1.7.0 daemon** (`POST /api/update/upgrade-all`), run with Docker's exit-101 `policy-rc.d` still present: the HTTP answer comes first, then the deferred restart.
+- **Interrupted run.** calaos-container is unpacked (binary replaced), the fixture's configure is killed, then the daemon is killed. ExecStartPre recovers both packages through the transient `calaos-container-dpkg-recover` unit. The fixture's 100 s postinst exceeds the default 90 s timeout and is not cut.
+- **Recovery longer than `TimeoutStartSec`** (40 s against a 100 s postinst):
+  - The postinst runs once and both packages end `ii`.
+  - The next start finds the recovery unit still loaded, skips it and starts the daemon.
+- **`ola` left half-configured.** Its postinst restarts `olad`, which is ordered after us. Result: one stall up to the timeout, then `ola` ends `ii` and the daemon stays up. No loop.
+- **Stock debhelper postinst (counterfactual):** ExecStartPre waits on its own start job until the timeout, then loops.
+- **Daemon stopped:** a reinstall returns in about 1.6 s and the daemon is started without blocking dpkg.
+- **Give-up budget** (cut to 30 s): it is not consumed while the dpkg lock is held (55 s) and expires 30 s after the daemon stops answering.
+- **Unit and scripts:** `systemd-analyze verify` is clean, a clean stop takes about 10 ms, and shellcheck is clean.
+
+**Findings.**
+- An idle 1.7.0 daemon reports `{"status":""}` until its first job. The helper treats `""` as idle.
+- SD-card images shipped Docker's exit-101 `policy-rc.d`. Resolved by OS1: `create_sdimg.sh` no longer ships it, and the postinst removes that exact stub from existing boxes before the debhelper start. The deferred restart still does not consult `policy-rc.d`.
+- Accepted residual: with the stub gone, SD boxes now hit the "`ola` left half-configured" stall above, like HDD boxes. When the boot-time recovery replays an interrupted upgrade, `olad` is restarted and waits for us (`Before=olad.service`), up to the timeout, once. There is no loop.
+
+**Not done in part 1:** the sandboxing directives and the other units (work items above).
+
+**Follow-up after CC-041 merges.** Add a build-time check in `debian/rules` that the generated postinst still contains the `deb-systemd-invoke()` override and the exact `deb-systemd-invoke start 'calaos-container.service'` line. Alternative: `--no-start` for the unit, with the start written in the postinst.

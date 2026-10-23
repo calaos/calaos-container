@@ -3,12 +3,21 @@ GOTEST=$(GOCMD) test
 GOVET=$(GOCMD) vet
 BINARY_NAME=calaos-container
 BINARY_NAME_TOOL=calaos-os
-VERSION?=1.0.0
+PREFIX ?= /usr
+
+# The git tag is the only version authority. CI passes the freshly bumped tag
+# in CALAOS_VERSION because the tag does not exist yet when the package builds.
+CALAOS_VERSION ?= $(shell git describe --tags 2>/dev/null || { h=$$(git rev-parse --short HEAD 2>/dev/null) && echo 0.0.0-0-g$$h; } || echo 0.0.0)
+# Debian ordering: 1.8.1-dev.2 -> 1.8.1~dev.2 (sorts before 1.8.1), and an
+# untagged commit 1.8.0-3-gabc -> 1.8.0+3.gabc (sorts after 1.8.0).
+DEB_UPSTREAM_VERSION = $(shell echo '$(CALAOS_VERSION)' | sed -e 's/-\([0-9]\+\)-g\([0-9a-f]\+\)$$/+\1.g\2/' -e 's/-/~/g')
 
 TOP_DIR := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
 SUBDIRS := apt
 
-SERVER_LDFLAGS := -L$(pwd)/bin -L. -L./bin -lcalaos-apt
+# Absolute: go test links from each package dir. The lib is also installed
+# under /usr by build-lib, which is what the link has relied on so far.
+SERVER_LDFLAGS := -L$(CURDIR)/apt/build -lcalaos-apt
 
 GREEN  := $(shell tput -Txterm setaf 2)
 YELLOW := $(shell tput -Txterm setaf 3)
@@ -16,7 +25,7 @@ WHITE  := $(shell tput -Txterm setaf 7)
 CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
-.PHONY: all test build $(SUBDIRS)
+.PHONY: all test build version deb-version $(SUBDIRS)
 .ONESHELL:
 
 all: build
@@ -54,8 +63,13 @@ $(SUBDIRS):
 
 clean: ## Remove build related file
 	rm -fr ./bin
-	rm -fr ./out
-	rm -f ./junit-report.xml checkstyle-report.xml ./coverage.xml ./profile.cov yamllint-checkstyle.xml
+	rm -f ./profile.cov
+
+version: ## Print the version derived from git
+	@echo $(CALAOS_VERSION)
+
+deb-version: ## Print the Debian upstream version derived from git
+	@echo $(DEB_UPSTREAM_VERSION)
 
 ## Test:
 test: build-lib ## Run the tests of the project

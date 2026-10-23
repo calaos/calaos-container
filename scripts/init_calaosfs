@@ -31,12 +31,69 @@ do
     mkdir -p "${fs}/${d}"
 done
 
-mkdir -p "$rundir"
+install -d -m 0755 -o root -g root "$rundir"
 
-#Create a unique token
-if [ ! -e "$rundir/calaos-ct.token" ]; then
-    echo "$(date +%s-%N)-$RANDOM" > "$rundir/calaos-ct.token"
+# Units run this script concurrently and would otherwise remove each other's
+# /etc/ola symlink mid-setup. A directory lock: no file to plant a symlink at.
+exec 9<"$rundir"
+flock -w 30 9 || die "Timed out waiting for another init_calaosfs"
+
+# API token: 32 urandom bytes in hex (old kiosks put it raw in a URL), root
+# 0600, so every reader (kiosk container, calaos-server, calaos-os) must run as
+# host root without a userns remap. It is published by link(2) or rename(2),
+# so a reader never sees a partial file. A trusted existing token is kept
+# until the next boot: running clients hold it.
+create_token() {
+    local hex
+    umask 077
+    tmp=$(mktemp "$rundir/.calaos-ct.token.XXXXXX")
+    trap 'rm -f "$tmp"' EXIT
+    hex=$(od -An -v -tx1 -N32 /dev/urandom | tr -d ' \n')
+    [[ $hex =~ ^[0-9a-f]{64}$ ]] || die "Failed to generate the API token"
+    printf '%s\n' "$hex" > "$tmp"
+    if [ "${1:-}" = replace ]; then
+        mv -fT "$tmp" "$token_file"
+    else
+        ln "$tmp" "$token_file"
+    fi
+}
+
+token_file="$rundir/calaos-ct.token"
+if [ ! -e "$token_file" ] && [ ! -L "$token_file" ]; then
+    # Subshell: keeps the umask and the EXIT trap local.
+    (create_token)
+elif [ -f "$token_file" ] && [ ! -L "$token_file" ] &&
+    [ "$(stat -c %u "$token_file")" = 0 ] && [ -s "$token_file" ]; then
+    chmod 600 "$token_file"
+else
+    warn "Replacing unexpected $token_file"
+    (create_token replace)
 fi
+
+# Admin password store: a plain directory, not a subvolume, so a rollback
+# brings back the admin password of that time like the household one.
+# Failures here must not stop the units that wait on this script: the daemon
+# reports the admin routes as broken instead. Called in an || list, so set -e
+# and the ERR trap are off inside: every step checks its own status.
+admindir="${fs}/admin"
+prepare_admindir() {
+    local aside
+    if [ -L "$admindir" ]; then
+        warn "Removing the symlink at $admindir"
+        rm -f "$admindir" || return 1
+    elif [ -e "$admindir" ] && [ ! -d "$admindir" ]; then
+        aside="$admindir.bak-$(date +%s)-$$"
+        warn "Moving unexpected $admindir to $aside"
+        mv -nT -- "$admindir" "$aside" || return 1
+    fi
+    if [ ! -d "$admindir" ]; then
+        (umask 077 && mkdir "$admindir") || return 1
+    fi
+    [ -d "$admindir" ] && [ ! -L "$admindir" ] || return 1
+    chown root:root "$admindir" || return 1
+    chmod 0700 "$admindir"
+}
+prepare_admindir || warn "Cannot prepare $admindir; the admin routes will report an error"
 
 if [ -e /.calaos-live ]; then
     touch "$rundir/calaos-live"
@@ -45,18 +102,18 @@ fi
 #For OLA we need to store /etc/ola to /mnt
 #It saves the ola config on the dedicated /mnt/calaos folder
 #This script has to be started once before olad service is started
-#
-#Only touch the symlink when $fs is actually mounted: doing this
-#unconditionally created a dangling /etc/ola -> /mnt/calaos/ola symlink (and
-#a pointless chown -R through it) whenever /mnt/calaos hadn't been mounted
-#yet at ExecStartPre time.
 if [ ! -L /etc/ola ]; then
-    if mountpoint -q "$fs"; then
+    if [ -d "$fs" ]; then
+        # Boxes installed while this block never ran keep olad's config in a
+        # real /etc/ola directory.
+        if [ -d /etc/ola ]; then
+            cp -a --no-clobber /etc/ola/. "${fs}/ola/"
+        fi
         rm -rf /etc/ola
         ln -s "${fs}/ola" /etc/ola
         chown -R olad:olad /etc/ola "${fs}/ola"
     else
-        warn "Skipping OLA symlink setup: $fs is not mounted"
+        warn "Skipping OLA symlink setup: $fs is missing"
     fi
 fi
 

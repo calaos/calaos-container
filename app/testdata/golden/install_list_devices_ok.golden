@@ -1,0 +1,4 @@
+status: 200
+content-type: application/json
+
+{"error":false,"msg":"ok","output":{"blockdevices":[{"children":[{"mountpoint":"/","mountpoints":["/"],"name":"/dev/sda1","path":"/dev/sda1","type":"part"}],"mountpoint":null,"mountpoints":[null],"name":"/dev/sda","path":"/dev/sda","type":"disk"},{"mountpoint":null,"mountpoints":[null],"name":"/dev/sdb","path":"/dev/sdb","type":"disk"}]}}
