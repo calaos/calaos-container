@@ -262,7 +262,10 @@ func legacyCases(t *testing.T) []httpCase {
 		{name: "auth_missing", method: "GET", path: "/api/update/available", auth: "-"},
 		{name: "auth_wrong", method: "GET", path: "/api/update/available", auth: "Bearer nope"},
 		{name: "auth_lowercase_scheme", method: "GET", path: "/api/update/available", auth: "bearer " + testToken},
+		// Deliberate legacy change: ?token= is honoured on /api/events only.
 		{name: "auth_query_token", method: "GET", path: "/api/update/available?token=" + testToken, auth: "-"},
+		{name: "events_query_token", method: "GET", path: "/api/events?token=" + testToken, auth: "-"},
+		{name: "events_query_token_wrong", method: "GET", path: "/api/events?token=nope", auth: "-"},
 		{name: "unknown_route", method: "GET", path: "/api/nope"},
 		{name: "unknown_route_upper_case", method: "GET", path: "/API/NOPE"},
 		{name: "update_available_upper_case", method: "GET", path: "/API/UPDATE/AVAILABLE"},
