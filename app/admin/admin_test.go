@@ -294,7 +294,7 @@ func TestSetModes(t *testing.T) {
 		t.Fatal("recovery on an unset box did not set the password")
 	}
 
-	if got := e.pub.types(); strings.Join(got, ",") != "admin_set,push_code,push_code,admin_set,admin_set,admin_reset,admin_set" {
+	if got := e.pub.types(); strings.Join(got, ",") != "admin_set,push_code,approver_set,push_code,admin_set,admin_set,admin_reset,admin_set" {
 		t.Fatalf("published %v", got)
 	}
 }

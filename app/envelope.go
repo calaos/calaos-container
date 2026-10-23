@@ -35,6 +35,7 @@ const (
 	codeApproverLimit     = "approver_limit"
 	codeApproverExists    = "approver_exists"
 	codeApproverNotFound  = "approver_not_found"
+	codeApproverLast      = "approver_last"
 	codeCodeRequired      = "code_required"
 	codeBadCode           = "bad_code"
 	codeCodeExpired       = "code_expired"

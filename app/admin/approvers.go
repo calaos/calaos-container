@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -24,6 +25,9 @@ var (
 	ErrApproverLimit    = errors.New("too many approvers")
 	ErrApproverExists   = errors.New("token already an approver")
 	ErrApproverNotFound = errors.New("unknown approver")
+	ErrApproverLast     = errors.New("last approver")
+	// ErrApproversUnavailable: approvers.json exists but cannot be used.
+	ErrApproversUnavailable = errors.New("the approvers file is unreadable, run calaos-os admin reset")
 )
 
 // Approver is a phone that receives push codes. The token is the only proof
@@ -95,10 +99,12 @@ type approverFile struct {
 	Approvers []Approver `json:"approvers"`
 }
 
-// approverStore is guarded by Manager.mu.
+// approverStore is guarded by Manager.mu. err is the load error, kept until
+// a reset removes the file.
 type approverStore struct {
 	path string
 	list []Approver
+	err  error
 }
 
 func (as *approverStore) load() error {
@@ -110,10 +116,12 @@ func (as *approverStore) load() error {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return err
 	}
+	ids, tokens := map[string]bool{}, map[string]bool{}
 	for _, a := range f.Approvers {
-		if !ValidID(a.ID) || !ValidToken(a.Token) {
+		if !ValidID(a.ID) || !ValidToken(a.Token) || !ValidDeviceName(a.DeviceName) || ids[a.ID] || tokens[a.Token] {
 			return errors.New("invalid approver entry")
 		}
+		ids[a.ID], tokens[a.Token] = true, true
 	}
 	if len(f.Approvers) > MaxApprovers {
 		return errors.New("too many approvers")
@@ -122,15 +130,25 @@ func (as *approverStore) load() error {
 	return nil
 }
 
+// save keeps memory equal to the file once the rename is done: a removed
+// phone must not keep approving because only the directory sync failed.
 func (as *approverStore) save(list []Approver) error {
 	b, err := json.Marshal(approverFile{Approvers: list})
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(as.path, b); err != nil {
+	tmp, err := writeTemp(as.path, b)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, as.path); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	as.list = list
+	if err := syncDir(filepath.Dir(as.path)); err != nil {
+		logging.Warnf("syncing the admin directory: %v", err)
+	}
 	return nil
 }
 
@@ -153,9 +171,10 @@ func (as *approverStore) hasToken(token string) bool {
 }
 
 func (as *approverStore) wipe() error {
-	as.list = nil
 	if err := os.Remove(as.path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	as.list = nil
+	as.err = nil
 	return nil
 }

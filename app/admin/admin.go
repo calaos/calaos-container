@@ -26,8 +26,10 @@ const (
 	MinPasswordLength = 10   // Unicode code points
 	MaxPasswordBytes  = 1024 // UTF-8 bytes
 
-	EventAdminSet   = "admin_set"
-	EventAdminReset = "admin_reset"
+	EventAdminSet        = "admin_set"
+	EventAdminReset      = "admin_reset"
+	EventApproverSet     = "approver_set"
+	EventApproverRemoved = "approver_removed"
 
 	hashFileName    = "password.hash"
 	alertsFileName  = "alerts.json"
@@ -161,12 +163,12 @@ func New(o Options) *Manager {
 			logging.Errorf("moving the admin alerts aside: %v", rerr)
 		}
 	}
+	// An unreadable file is a lost second factor, not an absent one: the
+	// protected actions stay refused until admin reset removes it.
 	if err := m.approvers.load(); err != nil {
-		logging.Errorf("reading the approvers, moved to %s.corrupt: %v", m.approvers.path, err)
+		logging.Errorf("reading the approvers, code-protected actions disabled until admin reset: %v", err)
 		m.approvers.list = nil
-		if rerr := os.Rename(m.approvers.path, m.approvers.path+".corrupt"); rerr != nil {
-			logging.Errorf("moving the approvers aside: %v", rerr)
-		}
+		m.approvers.err = err
 	}
 	return m
 }
@@ -319,8 +321,8 @@ func (m *Manager) Set(mode Mode, password, session string, code CodeRef) error {
 		return err
 	}
 	if mode == ModeChange {
-		if !m.HasApprover() {
-			return ErrApproverRequired
+		if err := m.requireApprover(); err != nil {
+			return err
 		}
 		if code.ID == "" {
 			return ErrCodeRequired
@@ -337,7 +339,8 @@ func (m *Manager) Set(mode Mode, password, session string, code CodeRef) error {
 		if err != nil {
 			return err
 		}
-		_, err = m.useCodeLocked(s, code, ActionAdminPassword, Params{"password": password}, false)
+		// Checked now, taken only with the write: a failure below keeps it.
+		_, err = m.useCodeLocked(s, code, ActionAdminPassword, Params{"password": password}, useCheck)
 		m.mu.Unlock()
 		if err != nil {
 			return err
@@ -365,10 +368,21 @@ func (m *Manager) Set(mode Mode, password, session string, code CodeRef) error {
 			return err
 		}
 	case ModeChange:
-		if m.liveSession(session) == nil {
+		s := m.liveSession(session)
+		if s == nil {
 			return ErrBadSession
 		}
-		fallthrough
+		c := m.codes.byID[code.ID]
+		if c == nil || c.session != s.Hash || c.dead(m.now()) {
+			return ErrCodeExpired
+		}
+		if err := os.Rename(tmp, m.hashPath); err != nil {
+			return err
+		}
+		delete(m.codes.byID, code.ID)
+		if err := syncDir(filepath.Dir(m.hashPath)); err != nil {
+			logging.Warnf("syncing the admin directory: %v", err)
+		}
 	default:
 		if err := os.Rename(tmp, m.hashPath); err != nil {
 			return err
@@ -412,6 +426,9 @@ func (m *Manager) Reset() (wasSet bool, err error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Even a failed reset ends every session: none may outlive a half-wiped
+	// approver list.
+	defer m.invalidateSessionsLocked()
 
 	if err := m.approvers.wipe(); err != nil {
 		return false, err
@@ -428,7 +445,6 @@ func (m *Manager) Reset() (wasSet bool, err error) {
 	if err := syncDir(filepath.Dir(m.hashPath)); err != nil {
 		logging.Warnf("syncing the admin directory: %v", err)
 	}
-	m.invalidateSessionsLocked()
 	if wasSet {
 		m.raiseLocked(EventAdminReset)
 	}
@@ -492,8 +508,11 @@ func (m *Manager) invalidateSessionsLocked() {
 
 // raiseLocked never fails the request: the password change has already
 // happened, so a lost alert is only logged.
-func (m *Manager) raiseLocked(typ string) {
-	al, err := m.alerts.raise(typ, m.now())
+func (m *Manager) raiseLocked(typ string) { m.raiseAlertLocked(Alert{Type: typ}) }
+
+func (m *Manager) raiseAlertLocked(al Alert) {
+	typ := al.Type
+	al, err := m.alerts.raise(al, m.now())
 	if err != nil {
 		logging.Errorf("persisting the %s alert: %v", typ, err)
 	}

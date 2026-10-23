@@ -218,7 +218,7 @@ func TestCodeBinding(t *testing.T) {
 	if err := m.Set(ModeChange, "a third password", s, ref); !isBadCode(err, 4) {
 		t.Fatalf("code bound to other params: %v", err)
 	}
-	if err := m.RemoveApprover(s, m.approvers.list[0].ID, ref); !isBadCode(err, 3) {
+	if _, err := m.Enroll(s, "tok-z", "Z", ref); !isBadCode(err, 3) {
 		t.Fatalf("code bound to another action: %v", err)
 	}
 	if err := m.Set(ModeChange, otherPassword, s, ref); err != nil {
@@ -303,22 +303,6 @@ func TestCodeGenerationLimits(t *testing.T) {
 	s = mustVerify(t, m, goodPassword)
 	if _, err := m.RequestCode(s, ActionConsoleOpen, nil, ""); err != nil {
 		t.Fatalf("code after the hour: %v", err)
-	}
-}
-
-func TestRateLimitKeepsTheApprovalCode(t *testing.T) {
-	e, m, s := adminWithSession(t)
-	enrol(t, e, m, s, "tok-a")
-	e.clk.Advance(codeInterval)
-	ref := requestCode(t, e, m, s, ActionApproverEnroll, nil)
-
-	var rl *RateLimitedError
-	if _, err := m.Enroll(s, "tok-b", "Spare", ref); !errors.As(err, &rl) {
-		t.Fatalf("enrolment within 10 s: %v", err)
-	}
-	e.clk.Advance(codeInterval)
-	if _, err := m.Enroll(s, "tok-b", "Spare", ref); err != nil {
-		t.Fatalf("enrolment with the same code: %v", err)
 	}
 }
 
@@ -577,14 +561,16 @@ func TestRemoveApprover(t *testing.T) {
 		t.Fatalf("remove not persisted: %+v", got)
 	}
 
-	// The last one can remove itself; then nothing is protected any more.
+	// The last one stays: without it any session could enrol its phone.
 	e.clk.Advance(codeInterval)
-	ref = requestCode(t, e, m, s, ActionApproverRemove, Params{"approver_id": b.ID})
-	if err := m.RemoveApprover(s, b.ID, ref); err != nil {
+	if _, err := m.RequestCode(s, ActionApproverRemove, Params{"approver_id": b.ID}, ""); !errors.Is(err, ErrApproverLast) {
+		t.Fatalf("code to remove the last approver: %v", err)
+	}
+	if err := m.RemoveApprover(s, b.ID, CodeRef{ID: ref.ID, Code: ref.Code}); !errors.Is(err, ErrApproverLast) {
 		t.Fatalf("remove the last approver: %v", err)
 	}
-	if err := m.Set(ModeChange, otherPassword, s, CodeRef{}); !errors.Is(err, ErrApproverRequired) {
-		t.Fatalf("change after the last approver left: %v", err)
+	if !m.HasApprover() {
+		t.Fatal("last approver removed")
 	}
 }
 
@@ -632,24 +618,6 @@ func TestRecoveryKeepsApprovers(t *testing.T) {
 	}
 }
 
-func TestCorruptApproversKeptAside(t *testing.T) {
-	e := newEnv(t)
-	if err := os.MkdirAll(e.data, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(e.data, approversFileName)
-	if err := os.WriteFile(path, []byte(`{"approvers":[{"id":"../x","token":""}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m := e.manager()
-	if m.HasApprover() {
-		t.Fatal("corrupt approvers loaded")
-	}
-	if _, err := os.Stat(path + ".corrupt"); err != nil {
-		t.Fatalf("not kept aside: %v", err)
-	}
-}
-
 func TestInputShapes(t *testing.T) {
 	for _, tok := range []string{"a", strings.Repeat("x", MaxTokenBytes), "fcm:APA91b-_x.y"} {
 		if !ValidToken(tok) {
@@ -681,5 +649,215 @@ func TestInputShapes(t *testing.T) {
 		if err != nil || !ValidCode(d) {
 			t.Fatalf("digits %q %v", d, err)
 		}
+	}
+}
+
+func TestEnrolmentRightAfterTheApprovalCode(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	enrol(t, e, m, s, "tok-a")
+	e.clk.Advance(codeInterval)
+	ref := requestCode(t, e, m, s, ActionApproverEnroll, nil)
+
+	// The approval code paid the interval; the enrolment code only counts
+	// against the hourly budget.
+	if _, err := m.Enroll(s, "tok-b", "Spare", ref); err != nil {
+		t.Fatalf("enrolment at once: %v", err)
+	}
+}
+
+func TestBudgetRefusalKeepsTheApprovalCode(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	enrol(t, e, m, s, "tok-a") // 1
+	e.clk.Advance(codeInterval)
+	ref := requestCode(t, e, m, s, ActionApproverEnroll, nil) // 2
+	for i := 3; i <= codeBudget; i++ {
+		if _, err := m.RequestCode(mustVerify(t, m, goodPassword), ActionConsoleOpen, nil, ""); err != nil {
+			t.Fatalf("code %d: %v", i, err)
+		}
+	}
+	var rl *RateLimitedError
+	if _, err := m.Enroll(s, "tok-b", "Spare", ref); !errors.As(err, &rl) {
+		t.Fatalf("enrolment over the budget: %v", err)
+	}
+	m.mu.Lock()
+	c := m.codes.byID[ref.ID]
+	m.mu.Unlock()
+	if c == nil {
+		t.Fatal("the refusal burnt the approval code")
+	}
+}
+
+// Session X starts an enrolment while there is no approver; session Y
+// enrols one meanwhile. X must not get its phone in unapproved.
+func TestEnrolmentRaceNeedsApproval(t *testing.T) {
+	e, m, x := adminWithSession(t)
+	y := mustVerify(t, m, goodPassword)
+
+	info, err := m.Enroll(x, "tok-x", "Intruder", CodeRef{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := digitsOf(t, m, info.CodeID)
+	enrol(t, e, m, y, "tok-y")
+
+	if _, err := m.Confirm(x, CodeRef{ID: info.CodeID, Code: code}); !errors.Is(err, ErrCodeRequired) {
+		t.Fatalf("unapproved enrolment confirmed: %v", err)
+	}
+	if list, _ := m.Approvers(y); len(list) != 1 || list[0].DeviceName != "Phone tok-y" {
+		t.Fatalf("approvers %+v", list)
+	}
+}
+
+func TestApproverAlerts(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	a := enrol(t, e, m, s, "tok-secret-a")
+	e.clk.Advance(codeInterval)
+	enrol(t, e, m, s, "tok-secret-b")
+	e.clk.Advance(codeInterval)
+	ref := requestCode(t, e, m, s, ActionApproverRemove, Params{"approver_id": a.ID})
+	if err := m.RemoveApprover(s, a.ID, ref); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, al := range e.manager().PendingAlerts() {
+		b, _ := json.Marshal(al.Data())
+		var keys map[string]any
+		_ = json.Unmarshal(b, &keys)
+		for k := range keys {
+			if k != "id" && k != "ts" && k != "device_name" && k != "token_id" {
+				t.Fatalf("alert data %s", b)
+			}
+		}
+		got = append(got, al.Type+":"+al.DeviceName+":"+al.TokenID)
+	}
+	want := []string{
+		"admin_set::",
+		"approver_set:Phone tok-secret-a:" + a.TokenID,
+		"approver_set:Phone tok-secret-b:" + Approver{Token: "tok-secret-b"}.Info().TokenID,
+		"approver_removed:Phone tok-secret-a:" + a.TokenID,
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("alerts %v, want %v", got, want)
+	}
+	types := strings.Join(e.pub.types(), ",")
+	if !strings.Contains(types, "approver_set") || !strings.HasSuffix(types, "approver_removed") {
+		t.Fatalf("published %s", types)
+	}
+}
+
+func TestNewCodeKeepsTheGrant(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	enrol(t, e, m, s, "tok-a")
+	e.clk.Advance(codeInterval)
+	ref := requestCode(t, e, m, s, ActionConsoleOpen, nil)
+	if _, _, err := m.VerifyCode(s, ref); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Advance(codeInterval)
+	requestCode(t, e, m, s, ActionConsoleOpen, nil)
+	if err := m.TakeGrant(s, ref.ID, ActionConsoleOpen); err != nil {
+		t.Fatalf("grant after a new code: %v", err)
+	}
+}
+
+func TestChangeChecksTheCodeBeforeTakingIt(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	enrol(t, e, m, s, "tok-a")
+	e.clk.Advance(codeInterval)
+	ref := requestCode(t, e, m, s, ActionAdminPassword, Params{"password": otherPassword})
+
+	m.mu.Lock()
+	_, err := m.useCodeLocked(m.liveSession(s), ref, ActionAdminPassword, Params{"password": otherPassword}, useCheck)
+	kept := m.codes.byID[ref.ID] != nil
+	m.mu.Unlock()
+	if err != nil || !kept {
+		t.Fatalf("check: %v, kept %v", err, kept)
+	}
+	if err := m.Set(ModeChange, otherPassword, s, ref); err != nil {
+		t.Fatalf("change: %v", err)
+	}
+	m.mu.Lock()
+	kept = m.codes.byID[ref.ID] != nil
+	m.mu.Unlock()
+	if kept {
+		t.Fatal("code left after the change")
+	}
+}
+
+func TestUnreadableApproversFailClosed(t *testing.T) {
+	for name, write := range map[string]func(string) error{
+		"garbage": func(p string) error { return os.WriteFile(p, []byte("{not json"), 0o600) },
+		"bad entry": func(p string) error {
+			return os.WriteFile(p, []byte(`{"approvers":[{"id":"../x","token":""}]}`), 0o600)
+		},
+		"duplicate": func(p string) error {
+			a := `{"id":"0123456789abcdef","token":"t","device_name":"d","created_at":""}`
+			return os.WriteFile(p, []byte(`{"approvers":[`+a+`,`+a+`]}`), 0o600)
+		},
+		"directory": func(p string) error { return os.MkdirAll(filepath.Join(p, "x"), 0o700) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			m := e.manager()
+			mustSet(t, m, ModeBootstrap, goodPassword, "")
+			path := filepath.Join(e.data, approversFileName)
+			if err := write(path); err != nil {
+				t.Fatal(err)
+			}
+			m = e.manager()
+			s := mustVerify(t, m, goodPassword)
+
+			if _, err := m.Enroll(s, "tok-a", "Pixel", CodeRef{}); !errors.Is(err, ErrApproversUnavailable) {
+				t.Fatalf("enrol: %v", err)
+			}
+			if _, err := m.RequestCode(s, ActionConsoleOpen, nil, ""); !errors.Is(err, ErrApproversUnavailable) {
+				t.Fatalf("code: %v", err)
+			}
+			if err := m.Set(ModeChange, otherPassword, s, CodeRef{}); !errors.Is(err, ErrApproversUnavailable) {
+				t.Fatalf("change: %v", err)
+			}
+			if _, err := m.Approvers(s); !errors.Is(err, ErrApproversUnavailable) {
+				t.Fatalf("list: %v", err)
+			}
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatalf("the file was moved: %v", err)
+			}
+			if name == "directory" {
+				// admin reset cannot remove it: the error stays.
+				if _, err := m.Reset(); err == nil {
+					t.Fatal("reset removed a non-empty directory")
+				}
+				return
+			}
+
+			if was, err := m.Reset(); !was || err != nil {
+				t.Fatalf("reset: %v %v", was, err)
+			}
+			mustSet(t, m, ModeBootstrap, goodPassword, "")
+			s = mustVerify(t, m, goodPassword)
+			enrol(t, e, m, s, "tok-a")
+		})
+	}
+}
+
+func TestFailedResetEndsSessions(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	enrol(t, e, m, s, "tok-a")
+	path := filepath.Join(e.data, approversFileName)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Reset(); err == nil {
+		t.Fatal("reset succeeded")
+	}
+	if m.Valid(s) {
+		t.Fatal("session alive after a failed reset")
+	}
+	if !m.HasApprover() {
+		t.Fatal("a failed reset emptied the approvers in memory")
 	}
 }

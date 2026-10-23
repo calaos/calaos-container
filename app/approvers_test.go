@@ -176,6 +176,23 @@ func TestApproverEnrolmentOverHTTP(t *testing.T) {
 	}
 	c.expect("POST", "/api/v2/admin/approvers/confirm", `{"code_id":"`+info.CodeID+`","code":"`+code+`"}`, session(s), 410, codeCodeExpired)
 
+	// Every subscriber is told, by device name and token_id only.
+	for name, conn := range map[string]interface {
+		SetReadDeadline(time.Time) error
+		ReadMessage() (int, []byte, error)
+	}{"v2": v2, "legacy": legacy} {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, frame, err := conn.ReadMessage()
+		var f struct {
+			Type string
+			Data map[string]string
+		}
+		if err != nil || json.Unmarshal(frame, &f) != nil || f.Type != admin.EventApproverSet ||
+			f.Data["device_name"] != "Pixel 8" || f.Data["token_id"] != ap.TokenID || len(f.Data) != 4 || strings.Contains(string(frame), "APA91b") {
+			t.Fatalf("%s approver_set frame %s %v", name, frame, err)
+		}
+	}
+
 	r = c.expect("GET", "/api/v2/admin/approvers", "", session(s), 200, "")
 	if strings.Contains(string(r.Data), "APA91b") || !strings.Contains(string(r.Data), `"token_id":"`+ap.TokenID+`"`) {
 		t.Fatalf("list %s", r.Data)
@@ -229,10 +246,14 @@ func TestCodeProtectedActions(t *testing.T) {
 	if strings.Contains(string(r.Data), first.ID) || !strings.Contains(string(r.Data), info.ApproverID) {
 		t.Fatalf("after remove %s", r.Data)
 	}
+	// The last approver is refused before any code is looked at.
+	clk.Advance(10 * time.Second)
+	last := c.code(s, "console_open", `{}`)
+	c.expect("POST", "/api/v2/admin/codes", `{"action":"approver_remove","params":{"approver_id":"`+info.ApproverID+`"}}`, session(s), 409, codeApproverLast)
+	c.expect("POST", "/api/v2/admin/approvers/remove", `{"approver_id":"`+info.ApproverID+`",`+last.body()+`}`, session(s), 409, codeApproverLast)
 
 	// console_open: verified here, its ticket comes with the console.
-	clk.Advance(10 * time.Second)
-	con := c.code(s, "console_open", `{}`)
+	con := last
 	r = c.expect("POST", "/api/v2/admin/codes/verify", `{`+con.body()+`}`, session(s), 200, "")
 	if string(r.Data) != `{"action":"console_open","expires_in":30}` {
 		t.Fatalf("verify %s", r.Data)
@@ -380,4 +401,24 @@ func TestPushCodeNeverCarriesSecrets(t *testing.T) {
 			t.Fatal("no push_code event")
 		}
 	}
+}
+
+func TestUnreadableApproversAnswerInternal(t *testing.T) {
+	c := newAdminApp(t)
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
+	if err := os.WriteFile(filepath.Join(adminDataDir, "approvers.json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c = adminClient{t: t, a: restarted}
+	s := c.verify(adminPw)
+	c.expect("POST", "/api/v2/admin/approvers/enroll", `{"token":"tok-a","device_name":"Pixel"}`, session(s), 500, codeInternal)
+	c.expect("POST", "/api/v2/admin/codes", `{"action":"console_open"}`, session(s), 500, codeInternal)
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`"}`, session(s), 500, codeInternal)
+	c.expect("POST", "/api/v2/admin/reset", "", nil, 200, "")
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
+	c.enrol(c.verify(adminPw), "tok-a")
 }

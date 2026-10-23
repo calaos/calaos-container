@@ -74,6 +74,8 @@ func adminError(err error) *apiError {
 		return e
 	case errors.Is(err, admin.ErrApproverExists):
 		return newAPIError(fiber.StatusConflict, codeApproverExists, "this phone is already an approver")
+	case errors.Is(err, admin.ErrApproverLast):
+		return newAPIError(fiber.StatusConflict, codeApproverLast, "the last approver cannot be removed")
 	case errors.Is(err, admin.ErrApproverNotFound):
 		return newAPIError(fiber.StatusNotFound, codeApproverNotFound, "unknown approver")
 	case errors.Is(err, admin.ErrCodeRequired):

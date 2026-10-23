@@ -25,9 +25,8 @@ const (
 
 	EventPushCode = "push_code"
 
-	CodeTTL         = 60 * time.Second
-	GrantTTL        = 30 * time.Second
-	MaxCodeAttempts = 5
+	CodeTTL  = 60 * time.Second
+	GrantTTL = 30 * time.Second
 
 	codeInterval = 10 * time.Second
 	codeBudget   = 10
@@ -103,11 +102,20 @@ type pushCode struct {
 	token      string
 	message    string
 	expires    time.Time
-	attempts   int
 	fetched    bool
 	grantUntil time.Time // set once verified, for grant actions
 	enrol      *Approver // the pending approver of an enrolment code
+	// enrolApproved: an existing approver's code allowed this enrolment.
+	enrolApproved bool
 }
+
+type codeUse int
+
+const (
+	useConsume codeUse = iota
+	useGrant           // keep it as a grant for TakeGrant
+	useCheck           // keep it: the caller takes it with its write
+)
 
 func (c *pushCode) dead(now time.Time) bool {
 	if !c.grantUntil.IsZero() {
@@ -167,10 +175,12 @@ func ceilSeconds(d time.Duration) int {
 	return s
 }
 
-func (cs *codeStore) checkIssue(hash string, now time.Time) error {
+// checkIssue applies the hourly budget, and the per-session interval when
+// interval is set.
+func (cs *codeStore) checkIssue(hash string, now time.Time, interval bool) error {
 	cs.prune(now)
 	var wait time.Duration
-	if t, ok := cs.last[hash]; ok {
+	if t, ok := cs.last[hash]; ok && interval {
 		wait = codeInterval - now.Sub(t)
 	}
 	if len(cs.issued) >= codeBudget {
@@ -240,8 +250,8 @@ func checkActionParams(action string, p Params) error {
 	return nil
 }
 
-// issueLocked replaces the session's pending code, then announces the new
-// one. dest is the phone the code goes to.
+// issueLocked replaces the session's pending code (a verified grant stays),
+// then announces the new one. dest is the phone the code goes to.
 func (m *Manager) issueLocked(hash, action string, p Params, dest Approver, enrol *Approver) (*pushCode, error) {
 	now := m.now()
 	key := make([]byte, 32)
@@ -259,7 +269,11 @@ func (m *Manager) issueLocked(hash, action string, p Params, dest Approver, enro
 	if _, taken := m.codes.byID[id]; taken {
 		return nil, errors.New("code id collision")
 	}
-	m.codes.dropSession(hash)
+	for cid, old := range m.codes.byID {
+		if old.session == hash && old.grantUntil.IsZero() {
+			delete(m.codes.byID, cid)
+		}
+	}
 	c := &pushCode{
 		id:         id,
 		session:    hash,
@@ -281,9 +295,9 @@ func (m *Manager) issueLocked(hash, action string, p Params, dest Approver, enro
 }
 
 // useCodeLocked checks ref against the session, the action and params. A
-// grant action's code is kept as a grant; any other is consumed. A mismatch
-// of any kind is a failure of the session.
-func (m *Manager) useCodeLocked(s *session, ref CodeRef, action string, p Params, grant bool) (*pushCode, error) {
+// mismatch of any kind is a failure of the session; the 5th one kills the
+// session and its codes.
+func (m *Manager) useCodeLocked(s *session, ref CodeRef, action string, p Params, use codeUse) (*pushCode, error) {
 	now := m.now()
 	m.codes.prune(now)
 	c := m.codes.byID[ref.ID]
@@ -293,19 +307,16 @@ func (m *Manager) useCodeLocked(s *session, ref CodeRef, action string, p Params
 	ok := subtle.ConstantTimeCompare([]byte(ref.Code), []byte(c.digits)) == 1
 	ok = hmac.Equal(c.mac, bindingMAC(c.key, action, p)) && ok
 	if ok {
-		if grant {
+		switch use {
+		case useGrant:
 			c.grantUntil = now.Add(GrantTTL)
 			c.digits = ""
-		} else {
+		case useConsume:
 			delete(m.codes.byID, c.id)
 		}
 		return c, nil
 	}
 
-	c.attempts++
-	if c.attempts >= MaxCodeAttempts {
-		delete(m.codes.byID, c.id)
-	}
 	left, err := m.pushCodeFailedLocked(s)
 	if err != nil {
 		logging.Errorf("recording a failed push code: %v", err)
@@ -342,6 +353,9 @@ func (m *Manager) Approvers(session string) ([]ApproverInfo, error) {
 		return nil, err
 	}
 	defer m.mu.Unlock()
+	if m.approvers.err != nil {
+		return nil, ErrApproversUnavailable
+	}
 	out := make([]ApproverInfo, 0, len(m.approvers.list))
 	for _, a := range m.approvers.list {
 		out = append(out, a.Info())
@@ -351,9 +365,23 @@ func (m *Manager) Approvers(session string) ([]ApproverInfo, error) {
 
 // HasApprover reports whether a code-protected action can be authorized.
 func (m *Manager) HasApprover() bool {
+	return m.requireApprover() == nil
+}
+
+func (m *Manager) requireApprover() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.approvers.list) > 0
+	return m.requireApproverLocked()
+}
+
+func (m *Manager) requireApproverLocked() error {
+	switch {
+	case m.approvers.err != nil:
+		return ErrApproversUnavailable
+	case len(m.approvers.list) == 0:
+		return ErrApproverRequired
+	}
+	return nil
 }
 
 // RequestCode sends a code for action to an approver, the oldest one when
@@ -368,13 +396,16 @@ func (m *Manager) RequestCode(session, action string, p Params, approverID strin
 	}
 	defer m.mu.Unlock()
 
-	if len(m.approvers.list) == 0 {
-		return CodeInfo{}, ErrApproverRequired
+	if err := m.requireApproverLocked(); err != nil {
+		return CodeInfo{}, err
 	}
 	switch action {
 	case ActionApproverRemove:
 		if _, ok := m.approvers.find(p["approver_id"]); !ok {
 			return CodeInfo{}, ErrApproverNotFound
+		}
+		if len(m.approvers.list) == 1 {
+			return CodeInfo{}, ErrApproverLast
 		}
 	case ActionApproverEnroll:
 		if len(m.approvers.list) >= MaxApprovers {
@@ -388,7 +419,7 @@ func (m *Manager) RequestCode(session, action string, p Params, approverID strin
 			return CodeInfo{}, ErrApproverNotFound
 		}
 	}
-	if err := m.codes.checkIssue(s.Hash, m.now()); err != nil {
+	if err := m.codes.checkIssue(s.Hash, m.now(), true); err != nil {
 		return CodeInfo{}, err
 	}
 	c, err := m.issueLocked(s.Hash, action, p, dest, nil)
@@ -413,7 +444,7 @@ func (m *Manager) VerifyCode(session string, ref CodeRef) (string, int, error) {
 	if !grantActions[c.action] {
 		return "", 0, &InvalidError{Msg: "this code is checked by the route of its action"}
 	}
-	if _, err := m.useCodeLocked(s, ref, c.action, nil, true); err != nil {
+	if _, err := m.useCodeLocked(s, ref, c.action, nil, useGrant); err != nil {
 		return "", 0, err
 	}
 	return c.action, int(GrantTTL / time.Second), nil
@@ -445,21 +476,26 @@ func (m *Manager) Enroll(session, token, deviceName string, ref CodeRef) (CodeIn
 	}
 	defer m.mu.Unlock()
 
+	if m.approvers.err != nil {
+		return CodeInfo{}, ErrApproversUnavailable
+	}
 	if len(m.approvers.list) >= MaxApprovers {
 		return CodeInfo{}, ErrApproverLimit
 	}
 	if m.approvers.hasToken(token) {
 		return CodeInfo{}, ErrApproverExists
 	}
+	approved := len(m.approvers.list) > 0
 	// Before the approval code is used: a refusal here must not burn it.
-	if err := m.codes.checkIssue(s.Hash, m.now()); err != nil {
+	// The approval code already paid the per-session interval.
+	if err := m.codes.checkIssue(s.Hash, m.now(), !approved || ref.ID == ""); err != nil {
 		return CodeInfo{}, err
 	}
-	if len(m.approvers.list) > 0 {
+	if approved {
 		if ref.ID == "" {
 			return CodeInfo{}, ErrCodeRequired
 		}
-		if _, err := m.useCodeLocked(s, ref, ActionApproverEnroll, nil, false); err != nil {
+		if _, err := m.useCodeLocked(s, ref, ActionApproverEnroll, nil, useConsume); err != nil {
 			return CodeInfo{}, err
 		}
 	}
@@ -476,10 +512,12 @@ func (m *Manager) Enroll(session, token, deviceName string, ref CodeRef) (CodeIn
 	if err != nil {
 		return CodeInfo{}, err
 	}
+	c.enrolApproved = approved
 	return CodeInfo{CodeID: c.id, ApproverID: id, ExpiresIn: int(CodeTTL / time.Second)}, nil
 }
 
-// Confirm stores the approver whose enrolment code ref is.
+// Confirm stores the approver whose enrolment code ref is, and raises the
+// approver_set alert so a phone enrolled behind the owner's back is seen.
 func (m *Manager) Confirm(session string, ref CodeRef) (ApproverInfo, error) {
 	s, err := m.lockSession(session)
 	if err != nil {
@@ -487,12 +525,20 @@ func (m *Manager) Confirm(session string, ref CodeRef) (ApproverInfo, error) {
 	}
 	defer m.mu.Unlock()
 
-	c, err := m.useCodeLocked(s, ref, actionApproverConfirm, nil, false)
+	if m.approvers.err != nil {
+		return ApproverInfo{}, ErrApproversUnavailable
+	}
+	c, err := m.useCodeLocked(s, ref, actionApproverConfirm, nil, useConsume)
 	if err != nil {
 		return ApproverInfo{}, err
 	}
 	if len(m.approvers.list) >= MaxApprovers {
 		return ApproverInfo{}, ErrApproverLimit
+	}
+	// Started while there was no approver, and another one was enrolled
+	// since: nobody approved this phone.
+	if !c.enrolApproved && len(m.approvers.list) > 0 {
+		return ApproverInfo{}, ErrCodeRequired
 	}
 	if m.approvers.hasToken(c.enrol.Token) {
 		return ApproverInfo{}, ErrApproverExists
@@ -503,7 +549,9 @@ func (m *Manager) Confirm(session string, ref CodeRef) (ApproverInfo, error) {
 	if err := m.approvers.save(list); err != nil {
 		return ApproverInfo{}, err
 	}
-	return a.Info(), nil
+	info := a.Info()
+	m.raiseAlertLocked(Alert{Type: EventApproverSet, DeviceName: info.DeviceName, TokenID: info.TokenID})
+	return info, nil
 }
 
 // RemoveApprover needs an approver_remove code bound to approverID.
@@ -514,13 +562,22 @@ func (m *Manager) RemoveApprover(session, approverID string, ref CodeRef) error 
 	}
 	defer m.mu.Unlock()
 
-	if _, ok := m.approvers.find(approverID); !ok {
+	if m.approvers.err != nil {
+		return ErrApproversUnavailable
+	}
+	removed, ok := m.approvers.find(approverID)
+	if !ok {
 		return ErrApproverNotFound
+	}
+	// With no approver left, any session could enrol its own phone without
+	// a code: replacing a phone is enrol first, then remove.
+	if len(m.approvers.list) == 1 {
+		return ErrApproverLast
 	}
 	if ref.ID == "" {
 		return ErrCodeRequired
 	}
-	if _, err := m.useCodeLocked(s, ref, ActionApproverRemove, Params{"approver_id": approverID}, false); err != nil {
+	if _, err := m.useCodeLocked(s, ref, ActionApproverRemove, Params{"approver_id": approverID}, useConsume); err != nil {
 		return err
 	}
 	var list []Approver
@@ -537,6 +594,8 @@ func (m *Manager) RemoveApprover(session, approverID string, ref CodeRef) error 
 			delete(m.codes.byID, id)
 		}
 	}
+	info := removed.Info()
+	m.raiseAlertLocked(Alert{Type: EventApproverRemoved, DeviceName: info.DeviceName, TokenID: info.TokenID})
 	return nil
 }
 
