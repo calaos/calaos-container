@@ -134,7 +134,11 @@ func TestAdminFlow(t *testing.T) {
 
 	// Change: every session dies, the new password is the only one.
 	other := c.verify(adminPw)
-	if r = c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`"}`, session(s), 200, ""); string(r.Data) != `{"mode":"change"}` {
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`"}`, session(s), 409, codeApproverRequired)
+	c.enrol(other, "tok-a")
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`"}`, session(s), 403, codeCodeRequired)
+	ref := c.code(s, "admin_password", `{"password":"`+adminPwNew+`"}`)
+	if r = c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`",`+ref.body()+`}`, session(s), 200, ""); string(r.Data) != `{"mode":"change"}` {
 		t.Fatalf("change %s", r.Data)
 	}
 	c.expect("GET", "/api/v2/admin/status", "", session(s), 401, codeBadSession)
@@ -251,6 +255,7 @@ func TestAdminSessionsSurviveDaemonRestart(t *testing.T) {
 	c := newAdminApp(t)
 	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
 	s := c.verify(adminPw)
+	c.enrol(c.verify(adminPw), "tok-a")
 
 	b, _ := os.ReadFile(filepath.Join(adminRuntimeDir, "sessions.json"))
 	if strings.Contains(string(b), s) {
@@ -263,7 +268,9 @@ func TestAdminSessionsSurviveDaemonRestart(t *testing.T) {
 	}
 	c2 := adminClient{t: t, a: restarted}
 	c2.expect("GET", "/api/v2/update/status", "", session(s), 200, "")
-	c2.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`"}`, session(s), 200, "")
+	// Approvers persist; the code is requested from the new daemon.
+	ref := c2.code(s, "admin_password", `{"password":"`+adminPwNew+`"}`)
+	c2.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`",`+ref.body()+`}`, session(s), 200, "")
 	c.expect("GET", "/api/v2/admin/status", "", session(s), 401, codeBadSession)
 }
 

@@ -1,5 +1,6 @@
-// Package admin keeps the admin password, the admin sessions, the persisted
-// admin alerts and the audit log (docs/API.md, admin routes).
+// Package admin keeps the admin password, the admin sessions, the approvers,
+// the push codes, the persisted admin alerts and the audit log (docs/API.md,
+// admin routes).
 package admin
 
 import (
@@ -78,11 +79,13 @@ type Manager struct {
 	audit   auditLog
 	refused refusedThrottle
 
-	// mu serializes every change of the hash file, the sessions and the
-	// alerts. argon2id never runs under it.
+	// mu serializes every change of the hash file, the sessions, the
+	// approvers, the codes and the alerts. argon2id never runs under it.
 	mu        sync.Mutex
 	sessions  sessionStore
 	alerts    alertStore
+	approvers approverStore
+	codes     codeStore
 	hashCache hashCache
 }
 
@@ -120,14 +123,16 @@ func New(o Options) *Manager {
 	}
 
 	m := &Manager{
-		hashPath: filepath.Join(o.DataDir, hashFileName),
-		params:   o.Hash,
-		publish:  o.Publish,
-		now:      o.Now,
-		limiter:  newLimiter(),
-		audit:    auditLog{path: filepath.Join(o.DataDir, auditFileName)},
-		sessions: sessionStore{path: filepath.Join(o.RuntimeDir, sessionFileName)},
-		alerts:   alertStore{path: filepath.Join(o.DataDir, alertsFileName)},
+		hashPath:  filepath.Join(o.DataDir, hashFileName),
+		params:    o.Hash,
+		publish:   o.Publish,
+		now:       o.Now,
+		limiter:   newLimiter(),
+		audit:     auditLog{path: filepath.Join(o.DataDir, auditFileName)},
+		sessions:  sessionStore{path: filepath.Join(o.RuntimeDir, sessionFileName)},
+		alerts:    alertStore{path: filepath.Join(o.DataDir, alertsFileName)},
+		approvers: approverStore{path: filepath.Join(o.DataDir, approversFileName)},
+		codes:     newCodeStore(),
 	}
 
 	for _, d := range []string{o.DataDir, o.RuntimeDir} {
@@ -154,6 +159,13 @@ func New(o Options) *Manager {
 		m.alerts.list = nil
 		if rerr := os.Rename(m.alerts.path, m.alerts.path+".corrupt"); rerr != nil {
 			logging.Errorf("moving the admin alerts aside: %v", rerr)
+		}
+	}
+	if err := m.approvers.load(); err != nil {
+		logging.Errorf("reading the approvers, moved to %s.corrupt: %v", m.approvers.path, err)
+		m.approvers.list = nil
+		if rerr := os.Rename(m.approvers.path, m.approvers.path+".corrupt"); rerr != nil {
+			logging.Errorf("moving the approvers aside: %v", rerr)
 		}
 	}
 	return m
@@ -293,9 +305,10 @@ func (m *Manager) Verify(password string) (session string, expiresIn int, err er
 	return tok, int(SessionTTL / time.Second), nil
 }
 
-// Set runs admin/set. session is only used in ModeChange. The checks follow
-// docs/API.md: session, state, length, then the limiter.
-func (m *Manager) Set(mode Mode, password, session string) error {
+// Set runs admin/set. session and code are only used in ModeChange. The
+// checks follow docs/API.md: session, state, length, approver, the limiter,
+// then the code.
+func (m *Manager) Set(mode Mode, password, session string, code CodeRef) error {
 	if m.initErr != nil {
 		return m.initErr
 	}
@@ -305,11 +318,31 @@ func (m *Manager) Set(mode Mode, password, session string) error {
 	if err := checkLength(password); err != nil {
 		return err
 	}
+	if mode == ModeChange {
+		if !m.HasApprover() {
+			return ErrApproverRequired
+		}
+		if code.ID == "" {
+			return ErrCodeRequired
+		}
+	}
 
 	if !m.limiter.tryAcquire() {
 		return &RateLimitedError{RetryAfter: 1}
 	}
 	defer m.limiter.release()
+
+	if mode == ModeChange {
+		s, err := m.lockSession(session)
+		if err != nil {
+			return err
+		}
+		_, err = m.useCodeLocked(s, code, ActionAdminPassword, Params{"password": password}, false)
+		m.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 
 	enc, err := hashPassword(m.params, password)
 	if err != nil {
@@ -371,14 +404,18 @@ func (m *Manager) checkSetState(mode Mode, session string) error {
 	return nil
 }
 
-// Reset removes the password and every session. wasSet is false when there
-// was nothing to reset, and then no alert is raised.
+// Reset removes the password, the approvers and every session. wasSet is
+// false when there was no password, and then no alert is raised.
 func (m *Manager) Reset() (wasSet bool, err error) {
 	if m.initErr != nil {
 		return false, m.initErr
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if err := m.approvers.wipe(); err != nil {
+		return false, err
+	}
 
 	if _, err := os.Lstat(m.hashPath); err == nil {
 		wasSet = true
@@ -410,11 +447,8 @@ func (m *Manager) PushCodeFailed(session string) (bool, error) {
 	if s == nil {
 		return true, nil
 	}
-	s.PushFailures++
-	if s.PushFailures >= MaxPushCodeFailures {
-		return true, m.sessions.remove(s)
-	}
-	return false, m.sessions.save()
+	left, err := m.pushCodeFailedLocked(s)
+	return left == 0, err
 }
 
 // Ack drops the acknowledged alerts and returns how many were removed.
@@ -450,6 +484,7 @@ func (m *Manager) Audit(e AuditEntry) {
 }
 
 func (m *Manager) invalidateSessionsLocked() {
+	m.codes.clear()
 	if err := m.sessions.invalidateAll(); err != nil {
 		logging.Errorf("invalidating the admin sessions: %v", err)
 	}
