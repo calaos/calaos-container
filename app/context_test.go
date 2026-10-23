@@ -246,7 +246,7 @@ func TestIsLegacyEventsPath(t *testing.T) {
 
 // testRoutePath turns a registered route into a concrete request path.
 func testRoutePath(p string) string {
-	return strings.ReplaceAll(p, ":intf", "eth0")
+	return strings.NewReplacer(":intf", "eth0", ":code_id", "0123456789abcdef").Replace(p)
 }
 
 // TestAuthQueryTokenOnlyOnLegacyEvents walks every registered route, so a
@@ -276,8 +276,9 @@ func TestAuthQueryTokenOnlyOnLegacyEvents(t *testing.T) {
 		}
 
 		// Control: the same route with the header gets past the middleware.
+		// Session-only routes then ask for the session they lack.
 		resp, body = doCase(t, a, httpCase{method: r.Method, path: testRoutePath(r.Path)})
-		if resp.StatusCode == fiber.StatusUnauthorized {
+		if resp.StatusCode == fiber.StatusUnauthorized && !strings.Contains(string(body), `"code":"bad_session"`) {
 			t.Errorf("%s %s with the header: got 401 %s", r.Method, r.Path, body)
 		}
 	}

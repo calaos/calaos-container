@@ -9,21 +9,28 @@ import (
 
 const maxAlerts = 32
 
-// Alert is an admin_set or admin_reset notification kept until calaos_server
-// acknowledges it. It carries no secret.
+// Alert is an admin notification kept until calaos_server acknowledges it.
+// It carries no secret: the approver alerts name the phone by device name
+// and token_id, never by token.
 type Alert struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	TS   string `json:"ts"`
+	Type       string `json:"type"`
+	ID         string `json:"id"`
+	TS         string `json:"ts"`
+	DeviceName string `json:"device_name,omitempty"`
+	TokenID    string `json:"token_id,omitempty"`
 }
 
 // AlertData is the data of the event published for an alert.
 type AlertData struct {
-	ID string `json:"id"`
-	TS string `json:"ts"`
+	ID         string `json:"id"`
+	TS         string `json:"ts"`
+	DeviceName string `json:"device_name,omitempty"`
+	TokenID    string `json:"token_id,omitempty"`
 }
 
-func (a Alert) Data() AlertData { return AlertData{ID: a.ID, TS: a.TS} }
+func (a Alert) Data() AlertData {
+	return AlertData{ID: a.ID, TS: a.TS, DeviceName: a.DeviceName, TokenID: a.TokenID}
+}
 
 type alertFile struct {
 	Alerts []Alert `json:"alerts"`
@@ -61,12 +68,13 @@ func (as *alertStore) save() error {
 
 // raise records the alert before it is published: an alert raised while
 // calaos_server is away must still be replayed when it reconnects.
-func (as *alertStore) raise(typ string, now time.Time) (Alert, error) {
+func (as *alertStore) raise(al Alert, now time.Time) (Alert, error) {
 	raw := make([]byte, 8)
 	if _, err := rand.Read(raw); err != nil {
 		return Alert{}, err
 	}
-	al := Alert{Type: typ, ID: hex.EncodeToString(raw), TS: now.UTC().Format(time.RFC3339)}
+	al.ID = hex.EncodeToString(raw)
+	al.TS = now.UTC().Format(time.RFC3339)
 	as.list = append(as.list, al)
 	if len(as.list) > maxAlerts {
 		as.list = as.list[len(as.list)-maxAlerts:]

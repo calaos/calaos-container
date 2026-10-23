@@ -34,6 +34,16 @@ func (a *AppServer) sessionAllowed(c *fiber.Ctx) error {
 	return c.Next()
 }
 
+// sessionRequired guards the routes a push code is bound to: the bearer alone
+// has no session to bind it to.
+func (a *AppServer) sessionRequired(c *fiber.Ctx) error {
+	s, present := adminSession(c)
+	if !present || !a.sessions.Valid(s) {
+		return errBadSession()
+	}
+	return c.Next()
+}
+
 // bearerOnly refuses any session-bearing request without looking the session
 // up: calaos_server never relays these routes.
 func bearerOnly(c *fiber.Ctx) error {

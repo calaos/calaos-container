@@ -137,6 +137,15 @@ func (st *sessionStore) find(now time.Time, tok string) *session {
 	return nil
 }
 
+func (st *sessionStore) liveHash(now time.Time, h string) bool {
+	for _, s := range st.list {
+		if s.Hash == h && now.Before(s.Expires) {
+			return true
+		}
+	}
+	return false
+}
+
 func (st *sessionStore) prune(now time.Time) {
 	kept := st.list[:0:0]
 	for _, s := range st.list {

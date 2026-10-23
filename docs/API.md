@@ -84,7 +84,7 @@ ignored.
 | `code` | HTTP | Meaning | `data` |
 |---|---|---|---|
 | `bad_bearer` | 401 | `Authorization` missing or wrong, or no token provisioned on the box | none |
-| `bad_session` | 401 | `X-Calaos-Admin-Session` present but empty, unknown, expired or invalidated | none |
+| `bad_session` | 401 | `X-Calaos-Admin-Session` present but empty, unknown, expired or invalidated, or absent on a session-only route | none |
 | `bad_password` | 403 | wrong admin password on `admin/verify` | none |
 | `not_allowed` | 403 | a session-bearing request on a bearer-only route (see Sessions) | none |
 | `password_too_short` | 400 | admin password under 10 characters | `{"min_length": 10}` |
@@ -97,7 +97,15 @@ ignored.
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
 | `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
-| `rate_limited` | 429 | admin password limiter (see Rate limiting) | `{"retry_after": <seconds>}` |
+| `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes) | `{"retry_after": <seconds>}` |
+| `approver_required` | 409 | the action needs a push code and no approver is enrolled | none |
+| `approver_limit` | 409 | enrolment while 2 approvers exist | `{"max": 2}` |
+| `approver_exists` | 409 | enrolment of a token that is already an approver | none |
+| `approver_not_found` | 404 | unknown `approver_id` | none |
+| `approver_last` | 409 | removal of the only approver | none |
+| `code_required` | 403 | a code-protected action sent without `code_id` and `code` | none |
+| `bad_code` | 403 | wrong push code, or a code requested for another action or other parameters | `{"attempts_left": <int>}` |
+| `code_expired` | 410 | the push code is unknown to this session, expired, used, replaced or dropped | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -146,10 +154,18 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/admin/reset` | bearer only | 200 | `{"was_set": <bool>}` |
 | POST | `/api/v2/admin/alerts/ack` | bearer only | 200 | `{"acked": <int>}`; body `{"ids": ["..."]}` |
 | GET (WS) | `/api/v2/events` | bearer header only | 101 | event stream, see Events |
-| GET | `/api/v2/admin/push/{code_id}` | bearer only | 200 | phase 2: `{"token": "<push token>", "message": "<text>"}`, single use (a second call gives `404 not_found`) |
+| GET | `/api/v2/admin/approvers` | session only | 200 | array of `<Approver>` |
+| POST | `/api/v2/admin/approvers/enroll` | session only | 200 | `{"approver_id", "code_id", "expires_in"}`; body `{"token", "device_name", "code_id", "code"}` |
+| POST | `/api/v2/admin/approvers/confirm` | session only | 200 | `<Approver>`; body `{"code_id", "code"}` |
+| POST | `/api/v2/admin/approvers/remove` | session only | 200 | `{"approver_id"}`; body `{"approver_id", "code_id", "code"}` |
+| POST | `/api/v2/admin/codes` | session only | 200 | `{"code_id", "approver_id", "expires_in"}`; body `{"action", "params", "approver_id"}` |
+| POST | `/api/v2/admin/codes/verify` | session only | 200 | `{"action", "expires_in"}`; body `{"code_id", "code"}` |
+| GET | `/api/v2/admin/push/{code_id}` | bearer only | 200 | `{"token": "<push token>", "message": "<text>"}`, single use |
 
 "Bearer only" routes refuse a request that carries `X-Calaos-Admin-Session` (`403 not_allowed`):
-the session path (calaos_server) never reaches them.
+the session path (calaos_server) never reaches them. "Session only" routes need a valid
+`X-Calaos-Admin-Session`; without it they answer `401 bad_session`, since a push code is bound to a
+session and the bearer alone has none.
 
 `<Status>` is the upgrade progress object of the legacy `GET /api/update/status`, unchanged
 (`status`, `total_percent`, `current_pkg`, `current_step`, `current_percent`, `pkg_index`,
@@ -183,8 +199,8 @@ keeps none: it relays the session the browser holds, in `X-Calaos-Admin-Session`
   time and the remaining time is capped at 900 s, so a clock step backwards never lengthens a
   session.
 - **Invalidation:** every `admin/set` (all three modes) and every `admin/reset` invalidate all
-  sessions. In phase 2, 5 failed push codes in a session invalidate that session. An invalidated
-  session answers `401 bad_session` at its next use.
+  sessions. 5 wrong push codes in a session invalidate that session (see Push codes). An
+  invalidated session answers `401 bad_session` at its next use, and its push codes die with it.
 - **Storage:** in `/run/calaos-container/` (0700, created by the daemon, mounted in no
   container). Sessions survive a daemon restart, including the restart after the daemon upgrades
   itself, and die at reboot. The daemon stores a SHA-256 of each session, never the session.
@@ -195,6 +211,9 @@ keeps none: it relays the session the browser holds, in `X-Calaos-Admin-Session`
     without looking the session up;
   - elsewhere, empty, unknown, expired or invalidated: `401 bad_session`;
   - otherwise the route runs.
+
+  On a session-only route (`admin/approvers*`, `admin/codes*`) an absent header is also
+  `401 bad_session`.
 
   A header present with an empty value counts as present. calaos_server never sends an empty
   header.
@@ -234,14 +253,18 @@ The mode follows from the request, in this order:
    sends it (password read on stdin); calaos_server never sends `recovery`. Whoever holds the
    bearer can use it: an accepted limit, the bearer already gives root.
 2. **Change**: `X-Calaos-Admin-Session` present. The session must be valid (`401 bad_session`
-   otherwise). Replaces the password. In phase 2 the body also carries the push code
-   (`code_id`, `code`).
+   otherwise). Replaces the password. The body also carries a push code for the action
+   `admin_password`, bound to `{"password": "<new password>"}`: `"code_id"` and `"code"` (see
+   Push codes). Without an approver the answer is `409 approver_required`, without the two fields
+   `403 code_required`.
 3. **Bootstrap**: no session, no `recovery`. Allowed only while no password exists: the hash is
    created with `O_EXCL`, so of two concurrent bootstraps exactly one wins and the other gets
    `409 admin_already_set`.
 
 Checks run in this order: body (`invalid_request`), session (`bad_session`, `not_allowed`), state
-(`admin_already_set`, `admin_not_set`), length (`password_too_short`).
+(`admin_already_set`, `admin_not_set`), length (`password_too_short`), then in change mode the
+approver (`approver_required`, `code_required`), the argon2id slot (`rate_limited`) and the code
+(`bad_code`, `code_expired`). A refused slot leaves the code unused.
 
 `rate_limited` is also possible in every mode (see Rate limiting).
 
@@ -262,6 +285,144 @@ Body `{"ids": ["<alert id>", ...]}`. Marks the alerts as delivered; they are nev
 again. Unknown ids are ignored. Answer `{"acked": <number of alerts removed>}`. calaos_server
 calls it after it has recorded the alert (push sent, `EventPushNotification` stored).
 
+### Approvers
+
+An approver is a phone that receives push codes: a push token registered with calaos_server
+(`register_push`) and a device name. There is no device secret: the approver *is* the token,
+proven by a code sent to it at enrolment. A phone whose token changes (reinstall, restore, purge)
+enrols again.
+
+- Stored in `/mnt/calaos/admin/approvers.json` (0600): id (16 hex characters), token, device
+  name, enrolment time. At most 2: one is enough, the second is a spare for a dead token.
+- The token never leaves the daemon but through `GET admin/push/{code_id}`, to calaos_server.
+- `admin/reset` removes every approver; recovery `admin/set` keeps them. A rollback restores the
+  approvers of its time, with the password.
+- Without an approver, the code-protected actions answer `409 approver_required`. Enrol one: the
+  first needs no code. The password can also be changed over SSH with `calaos-os admin set`, which
+  keeps the approvers.
+- The last approver cannot be removed (`409 approver_last`): with none left, any admin session
+  could enrol its own phone without a code. Replacing a phone is enrolling the new one (with a
+  code from the old one), then removing the old one. A lost phone with no spare is recovered over
+  SSH: `calaos-os admin reset`, then `admin set` and a new enrolment.
+- An `approvers.json` that exists but cannot be read or holds an invalid entry is a lost second
+  factor, not an absent one: the file stays in place, and the approver routes and the change
+  `admin/set` answer `500 internal` until `calaos-os admin reset` removes it.
+- Every enrolment and every removal raises a persisted alert, `approver_set` or
+  `approver_removed`, naming the phone by `device_name` and `token_id`, never by token (see
+  Alerts). calaos_server pushes it to every token and shows it at the next login, like
+  `admin_set`: a phone enrolled first by whoever holds the admin password is seen.
+
+`<Approver>`:
+
+```json
+{"id": "5d0c8e1f2a3b4c6d", "device_name": "Pixel 8", "token_id": "9a41f0c2d3e4b5a6", "created_at": "2026-10-23T09:12:03Z"}
+```
+
+`token_id` is the first 16 hex characters of the SHA-256 of the token: calaos_server matches it
+against its `push_tokens` to show which phone is an approver.
+
+### Push codes
+
+A push code is the second factor of the actions below. The daemon makes it, calaos_server pushes
+it to an approver, the user types it back in the webapp.
+
+| `action` | Consumed by | Bound to `params` |
+|---|---|---|
+| `console_open` | `admin/codes/verify`, then the console ticket (CO1) | `{}` |
+| `admin_password` | `POST admin/set`, change mode | `{"password": "<new password>"}` |
+| `approver_enroll` | `POST admin/approvers/enroll` while an approver exists | `{}` |
+| `approver_remove` | `POST admin/approvers/remove` | `{"approver_id": "<id>"}` |
+| `network_config` | reserved for the network routes (phase 3); refused today with `invalid_request` | |
+
+Updates, reboot, restart and every other admin action need the admin password only.
+`approver_enroll` is bound to `{}`: the client never sees the new token (calaos_server adds it),
+and the new phone proves itself with its own code.
+
+**Enrolment and calaos_server.** Clients never send or receive a push token. calaos_server
+offers `approver_candidates`, its `push_tokens` entries as `{token_id, device_name, approver}`
+(`token_id` computed as in `<Approver>`, `approver` true when `GET admin/approvers` lists that
+`token_id`). The client picks one by `token_id`; calaos_server resolves it to the token and the
+`device_name` stored with it, and sends both to `POST admin/approvers/enroll`.
+
+**Rules**
+
+- 6 decimal digits from the CSPRNG, valid 60 s, single use, kept in memory only (a daemon restart
+  drops them). `code_id` (16 hex characters) names a code; it is not a secret.
+- A code is bound to the session that requested it, its action and its `params`: the daemon keeps
+  an HMAC-SHA-256 of the canonical JSON of `params` under a key drawn for that code. The route that
+  consumes it rebuilds `params` from its own body. `params` holds strings only, with exactly the
+  keys of the table.
+- One pending code per session: a new one (request or enrolment) replaces the previous one. A
+  verified grant (`admin/codes/verify`) is not pending and stays.
+- At least 10 s between two codes of a session, and at most 10 codes per rolling hour for the whole
+  daemon, enrolment codes included. Beyond: `429 rate_limited`, checked before any code is used.
+  An enrolment that carries an approval code is only held by the hourly budget: the approval code
+  already paid the interval. The interval and the budget are in memory too: a daemon restart
+  resets them.
+- The code is compared in constant time. A wrong code, or a code sent to another action or with
+  other `params`, answers `403 bad_code` with `attempts_left`. 5 wrong codes in a session (every
+  code counts, the count is kept with the session) invalidate the session: the 5th answer is
+  `bad_code` with `attempts_left: 0`, the next call gets `401 bad_session`, the session's codes are
+  dropped, and the admin password is needed again.
+- `admin/set` checks its code (a wrong one counts) before hashing, and uses it up only with the
+  write of the new hash: a failure in between leaves it usable.
+- `410 code_expired`: the `code_id` is unknown to this session, expired, used, replaced or
+  dropped. Not counted as a failure.
+- `invalid_request` for a `code` that is not 6 ASCII digits or a `code_id` that is not 16 hex
+  characters. Not counted.
+
+**Delivery**
+
+1. The daemon publishes `push_code {"approver_id", "code_id"}` on the event bus (see Events). It
+   carries neither the token nor the code.
+2. calaos_server calls `GET /api/v2/admin/push/{code_id}` (bearer only) and gets
+   `{"token": "<push token>", "message": "<text>"}`. The message is a short English sentence with
+   the code and what it allows. One fetch per code: a second one, an unknown or an expired code
+   answers `404 not_found`.
+3. calaos_server pushes the message to that one token and never forwards `push_code` to a client.
+
+Events are best effort: a user who receives nothing requests a new code after 10 s.
+
+### Approver and code routes
+
+All but `admin/push/*` are session only.
+
+`GET admin/approvers` lists the approvers, oldest first.
+
+`POST admin/codes`, body `{"action": "<action>", "params": {...}, "approver_id": "<id>"}`.
+`params` defaults to `{}`, `approver_id` to the oldest approver. Answer
+`{"code_id": "...", "approver_id": "...", "expires_in": 60}`. Errors: `invalid_request` (unknown
+or reserved action, wrong `params`), `password_too_short` (`admin_password`), `approver_required`,
+`approver_not_found`, `approver_limit` (`approver_enroll` while 2 exist), `approver_last`
+(`approver_remove` of the only approver), `rate_limited`, `internal` (unreadable approvers).
+
+`POST admin/codes/verify`, body `{"code_id", "code"}`, for the actions consumed outside a REST
+body: today `console_open`. Any other action answers `invalid_request` and leaves the code alone.
+On success the code becomes a grant, usable once within 30 s by the same session for that action,
+and the answer is `{"action": "console_open", "expires_in": 30}`. Errors: `invalid_request`,
+`bad_code`, `code_expired`.
+
+`POST admin/approvers/enroll`, body `{"token": "<push token>", "device_name": "<name>",
+"code_id": "...", "code": "..."}`. The token is 1 to 4096 printable ASCII characters without
+space; the device name is UTF-8, 1 to 64 characters, no control character. `code_id` and `code`
+are an `approver_enroll` code from an existing approver, needed only when one exists. The daemon
+sends an enrolment code to the new token and answers
+`{"approver_id": "<new id>", "code_id": "...", "expires_in": 60}`; the `push_code` carries the new
+id. Checks: body, session, `internal` (unreadable approvers), `approver_limit`,
+`approver_exists`, `rate_limited`, then the code (`code_required`, `bad_code`, `code_expired`).
+
+`POST admin/approvers/confirm`, body `{"code_id", "code"}` with the enrolment code. Stores the
+approver, raises `approver_set` and answers its `<Approver>`. Errors: `invalid_request`,
+`bad_code`, `code_expired`; `approver_limit` and `approver_exists` if another enrolment ended
+first; `code_required` if the enrolment started without an approver and one was enrolled since
+(nobody approved it: start again with an `approver_enroll` code).
+
+`POST admin/approvers/remove`, body `{"approver_id", "code_id", "code"}` with an
+`approver_remove` code bound to that id, from any approver, the removed one included. Pending
+codes sent to the removed phone die, and `approver_removed` is raised. Answer
+`{"approver_id": "..."}`. Errors: `invalid_request`, `approver_not_found`, `approver_last` (checked
+before the code, which stays usable), `code_required`, `bad_code`, `code_expired`.
+
 ### Rate limiting
 
 - One argon2id operation at a time (`verify` or `set`). A second one is refused at once with
@@ -275,7 +436,8 @@ calls it after it has recorded the alert (push sent, `EventPushNotification` sto
 
 ### Alerts
 
-`admin_set` and `admin_reset` are persisted in `/mnt/calaos/admin/` when they happen, then
+`admin_set`, `admin_reset`, `approver_set` and `approver_removed` are persisted in
+`/mnt/calaos/admin/` when they happen, then
 published on the event bus and replayed to every new `/events` subscriber until acknowledged. A
 connected subscriber that missed one (full buffer) gets it again at the next ping (30 s).
 An alert raised while calaos_server is stopped is delivered when it reconnects.
@@ -290,6 +452,10 @@ Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session`
 refused with `bad_bearer` or `bad_session` (below), writes one line to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
 (`X-Calaos-Client-IP`, `local` or `invalid`), result (`ok` or the error `code`), session audit id,
 then method and path (quoted, cut at 128 bytes). Never a password, a session or the bearer.
+
+The approver and code routes add, when known, `action=`, `approver=` (id), `code_id=` and, on
+`bad_code`, `attempts_left=`, before the method. Never the code, the token, the device name or
+`params`.
 
 A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
 second: anything on the host can send the first, calaos_server relays a household client's guessed
@@ -410,7 +576,9 @@ On connect the daemon sends, in order: one `upgrade_progress` with the current `
 | `upgrade_job` | `<Job>` | On job creation and on the terminal state |
 | `admin_set` | `{"id": "<16 hex>", "ts": "<RFC 3339>"}` | Alert, replayed until acknowledged |
 | `admin_reset` | `{"id": "<16 hex>", "ts": "<RFC 3339>"}` | Alert, replayed until acknowledged |
-| `push_code` | `{"approver_id": "...", "code_id": "..."}` | Phase 2. Carries neither token nor code; calaos_server fetches the message with `GET /api/v2/admin/push/{code_id}` |
+| `approver_set` | `{"id", "ts", "device_name", "token_id"}` | Alert, replayed until acknowledged: an approver was enrolled. Never the token |
+| `approver_removed` | `{"id", "ts", "device_name", "token_id"}` | Alert, replayed until acknowledged: an approver was removed. Never the token |
+| `push_code` | `{"approver_id": "...", "code_id": "..."}` | Carries neither token nor code; calaos_server fetches the message with `GET /api/v2/admin/push/{code_id}`. Not replayed |
 
 - Clients ignore types they do not know.
 - Delivery is best effort: a subscriber that falls behind loses events. Clients resynchronise
@@ -428,7 +596,7 @@ validated `package`.
 |---|---|---|
 | `admin_unlock {admin_pass}` | `POST /api/v2/admin/verify {"password"}` | no |
 | `admin_set {new_pass}` | `POST /api/v2/admin/set {"password"}` (bootstrap) | no |
-| `admin_set {new_pass, admin_session}` | `POST /api/v2/admin/set {"password"}` (change) | yes |
+| `admin_set {new_pass, admin_session, code_id, code}` | `POST /api/v2/admin/set {"password", "code_id", "code"}` (change) | yes |
 | `admin {action: update_status}` | `GET /api/v2/update/status` | no (household, under `secureTransport()`) |
 | `admin {action: update_check}` | `GET /api/v2/update/check` | yes |
 | `admin {action: update_available}` | `GET /api/v2/update/available` | yes |
@@ -438,11 +606,17 @@ validated `package`.
 | `admin {action: system_restart}` | `POST /api/v2/system/restart` | yes |
 | `admin {action: system_info}` | `GET /api/v2/system/info` | yes |
 | `admin {action: mcp_regenerate}` | none: handled by calaos_server (see below) | yes |
-| phase 2: `approver_list`, `approver_enroll`, `approver_confirm`, `console_open` | routes named in this file when they land | yes |
+| `admin {action: approver_list}` | `GET /api/v2/admin/approvers` | yes |
+| `admin {action: approver_candidates}` | none: served by calaos_server from `push_tokens` and `GET /api/v2/admin/approvers`, `[{"token_id", "device_name", "approver"}]` | yes |
+| `admin {action: approver_enroll, params: {token_id, code_id, code}}` | `POST /api/v2/admin/approvers/enroll {"token", "device_name", "code_id", "code"}`; calaos_server resolves `token_id` against its `push_tokens` and sends that entry's token and stored device name. An unknown `token_id` is `invalid_request`; the client never sends a token or a device name | yes |
+| `admin {action: approver_confirm, params: {code_id, code}}` | `POST /api/v2/admin/approvers/confirm {"code_id", "code"}` | yes |
+| `admin {action: approver_remove, params: {approver_id, code_id, code}}` | `POST /api/v2/admin/approvers/remove {"approver_id", "code_id", "code"}` | yes |
+| `admin {action: code_request, params: {code_action, code_params, approver_id}}` | `POST /api/v2/admin/codes {"action", "params", "approver_id"}`; `params` rebuilt per action from the Push codes table | yes |
+| `admin {action: code_verify, params: {code_id, code}}` | `POST /api/v2/admin/codes/verify {"code_id", "code"}` | yes |
+| `admin {action: console_open}` | console ticket, named by CO1 | yes |
 
 calaos_server's own calls, outside the table: `GET /api/v2/admin/status`,
-`POST /api/v2/admin/alerts/ack`, `GET /api/v2/events`, and in phase 2
-`GET /api/v2/admin/push/{code_id}`.
+`POST /api/v2/admin/alerts/ack`, `GET /api/v2/events` and `GET /api/v2/admin/push/{code_id}`.
 
 Actions calaos_server serves itself while admin is set (`config get/put`, `get_mcp_info`,
 `mcp_regenerate`) validate the session with `GET /api/v2/admin/status` carrying
@@ -467,11 +641,13 @@ the fields above and drops anything else the client sent.
 calaos_server forwards to household clients, as `admin_event {type, ts, data}`, only:
 
 - `upgrade_progress`, `data` = `<Status>`;
-- `admin_set` and `admin_reset`, with `ts` only (`id` stripped, no `data`).
+- `admin_set`, `admin_reset`, `approver_set` and `approver_removed`, with `ts` only (`id` stripped,
+  no `data`). For the approver alerts calaos_server also pushes "approver phone <device_name>
+  enrolled" (or removed) to every token and stores the `EventPushNotification` shown at login.
 
 `upgrade_job` is not forwarded: a client that resumes, or sees `upgrade_progress` reach `done` or
-`error`, reads the job through `update_status`. `push_code` is consumed by calaos_server
-(phase 2). Every other type is dropped.
+`error`, reads the job through `update_status`. `push_code` is consumed by calaos_server,
+never forwarded. Every other type is dropped.
 
 ### Error translation
 
@@ -480,11 +656,12 @@ calaos_server forwards to household clients, as `admin_event {type, ts, data}`, 
 | connection refused, timeout, invalid answer | `daemon_unreachable` or `admin_unavailable`, per `AdminState` |
 | `401` without `code: bad_session`, after re-reading the token and one retry | `daemon_unreachable` |
 | `404` on `GET /api/v2/admin/status` (any body), or any `/api/v2/` `404` whose body is not an envelope with a `code` | `daemon_too_old` |
-| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed` | same code |
+| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired` | same code |
 | `invalid_request`, `package_not_found`, `package_held` | same code, with the daemon `msg` (safe to display) |
 | `internal`, `not_found`, `method_not_allowed`, any unknown code | `internal` |
 
-`rate_limited` copies `retry_after`; `upgrade_in_progress` copies `job_id`. The calaos_server
+`rate_limited` copies `retry_after`; `upgrade_in_progress` copies `job_id`; `bad_code` copies
+`attempts_left`; `approver_limit` copies `max`. The calaos_server
 vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_not_found`,
 `package_held` and `internal`, and cites this file's `package` rule rather than the bare regex.
 
@@ -560,7 +737,8 @@ The contract above is complete; the daemon implements it in steps.
 | 32-byte token, `?token=` refused on every legacy route but `/api/events` | ADM-CC2 |
 | `admin/*` routes, sessions, `X-Calaos-Admin-Session`, rate limiting, alerts, audit, `calaos-os admin set|reset` | ADM-CC1 |
 | `202` upgrade jobs, `upgrade_job`, `job` in `update/status` and in `409` answers, interrupted jobs | ADM-CC3 |
-| `push_code`, `admin/push/{code_id}`, approver and console routes | phase 2 (AP1a, CO1) |
+| approvers, push codes, `push_code`, `approver_set` and `approver_removed` alerts, `admin/push/{code_id}`, code required on change `admin/set` | AP1a, released together with AP1b and WA3: `admin/p7` merges to main only then, since against an older calaos_server the change-mode `admin/set` fails (`internal`) |
+| console routes | CO1 |
 
 A daemon that serves `/api/v2/` but predates ADM-CC3 answers `404 not_found` on the upgrade
 routes: the CLI then upgrades through the legacy routes, as it does against a daemon without

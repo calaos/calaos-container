@@ -98,6 +98,7 @@ func NewApp() (a *AppServer, err error) {
 		DataDir:    adminDataDir,
 		RuntimeDir: adminRuntimeDir,
 		Hash:       adminHashParams,
+		Now:        adminNow,
 		Publish:    func(evType string, data any) { publishAdmin(a.hub, evType, data) },
 	})
 	a.sessions = a.admin

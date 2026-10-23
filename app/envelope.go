@@ -31,6 +31,14 @@ const (
 	codeUpgradeRequired   = "upgrade_required"
 	codeRateLimited       = "rate_limited"
 	codeInternal          = "internal"
+	codeApproverRequired  = "approver_required"
+	codeApproverLimit     = "approver_limit"
+	codeApproverExists    = "approver_exists"
+	codeApproverNotFound  = "approver_not_found"
+	codeApproverLast      = "approver_last"
+	codeCodeRequired      = "code_required"
+	codeBadCode           = "bad_code"
+	codeCodeExpired       = "code_expired"
 )
 
 type okEnvelope struct {
