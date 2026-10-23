@@ -270,6 +270,38 @@ func TestV2UpgradePackageRequest(t *testing.T) {
 	f.waitJob(t, r.Data.ID)
 }
 
+func TestHeldPackage(t *testing.T) {
+	f := newJobFixture(t, stubBackend{}, "calaos-server")
+	f.apt.cache = append(f.apt.cache, &apt.Pkg{Name: "linux-image-amd64", VersionCurrent: "1", VersionNew: "2", Held: true})
+	if err := models.CheckUpdates(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := `{"calaos-server":{"name":"calaos-server","version":"2","current_version":"1"}}`
+	for _, path := range []string{"/api/update/check", "/api/update/available"} {
+		resp, b := doCase(t, f.a, httpCase{method: "GET", path: path})
+		if resp.StatusCode != http.StatusOK || string(b) != want {
+			t.Fatalf("%s: %d %s", path, resp.StatusCode, b)
+		}
+	}
+	resp, b := doCase(t, f.a, httpCase{method: "GET", path: "/api/v2/update/check"})
+	if resp.StatusCode != http.StatusOK || string(b) != `{"error":false,"msg":"ok","data":`+want+`}` {
+		t.Fatalf("v2 check: %d %s", resp.StatusCode, b)
+	}
+
+	code, body := f.post(t, "/api/v2/update/upgrade", `{"package":"linux-image-amd64"}`, nil)
+	if code != http.StatusConflict || body != `{"error":true,"code":"package_held","msg":"the package is held (apt-mark hold)"}` {
+		t.Fatalf("v2 upgrade: %d %s", code, body)
+	}
+	resp, b = doCase(t, f.a, httpCase{method: "POST", path: "/api/update/upgrade?package=linux-image-amd64"})
+	if resp.StatusCode != http.StatusInternalServerError || string(b) != `{"error":true,"msg":"package not found"}` {
+		t.Fatalf("legacy upgrade: %d %s", resp.StatusCode, b)
+	}
+	if f.status(t) != nil {
+		t.Fatal("a job was created for a held package")
+	}
+}
+
 func TestV2UpgradeSessions(t *testing.T) {
 	f := newJobFixture(t, stubBackend{}, "calaos-server")
 	f.a.sessions = acceptSessions{ok: "live"}

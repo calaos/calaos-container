@@ -459,10 +459,14 @@ func StartJob(kind, pkg string) (*JobRun, error) {
 		r.pendingReboot = true
 	}
 	if kind == JobKindUpgrade {
-		img, found := getNewVersion(pkg)
+		img, found, held := getNewVersion(pkg)
 		if !found {
 			upgrading.Store(false)
 			upgradeLock.Release(1)
+			if held {
+				logging.WithField("pkg", pkg).Errorln("Package held")
+				return nil, ErrPackageHeld
+			}
 			logging.WithField("pkg", pkg).Errorln("Package not found")
 			return nil, ErrPackageNotFound
 		}

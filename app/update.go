@@ -61,6 +61,10 @@ func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) error {
 // self-upgrade exit still waits for the answer (graceful server shutdown).
 func (a *AppServer) legacyUpgrade(c *fiber.Ctx, kind, pkg string) error {
 	run, err := startUpgradeJob(kind, pkg)
+	if errors.Is(err, models.ErrPackageHeld) {
+		// The legacy vocabulary is frozen, and its check omits held packages.
+		err = models.ErrPackageNotFound
+	}
 	if err != nil {
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
@@ -161,6 +165,8 @@ func startV2Job(c *fiber.Ctx, kind, pkg string) error {
 			return errUpgradeInProgress(err)
 		case errors.Is(err, models.ErrPackageNotFound):
 			return newAPIError(fiber.StatusNotFound, codePackageNotFound, "no pending update for this package")
+		case errors.Is(err, models.ErrPackageHeld):
+			return newAPIError(fiber.StatusConflict, codePackageHeld, "the package is held (apt-mark hold)")
 		}
 		return errInternal(err)
 	}

@@ -90,6 +90,7 @@ ignored.
 | `password_too_short` | 400 | admin password under 10 characters | `{"min_length": 10}` |
 | `invalid_request` | 400 | malformed JSON, missing or invalid field, invalid `package` or interface name | none |
 | `package_not_found` | 404 | the package has no pending update | none |
+| `package_held` | 409 | single-package upgrade of a package on hold (`apt-mark hold`) | none |
 | `not_found` | 404 | unknown `/api/v2/` route | none |
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
@@ -341,6 +342,12 @@ synchronous behaviour: they answer when apt ends.
   The legacy `POST /api/update/upgrade?package=` applies the same rule and answers its
   `"package not found"` body. A valid name without a
   pending update gives `404 package_not_found`, and no job.
+- A package on hold (`apt-mark hold`) is not an available update: `update/check` and
+  `update/available` omit it, on both the versioned and the legacy routes, and `upgrade-all`
+  keeps it back. `POST /api/v2/update/upgrade` on it answers `409 package_held`, and no job;
+  the legacy `upgrade?package=` answers its `"package not found"` body. A hold set after the
+  last check makes the job fail. An apt pin with a negative priority already hides the
+  version from apt itself.
 - The last job is persisted in `/var/log/calaos-container/last_job.json` (0600, in a 0700
   directory owned by the daemon; neither is used through a symlink). `/var/log` is its
   own btrfs subvolume: it survives daemon restarts and reboots, and no snapshot or rollback ever

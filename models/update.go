@@ -21,6 +21,9 @@ var (
 	ErrPackageNotFound   = errors.New("package not found")
 )
 
+// ErrPackageHeld refuses a single-package upgrade of a package on hold.
+var ErrPackageHeld = errors.New("package held")
+
 // upgrading is true while a job holds upgradeLock, from StartJob to Complete,
 // so RebootGuard can tell an upgrade from a version check.
 var upgrading atomic.Bool
@@ -137,22 +140,25 @@ func GetNewVersions() structs.ImageMap {
 	return m
 }
 
-// getNewVersion looks up a single package in the available versions.
-func getNewVersion(pkg string) (structs.Image, bool) {
+// getNewVersion looks up a single package in the available versions. held
+// reports a package left out of them because it is on hold.
+func getNewVersion(pkg string) (img structs.Image, found, held bool) {
 	newVersionsMu.RLock()
 	defer newVersionsMu.RUnlock()
 
-	img, ok := newVersions[pkg]
+	img, found = newVersions[pkg]
 
-	return img, ok
+	return img, found, heldPkgs[pkg]
 }
 
-// setNewVersions atomically replaces the shared available-versions map.
-func setNewVersions(m structs.ImageMap) {
+// setNewVersions atomically replaces the shared available versions and the
+// set of held packages.
+func setNewVersions(m structs.ImageMap, held map[string]bool) {
 	newVersionsMu.Lock()
 	defer newVersionsMu.Unlock()
 
 	newVersions = m
+	heldPkgs = held
 }
 
 // refreshNewVersions runs `apt-get update` and rebuilds the available versions
@@ -181,6 +187,7 @@ func refreshNewVersions() error {
 	}
 
 	versions := structs.ImageMap{}
+	held := map[string]bool{}
 
 	// A failing cache read leaves us without any trustworthy view of the
 	// available updates. Report it (so GET /update/check answers an error
@@ -199,6 +206,12 @@ func refreshNewVersions() error {
 	}
 
 	for _, p := range pkgs {
+		// An upgrade-all keeps a held package back, so it is no pending update.
+		if p.Held {
+			logging.Infof("%s: %s  -->  %s (held)\n", p.Name, p.VersionCurrent, p.VersionNew)
+			held[p.Name] = true
+			continue
+		}
 		logging.Infof("%s: %s  -->  %s\n", p.Name, p.VersionCurrent, p.VersionNew)
 
 		versions[p.Name] = structs.Image{
@@ -208,7 +221,7 @@ func refreshNewVersions() error {
 		}
 	}
 
-	setNewVersions(versions)
+	setNewVersions(versions, held)
 
 	if aptErr != nil {
 		return fmt.Errorf("apt-get update failed: %w", aptErr)

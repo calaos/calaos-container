@@ -44,6 +44,7 @@ type Pkg struct {
 	Name           string
 	VersionCurrent string
 	VersionNew     string
+	Held           bool // on hold: apt-get dist-upgrade keeps it back
 }
 
 // Progress is one progress event of an apt transaction, as defined by the
@@ -159,6 +160,7 @@ func GetCachePackages() ([]*Pkg, error) {
 			Name:           C.GoString(p.name),
 			VersionCurrent: C.GoString(p.version_current),
 			VersionNew:     C.GoString(p.version_new),
+			Held:           p.held != 0,
 		})
 	}
 
