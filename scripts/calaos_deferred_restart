@@ -1,0 +1,112 @@
+#!/bin/bash
+#
+# calaos_deferred_restart - restart calaos-container once the package run that
+# replaced its binary is over. Started by the package postinst in a transient
+# unit: the daemon may itself drive that run through libapt, so restarting it
+# from the postinst would cut the run short.
+
+set -uo pipefail
+
+unit=calaos-container.service
+conf=/etc/calaos-container.toml
+token_file=/run/calaos/calaos-ct.token
+poll=5
+budget=$((2 * 60 * 60))
+give_up=$((SECONDS + budget))
+
+addr=127.0.0.1
+port=8000
+while IFS='=' read -r key value; do
+    case "$key" in
+        address) addr="$value" ;;
+        port) port="$value" ;;
+    esac
+done < <(awk -F= '
+    /^[ \t]*\[/ { general = ($0 ~ /^[ \t]*\[general\]/); next }
+    general && NF >= 2 {
+        k = $1; v = $2; sub(/#.*/, "", v); gsub(/[ \t"]/, "", k); gsub(/[ \t"]/, "", v)
+        if (k == "address" || k == "port") print k "=" v
+    }' "$conf" 2>/dev/null)
+case "$addr" in
+    ''|0.0.0.0|::) addr=127.0.0.1 ;;
+    *:*) addr="[$addr]" ;;
+esac
+status_url="http://$addr:$port/api/update/status"
+
+# dpkg takes its locks with fcntl, which flock(1) cannot probe.
+dpkg_busy() {
+    lslocks --noheadings --raw --output PATH 2>/dev/null |
+        grep -qxE '/var/lib/dpkg/lock(-frontend)?'
+}
+
+# Prints idle, busy or unreachable. 1.7.0 reports an empty status until its
+# first job.
+job_state() {
+    local token body
+    if ! token=$(cat "$token_file" 2>/dev/null) ||
+        ! body=$(curl -fsS --max-time 10 -H "Authorization: Bearer $token" "$status_url" 2>/dev/null); then
+        echo unreachable
+    elif jq -e '.status == "idle" or .status == ""' >/dev/null 2>&1 <<<"$body"; then
+        echo idle
+    else
+        echo busy
+    fi
+}
+
+# Prints the daemon PID while it still runs a binary that dpkg has replaced.
+stale_pid() {
+    local pid exe
+    pid=$(systemctl show --property=MainPID --value "$unit" 2>/dev/null) || return 1
+    [ "${pid:-0}" -gt 0 ] 2>/dev/null || return 1
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    [[ "$exe" == *" (deleted)" ]] || return 1
+    echo "$pid"
+}
+
+# Only an unreachable daemon uses up the budget: a long upgrade holds the dpkg
+# lock or keeps the daemon busy for as long as it needs.
+waiting=""
+quiet=0
+while :; do
+    if ! pid=$(stale_pid); then
+        echo "$unit runs the installed binary or is not running, nothing to do"
+        exit 0
+    fi
+
+    if dpkg_busy; then
+        reason="the dpkg lock"
+    else
+        case "$(job_state)" in
+            busy) reason="the daemon job to finish" ;;
+            unreachable) reason="the daemon to answer" ;;
+            *) reason="" ;;
+        esac
+    fi
+
+    if [ -z "$reason" ]; then
+        # Two quiet polls in a row: a daemon goes idle just before it answers
+        # the request that ran the upgrade.
+        if [ "$quiet" -eq 1 ]; then
+            # The daemon may have been restarted during the polls.
+            [ "$(systemctl show --property=MainPID --value "$unit")" = "$pid" ] || exit 0
+            echo "restarting $unit: pid $pid runs a replaced binary"
+            exec systemctl restart "$unit"
+        fi
+        quiet=1
+        sleep "$poll"
+        continue
+    fi
+    quiet=0
+
+    if [ "$reason" != "$waiting" ]; then
+        echo "waiting for $reason"
+        waiting="$reason"
+    fi
+    if [ "$reason" != "the daemon to answer" ]; then
+        give_up=$((SECONDS + budget))
+    elif [ "$SECONDS" -ge "$give_up" ]; then
+        echo "gave up: the daemon did not answer for 2 h; $unit (pid $pid) still runs the old binary" >&2
+        exit 1
+    fi
+    sleep "$poll"
+done
