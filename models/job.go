@@ -358,7 +358,11 @@ func loadLastJob() {
 	}
 
 	var rec jobRecord
-	if err := json.Unmarshal(data, &rec); err != nil || rec.ID == "" {
+	err = json.Unmarshal(data, &rec)
+	if err == nil && !validJobStatus(rec.Status) {
+		err = fmt.Errorf("unknown status %q", rec.Status)
+	}
+	if err != nil || rec.ID == "" {
 		logging.Errorf("ignoring an invalid upgrade job file %s: %v", path, err)
 		return
 	}
@@ -370,6 +374,10 @@ func loadLastJob() {
 		saveJob(rec)
 	}
 	setLastJob(rec)
+}
+
+func validJobStatus(s string) bool {
+	return s == JobRunning || s == JobDone || s == JobError
 }
 
 // prepareJobDir makes the job directory a real 0700 directory of ours: the

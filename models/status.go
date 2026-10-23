@@ -47,7 +47,27 @@ func isTransition(prev, next structs.Status) bool {
 		prev.PkgIndex != next.PkgIndex
 }
 
+// status and current_step reach household clients, which get no package
+// names: anything outside the vocabulary is clamped rather than relayed.
+var (
+	statusWords = map[string]bool{"idle": true, "upgrading": true, "done": true, "error": true}
+	stepWords   = map[string]bool{
+		"pending": true, "download": true, "unpack": true, "configure": true,
+		"install": true, "done": true, "error": true,
+	}
+)
+
+func sanitizeStatus(st *structs.Status) {
+	if !statusWords[st.Status] {
+		st.Status = "upgrading"
+	}
+	if st.CurrentStep != "" && !stepWords[st.CurrentStep] {
+		st.CurrentStep = "install"
+	}
+}
+
 func (s *SafeStatus) SetStatus(st structs.Status) {
+	sanitizeStatus(&st)
 	s.Lock()
 
 	prev := s.Status

@@ -82,9 +82,9 @@ prepare_admindir() {
         warn "Removing the symlink at $admindir"
         rm -f "$admindir" || return 1
     elif [ -e "$admindir" ] && [ ! -d "$admindir" ]; then
-        aside="$admindir.bak-$(date +%s)"
+        aside="$admindir.bak-$(date +%s)-$$"
         warn "Moving unexpected $admindir to $aside"
-        mv -T -- "$admindir" "$aside" || return 1
+        mv -nT -- "$admindir" "$aside" || return 1
     fi
     if [ ! -d "$admindir" ]; then
         (umask 077 && mkdir "$admindir") || return 1

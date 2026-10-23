@@ -39,7 +39,7 @@
   in its PHC string, so the cost can change without a migration.
 - `init_calaosfs` creates `/mnt/calaos/admin` under the existing `/run/calaos` flock (`umask
   077` + `mkdir`, then `chown root:root` and `chmod 0700`). A symlink is removed, never followed;
-  any other non-directory is moved to `admin.bak-<epoch>`, never deleted. A failure there is only
+  any other non-directory is moved to `admin.bak-<epoch>-<pid>`, never deleted. A failure there is only
   a warning: the other units waiting on the script still start, and the daemon answers `internal`
   on the admin routes. The daemon also refuses a non-directory there and tightens the mode.
 - Sessions: `/run/calaos-container/sessions.json` (dir 0700) holds the SHA-256 of each session,
