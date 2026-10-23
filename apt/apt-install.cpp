@@ -204,6 +204,12 @@ int aptInstallPackage(const char *pkgName, char **errorMsg)
         return fail(errorMsg);
     }
 
+    if (P->SelectedState == pkgCache::State::Hold)
+    {
+        _error->Error("Package %s is held", pkgName);
+        return fail(errorMsg);
+    }
+
     depCache->MarkInstall(P, /*AutoInst*/ true, /*Depth*/ 0, /*FromUser*/ true);
 
     pkgProblemResolver fix(depCache);

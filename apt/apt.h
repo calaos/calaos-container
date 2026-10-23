@@ -9,6 +9,7 @@ typedef struct
     char *name;
     char *version_current;
     char *version_new;
+    int held; /* non-zero when the package is on hold (apt-mark hold) */
 } Pkg;
 
 /* Error reporting convention of this ABI
@@ -30,7 +31,8 @@ typedef struct
 int aptInit(char **errorMsg);
 
 /* Build the list of upgradable packages, as computed by a simulated
- * dist-upgrade on the local cache.
+ * dist-upgrade on the local cache. Held packages are listed too, flagged by
+ * `held`: the dist-upgrade keeps them back but apt still sees them upgradable.
  *
  * Returns an opaque non-NULL handle to be released with aptCacheArrayFree().
  * On failure (cache lock held by another apt process, broken/inconsistent
@@ -80,7 +82,8 @@ void aptEmitProgress(const char *stage, const char *pkg,
 int aptUpgradeAll(char **errorMsg);
 
 /* Install (or upgrade) a single package by name, resolving dependencies.
- * Same contract as aptUpgradeAll(). */
+ * Same contract as aptUpgradeAll(). A held package is refused: MarkInstall()
+ * from the user would otherwise override the hold. */
 int aptInstallPackage(const char *pkgName, char **errorMsg);
 
 #ifdef __cplusplus

@@ -110,7 +110,7 @@ func newJobEnv(t *testing.T, f *fakeApt) *jobEnv {
 	env.hook(t)
 	t.Cleanup(func() {
 		resetStatus()
-		setNewVersions(structs.ImageMap{})
+		setNewVersions(structs.ImageMap{}, nil)
 	})
 	return env
 }
@@ -281,6 +281,42 @@ func TestJobPackage(t *testing.T) {
 
 // TestJobAptError: the apt error reaches the legacy caller only; the job and
 // the progress get a summary without apt output.
+func TestJobHeldPackage(t *testing.T) {
+	env := newJobEnv(t, &fakeApt{
+		cache: []*apt.Pkg{
+			{Name: "calaos-server", VersionCurrent: "1", VersionNew: "2"},
+			{Name: "calaos-home", VersionCurrent: "1", VersionNew: "2", Held: true},
+		},
+	})
+	if err := CheckUpdates(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := GetNewVersions()["calaos-home"]; ok || len(GetNewVersions()) != 1 {
+		t.Fatalf("held package listed: %v", GetNewVersions())
+	}
+	if _, err := StartJob(JobKindUpgrade, "calaos-home"); !errors.Is(err, ErrPackageHeld) {
+		t.Fatalf("held package: %v", err)
+	}
+	if CurrentJob() != nil || len(env.apt.installs) != 0 {
+		t.Fatalf("held package: job %+v, installs %v", CurrentJob(), env.apt.installs)
+	}
+	run, err := StartJob(JobKindUpgrade, "calaos-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = run.Run()
+	run.Complete()
+
+	env.apt.cache[1].Held = false
+	if err := CheckUpdates(); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, held := getNewVersion("calaos-home"); !found || held {
+		t.Fatalf("released package: found %v held %v", found, held)
+	}
+}
+
 func TestJobAptError(t *testing.T) {
 	env := newJobEnv(t, &fakeApt{
 		pkgs: []string{"calaos-server", "calaos-home"},

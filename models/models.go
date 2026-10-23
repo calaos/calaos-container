@@ -18,10 +18,10 @@ import (
 //     Complete). It is acquired with TryAcquire, so a second caller is
 //     rejected with "upgrade already in progress" instead of piling up
 //     behind the first one.
-//   - newVersionsMu protects the newVersions map only. It is held for map
-//     access alone: never across an apt-get run, a cgo call or an upgradeLock
-//     acquisition. Readers go through GetNewVersions()/getNewVersion(), the
-//     writer through setNewVersions().
+//   - newVersionsMu protects the newVersions and heldPkgs maps only. It is
+//     held for map access alone: never across an apt-get run, a cgo call or
+//     an upgradeLock acquisition. Readers go through GetNewVersions()/
+//     getNewVersion(), the writer through setNewVersions().
 //   - Lock ordering: upgradeLock is always taken before newVersionsMu, never
 //     the other way around, so the two cannot deadlock.
 //   - upgradeStatus (models/status.go) carries its own mutex and is
@@ -41,6 +41,7 @@ var (
 	//Stored new available versions, guarded by newVersionsMu
 	newVersionsMu sync.RWMutex
 	newVersions   = cimg.ImageMap{}
+	heldPkgs      = map[string]bool{}
 )
 
 func init() {

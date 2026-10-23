@@ -23,6 +23,7 @@ const (
 	codeInvalidRequest    = "invalid_request"
 	codeNotFound          = "not_found"
 	codePackageNotFound   = "package_not_found"
+	codePackageHeld       = "package_held"
 	codeMethodNotAllowed  = "method_not_allowed"
 	codeAdminNotSet       = "admin_not_set"
 	codeAdminAlreadySet   = "admin_already_set"
