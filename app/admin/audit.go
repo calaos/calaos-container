@@ -86,8 +86,8 @@ type refusedThrottle struct {
 	dropped int
 }
 
-// AuditRefused logs a call refused for a bad bearer to the daemon log only,
-// at most one line per second.
+// AuditRefused logs a call refused for a bad bearer or session to the daemon
+// log only, at most one line per second.
 func (m *Manager) AuditRefused(e AuditEntry) {
 	t := &m.refused
 	now := m.now()

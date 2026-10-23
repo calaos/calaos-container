@@ -427,6 +427,18 @@ func TestJobFileUnreadable(t *testing.T) {
 	}
 }
 
+func TestJobFileUnknownStatus(t *testing.T) {
+	env := newJobEnv(t, &fakeApt{})
+	rec := jobRecord{Job: Job{ID: "00112233aabbccdd", Kind: JobKindUpgrade, Status: "error:linux-image-arm64"}}
+	if err := writeJobFile(env.jobFile, rec); err != nil {
+		t.Fatal(err)
+	}
+	loadLastJob()
+	if j := CurrentJob(); j != nil {
+		t.Fatalf("a job with an unknown status was loaded: %+v", j)
+	}
+}
+
 // TestJobSelfUpgrade: a run that replaced this daemon asks for the exit only
 // after its terminal event, and keeps the lock until then.
 func TestJobSelfUpgrade(t *testing.T) {

@@ -158,7 +158,9 @@ What each `<Status>` field carries, on every surface (REST, `/api/events`, `/api
 
 | Field | Content |
 |---|---|
-| `status`, `total_percent`, `current_step`, `current_percent`, `pkg_index`, `pkg_count`, `progress`, `progress_total` | state and counters, no text from apt |
+| `status` | one of `idle`, `upgrading`, `done`, `error`; anything else the daemon would produce is sent as `upgrading` |
+| `current_step` | absent, or one of `pending`, `download`, `unpack`, `configure`, `install`, `done`, `error`; anything else is sent as `install` |
+| `total_percent`, `current_percent`, `pkg_index`, `pkg_count`, `progress`, `progress_total` | counters, no text from apt |
 | `current_pkg`, `packages[].name` | Debian package names of the transaction (no version, path or URL): the box's package inventory |
 | `packages[].state`, `packages[].percent` | per-package state and counter |
 | `error` | on `error`: the job's summary (`upgrade failed` or `upgrade failed: <failed packages>`), never apt or dpkg output |
@@ -283,13 +285,14 @@ kept; the oldest goes first.
 
 ### Audit
 
-Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session` writes one line
-to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
+Every `/api/v2/admin/*` call and every request carrying `X-Calaos-Admin-Session`, except those
+refused with `bad_bearer` or `bad_session` (below), writes one line to `/mnt/calaos/admin/audit.log` and to stdout (journald): time, client
 (`X-Calaos-Client-IP`, `local` or `invalid`), result (`ok` or the error `code`), session audit id,
 then method and path (quoted, cut at 128 bytes). Never a password, a session or the bearer.
 
-A call refused with `bad_bearer` goes to the daemon log only, at most one line per second: anything
-on the host can send those, and in `audit.log` they would rotate the real entries away.
+A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
+second: anything on the host can send the first, calaos_server relays a household client's guessed
+session on `update_status`, and in `audit.log` they would rotate the real entries away.
 
 `GET admin/status` without a session is not audited (calaos_server polls it). `audit.log` is
 rotated at 1 MiB, one old file kept.
@@ -360,7 +363,9 @@ synchronous behaviour: they answer when apt ends.
   deferred restart of the package (CC-042) never sees it idle, so it never restarts it a second
   time.
 - A daemon asked to stop while a job runs waits up to 25 s for apt to end; past that the job is
-  cut and reads `interrupted` at the next start.
+  cut and reads `interrupted` at the next start. A legacy synchronous run keeps its request in
+  flight, so the HTTP shutdown waits on it unbounded: the unit's 30 s stop timeout cuts it, with
+  the same outcome.
 
 A client following a job:
 

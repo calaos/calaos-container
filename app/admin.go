@@ -221,9 +221,10 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	} else if id, ok := c.Locals(localIssuedSession).(string); ok {
 		e.Session = id
 	}
-	// Anything on the host can send these without the bearer: in audit.log
-	// they would rotate the real entries away.
-	if e.Result == codeBadBearer {
+	// Anything on the host can send a bad bearer, and calaos_server relays a
+	// household client's guessed session: in audit.log either would rotate
+	// the real entries away.
+	if e.Result == codeBadBearer || e.Result == codeBadSession {
 		a.admin.AuditRefused(e)
 	} else {
 		a.admin.Audit(e)

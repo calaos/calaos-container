@@ -60,7 +60,9 @@
   the `/proc/stat` boot time as fallback and a single warning; without either, the recorded value
   stands.
 - `models.Shutdown` waits up to 25 s for a running job (apt cannot be cancelled), under the unit's
-  30 s `TimeoutStopSec`; past that the job reads `interrupted` at the next start.
+  30 s `TimeoutStopSec`; past that the job reads `interrupted` at the next start. A legacy
+  synchronous run is cut by the unit's stop timeout instead: fiber's shutdown waits on its request
+  before `models.Shutdown` runs.
 - Accepted residual: when the binary was replaced by a run the daemon did not drive (shell
   `apt upgrade`), a job started in the instant between the deferred restart's last idle poll and
   its `systemctl restart` is cut. The unit's `dpkg --configure -a` resumes it and the job reads

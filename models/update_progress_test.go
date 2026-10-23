@@ -348,3 +348,26 @@ func TestSetStatusThrottling(t *testing.T) {
 		t.Fatalf("expected terminal 'done' event to be published, got %+v", got)
 	}
 }
+
+// A step or status outside the vocabulary never carries a package name out.
+func TestSetStatusClampsVocabulary(t *testing.T) {
+	resetSharedStatus()
+	initUpgradeStatus()
+	t.Cleanup(resetSharedStatus)
+
+	applyAptProgress(apt.Progress{Stage: "pending", Pkg: "pkgA", PkgPercent: -1})
+	applyAptProgress(apt.Progress{Stage: "trigger:pkgA", Pkg: "pkgA", PkgPercent: -1})
+	if st := upgradeStatus.GetStatus(); st.CurrentStep != "install" || st.Status != "upgrading" {
+		t.Fatalf("unknown stage: step=%q status=%q", st.CurrentStep, st.Status)
+	}
+	upgradeStatus.SetStatus(structs.Status{Status: "error:pkgA", CurrentStep: "configure"})
+	if st := upgradeStatus.GetStatus(); st.Status != "upgrading" || st.CurrentStep != "configure" {
+		t.Fatalf("unknown status: step=%q status=%q", st.CurrentStep, st.Status)
+	}
+	for _, step := range []string{"pending", "download", "unpack", "configure", "install", "done", "error"} {
+		upgradeStatus.SetStatus(structs.Status{Status: "upgrading", CurrentStep: step})
+		if got := upgradeStatus.GetStatus().CurrentStep; got != step {
+			t.Fatalf("step %q became %q", step, got)
+		}
+	}
+}

@@ -486,6 +486,29 @@ func TestAdminAuditFlood(t *testing.T) {
 	}
 }
 
+// calaos_server relays a household client's well-formed session guess on
+// update_status: those refusals must not rotate audit.log either.
+func TestAdminAuditBadSessionFlood(t *testing.T) {
+	c := newAdminApp(t)
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
+
+	forged := session(strings.Repeat("ab", 32))
+	for i := 0; i < 10000; i++ {
+		tc := httpCase{method: "GET", path: "/api/v2/update/status", headers: forged}
+		if resp, body := doCase(t, c.a, tc); resp.StatusCode != 401 || !strings.Contains(string(body), codeBadSession) {
+			t.Fatalf("request %d: %d %s", i, resp.StatusCode, body)
+		}
+	}
+
+	log := readAudit(t)
+	if !strings.Contains(log, `result=ok session=- POST "/api/v2/admin/set"`) || strings.Contains(log, codeBadSession) {
+		t.Fatalf("audit log after the flood:\n%.500s", log)
+	}
+	if _, err := os.Stat(filepath.Join(adminDataDir, "audit.log.1")); !os.IsNotExist(err) {
+		t.Fatalf("audit log rotated by forged sessions: %v", err)
+	}
+}
+
 // A live alert lost by the hub reaches the connected peer at the next ping.
 func TestAdminAlertRedelivered(t *testing.T) {
 	prevPing, prevPublish := wsPingPeriod, publishAdmin
