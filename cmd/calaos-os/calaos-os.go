@@ -88,6 +88,7 @@ func main() {
 	a.Command("list", "list installed images/pkg and updates", cmdList)
 	a.Command("check-update", "check for any available updates", cmdCheck)
 	a.Command("upgrade", "update images/pkg to the latest availble", cmdUpgrade)
+	a.Command("admin", "admin password commands", cmdAdmin)
 	a.Command("network", "network related commands", func(cmd *cli.Cmd) {
 		cmd.Command("list", "list network interfaces", cmdNetList)
 		cmd.Command("configure", "configure network interface", func(cmd *cli.Cmd) {

@@ -35,6 +35,7 @@ func newTestServer(t *testing.T) (a *AppServer, addr string, cleanup func()) {
 	tokenFile = tf
 	tokenStr = ""
 
+	useAdminDirs(t)
 	var err error
 	a, err = NewApp()
 	if err != nil {

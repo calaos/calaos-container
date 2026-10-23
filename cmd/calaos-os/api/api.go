@@ -404,3 +404,42 @@ func apiErrorOr(resp *http.Response, body []byte, err error) error {
 	}
 	return err
 }
+
+// ErrNoAdmin means the daemon in memory predates the admin routes: right
+// after a package upgrade, until the deferred restart.
+var ErrNoAdmin = errors.New("the new calaos-container daemon is not active yet; retry once it has restarted")
+
+func adminCallErr(err error) error {
+	var ae *APIError
+	if errors.Is(err, errNoV2) || (errors.As(err, &ae) && ae.Status == http.StatusNotFound && ae.Code == "not_found") {
+		return ErrNoAdmin
+	}
+	return err
+}
+
+// AdminSet sets the admin password in recovery mode: bearer only, whether a
+// password exists or not. The password travels in the body only.
+func (capi *CalaosApi) AdminSet(token, password string) (string, error) {
+	body := struct {
+		Password string `json:"password"`
+		Recovery bool   `json:"recovery"`
+	}{password, true}
+	var out struct {
+		Mode string `json:"mode"`
+	}
+	if err := capi.callV2(token, "POST", "/admin/set", body, &out); err != nil {
+		return "", adminCallErr(err)
+	}
+	return out.Mode, nil
+}
+
+// AdminReset removes the admin password and closes every admin session.
+func (capi *CalaosApi) AdminReset(token string) (bool, error) {
+	var out struct {
+		WasSet bool `json:"was_set"`
+	}
+	if err := capi.callV2(token, "POST", "/admin/reset", nil, &out); err != nil {
+		return false, adminCallErr(err)
+	}
+	return out.WasSet, nil
+}

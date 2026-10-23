@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	fiberLog "github.com/gofiber/fiber/v2/middleware/logger"
 
+	"github.com/calaos/calaos-container/app/admin"
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/events"
 	logger "github.com/calaos/calaos-container/log"
@@ -48,6 +49,8 @@ type AppServer struct {
 	hub *events.Hub
 
 	sessions sessionValidator
+
+	admin *admin.Manager
 }
 
 var logging *logrus.Entry
@@ -71,8 +74,7 @@ func NewApp() (a *AppServer, err error) {
 	}
 
 	a = &AppServer{
-		hub:      events.Default,
-		sessions: noSessions{},
+		hub: events.Default,
 		appFiber: fiber.New(fiber.Config{
 			ServerHeader:          "Calaos Container (Linux)",
 			ReadTimeout:           readTimeout,
@@ -85,8 +87,18 @@ func NewApp() (a *AppServer, err error) {
 		}),
 	}
 
+	// Reads a.hub at publish time: tests swap the hub after NewApp.
+	a.admin = admin.New(admin.Options{
+		DataDir:    adminDataDir,
+		RuntimeDir: adminRuntimeDir,
+		Hash:       adminHashParams,
+		Publish:    func(evType string, data any) { publishAdmin(a.hub, evType, data) },
+	})
+	a.sessions = a.admin
+
 	a.appFiber.
 		Use(fiberLog.New(fiberLog.Config{})).
+		Use(a.auditMiddleware).
 		Use(NewTokenMiddleware())
 
 	a.appFiber.Use(cors.New(cors.Config{
@@ -196,6 +208,8 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 
 	v2.Get("/network/list", bearerOnly, a.v2NetList)
 	v2.Post("/network/:intf", bearerOnly, a.v2NetConfigure)
+
+	a.registerAdmin(v2)
 
 	a.registerEvents(v2, s)
 }
