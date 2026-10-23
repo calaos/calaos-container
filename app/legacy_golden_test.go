@@ -171,6 +171,7 @@ func newHandlerTestApp(t *testing.T) *AppServer {
 		t.Fatalf("write token file: %v", err)
 	}
 	resetTokenCache(t, tf)
+	useAdminDirs(t)
 
 	a, err := NewApp()
 	if err != nil {

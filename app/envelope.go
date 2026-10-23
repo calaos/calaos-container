@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -14,12 +15,17 @@ const apiV2Prefix = "/api/v2"
 const (
 	codeBadBearer         = "bad_bearer"
 	codeBadSession        = "bad_session"
+	codeBadPassword       = "bad_password"
 	codeNotAllowed        = "not_allowed"
+	codePasswordTooShort  = "password_too_short"
 	codeInvalidRequest    = "invalid_request"
 	codeNotFound          = "not_found"
 	codeMethodNotAllowed  = "method_not_allowed"
+	codeAdminNotSet       = "admin_not_set"
+	codeAdminAlreadySet   = "admin_already_set"
 	codeUpgradeInProgress = "upgrade_in_progress"
 	codeUpgradeRequired   = "upgrade_required"
+	codeRateLimited       = "rate_limited"
 	codeInternal          = "internal"
 )
 
@@ -39,11 +45,12 @@ type errEnvelope struct {
 // apiError is a /api/v2 error. msg and data go to the client; cause is only
 // logged, so internal error text never leaves the daemon.
 type apiError struct {
-	status int
-	code   string
-	msg    string
-	data   any
-	cause  error
+	status     int
+	code       string
+	msg        string
+	data       any
+	cause      error
+	retryAfter int // seconds, sent as Retry-After when set
 }
 
 func (e *apiError) Error() string {
@@ -74,6 +81,10 @@ func sendOK(c *fiber.Ctx, status int, data any) error {
 }
 
 func sendAPIError(c *fiber.Ctx, e *apiError) error {
+	c.Locals(localErrCode, e.code)
+	if e.retryAfter > 0 {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(e.retryAfter))
+	}
 	if e.cause != nil {
 		logging.WithFields(logrus.Fields{
 			"method": c.Method(),

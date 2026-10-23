@@ -8,6 +8,8 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jawher/mow.cli v1.2.0
 	github.com/knadh/koanf v1.5.0
+	golang.org/x/crypto v0.31.0
+	golang.org/x/term v0.27.0
 )
 
 require (

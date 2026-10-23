@@ -38,6 +38,15 @@ func (a *AppServer) apiEvents(c *websocket.Conn) {
 		}
 	}
 
+	// Subscribed above, so an alert raised meanwhile is sent twice rather
+	// than lost; calaos_server deduplicates on id.
+	for _, al := range a.admin.PendingAlerts() {
+		_ = c.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		if err := c.WriteJSON(events.Event{Type: al.Type, Data: al.Data()}); err != nil {
+			return
+		}
+	}
+
 	// Reader goroutine: required to process control frames (pong/close) and to
 	// detect client disconnection. It never returns application messages to us.
 	done := make(chan struct{})

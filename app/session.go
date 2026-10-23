@@ -9,12 +9,6 @@ type sessionValidator interface {
 	Valid(session string) bool
 }
 
-// noSessions is used while the daemon has no admin password support: every
-// session is unknown.
-type noSessions struct{}
-
-func (noSessions) Valid(string) bool { return false }
-
 // adminSession reports the X-Calaos-Admin-Session header. A header sent with
 // an empty value still counts as present, so it can never fall back to the
 // bearer-only path.
@@ -35,7 +29,7 @@ func (a *AppServer) sessionAllowed(c *fiber.Ctx) error {
 		return c.Next()
 	}
 	if !a.sessions.Valid(s) {
-		return newAPIError(fiber.StatusUnauthorized, codeBadSession, "admin session expired or invalid")
+		return errBadSession()
 	}
 	return c.Next()
 }
@@ -44,7 +38,15 @@ func (a *AppServer) sessionAllowed(c *fiber.Ctx) error {
 // up: calaos_server never relays these routes.
 func bearerOnly(c *fiber.Ctx) error {
 	if _, present := adminSession(c); present {
-		return newAPIError(fiber.StatusForbidden, codeNotAllowed, "not allowed with an admin session")
+		return errNotAllowed()
 	}
 	return c.Next()
+}
+
+func errBadSession() *apiError {
+	return newAPIError(fiber.StatusUnauthorized, codeBadSession, "admin session expired or invalid")
+}
+
+func errNotAllowed() *apiError {
+	return newAPIError(fiber.StatusForbidden, codeNotAllowed, "not allowed with an admin session")
 }

@@ -70,6 +70,19 @@ else
     (create_token replace)
 fi
 
+# Admin password store: a plain directory, not a subvolume, so a rollback
+# brings back the admin password of that time like the household one.
+admindir="${fs}/admin"
+if [ -L "$admindir" ] || { [ -e "$admindir" ] && [ ! -d "$admindir" ]; }; then
+    warn "Replacing unexpected $admindir"
+    rm -f "$admindir"
+fi
+if [ ! -d "$admindir" ]; then
+    (umask 077 && mkdir "$admindir")
+fi
+chown root:root "$admindir"
+chmod 0700 "$admindir"
+
 if [ -e /.calaos-live ]; then
     touch "$rundir/calaos-live"
 fi
