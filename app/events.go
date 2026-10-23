@@ -25,6 +25,15 @@ var wsPingPeriod = 30 * time.Second
 // events from the in-process hub to the connected client. The connection has
 // already been authenticated by the global Bearer middleware.
 func (a *AppServer) apiEvents(c *websocket.Conn) {
+	a.wsMu.Lock()
+	if a.wsClosing {
+		a.wsMu.Unlock()
+		return
+	}
+	a.wsConns.Add(1)
+	a.wsMu.Unlock()
+	defer a.wsConns.Done()
+
 	sub := a.hub.Subscribe()
 	defer func() {
 		a.hub.Unsubscribe(sub)

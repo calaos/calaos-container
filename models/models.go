@@ -13,9 +13,10 @@ import (
 // Concurrency model of the update subsystem:
 //
 //   - upgradeLock (semaphore, capacity 1) serializes the long-running
-//     operations: checkForUpdates, Upgrade and UpgradeAll. It is acquired with
-//     TryAcquire, so a second caller is rejected with "upgrade already in
-//     progress" instead of piling up behind the first one.
+//     operations: checkForUpdates and the upgrade jobs (StartJob to
+//     Complete). It is acquired with TryAcquire, so a second caller is
+//     rejected with "upgrade already in progress" instead of piling up
+//     behind the first one.
 //   - newVersionsMu protects the newVersions map only. It is held for map
 //     access alone: never across an apt-get run, a cgo call or an upgradeLock
 //     acquisition. Readers go through GetNewVersions()/getNewVersion(), the
@@ -47,6 +48,9 @@ func init() {
 
 // Init models
 func Init() (err error) {
+	// Before any route is served, so no client ever sees a job "running"
+	// that nothing runs.
+	loadLastJob()
 
 	// Initialize the shared upgrade status to "idle" so /api/update/status and
 	// the /api/events snapshot report a well-defined state before any upgrade.
@@ -84,4 +88,8 @@ func Shutdown() {
 	lifecycleMu.Unlock()
 
 	wgDone.Wait()
+
+	// apt cannot be cancelled: give a running job the chance to end before
+	// systemd's stop timeout.
+	jobsWG.Wait()
 }

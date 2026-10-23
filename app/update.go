@@ -1,7 +1,10 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
+	"regexp"
+	"strings"
 
 	"github.com/calaos/calaos-container/models"
 	"github.com/calaos/calaos-container/models/structs"
@@ -38,18 +41,25 @@ func (a *AppServer) apiUpdateInstalled(c *fiber.Ctx) (err error) {
 	return c.Status(fiber.StatusOK).JSON(m)
 }
 
-func (a *AppServer) apiUpdateUpgradeAll(c *fiber.Ctx) (err error) {
-	if err = upgradeAll(); err != nil {
-		return legacyError(c, fiber.StatusInternalServerError, err)
-	}
-
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"msg": "Upgrade done",
-	})
+func (a *AppServer) apiUpdateUpgradeAll(c *fiber.Ctx) error {
+	return a.legacyUpgrade(c, models.JobKindUpgradeAll, "")
 }
 
-func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) (err error) {
-	if err = upgradePackage(c.Query("package")); err != nil {
+func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) error {
+	return a.legacyUpgrade(c, models.JobKindUpgrade, c.Query("package"))
+}
+
+// legacyUpgrade answers once apt has ended: old kiosks take any 2xx for a
+// finished upgrade. The job completes after the answer is written, so the
+// terminal event and a self-upgrade exit never overtake it.
+func (a *AppServer) legacyUpgrade(c *fiber.Ctx, kind, pkg string) error {
+	run, err := startUpgradeJob(kind, pkg)
+	if err != nil {
+		return legacyError(c, fiber.StatusInternalServerError, err)
+	}
+	err = run.Run()
+	a.afterResponse(c, run.Complete)
+	if err != nil {
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 
@@ -89,11 +99,9 @@ func (a *AppServer) v2UpdateInstalled(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, m)
 }
 
-// v2UpdateStatusData is the payload of GET /api/v2/update/status. Job stays
-// null until upgrades run as jobs.
 type v2UpdateStatusData struct {
 	Progress *structs.Status `json:"progress"`
-	Job      any             `json:"job"`
+	Job      *models.Job     `json:"job"`
 }
 
 func (a *AppServer) v2UpdateStatus(c *fiber.Ctx) error {
@@ -101,5 +109,53 @@ func (a *AppServer) v2UpdateStatus(c *fiber.Ctx) error {
 	if err != nil {
 		return errInternal(err)
 	}
-	return sendOK(c, fiber.StatusOK, v2UpdateStatusData{Progress: st})
+	return sendOK(c, fiber.StatusOK, v2UpdateStatusData{Progress: st, Job: currentJob()})
+}
+
+const maxPackageNameLen = 128
+
+var packageNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]*$`)
+
+// validPackageName is the rule calaos_server applies too (docs/API.md).
+func validPackageName(p string) bool {
+	return len(p) <= maxPackageNameLen && packageNameRe.MatchString(p) && !strings.Contains(p, "..")
+}
+
+func (a *AppServer) v2UpdateUpgradeAll(c *fiber.Ctx) error {
+	return startV2Job(c, models.JobKindUpgradeAll, "")
+}
+
+func (a *AppServer) v2UpdateUpgrade(c *fiber.Ctx) error {
+	var body struct {
+		Package *string `json:"package"`
+	}
+	if err := json.Unmarshal(c.Body(), &body); err != nil {
+		return errInvalid("invalid JSON body")
+	}
+	if body.Package == nil {
+		return errInvalid("missing package")
+	}
+	if !validPackageName(*body.Package) {
+		return errInvalid("invalid package name")
+	}
+	return startV2Job(c, models.JobKindUpgrade, *body.Package)
+}
+
+func startV2Job(c *fiber.Ctx, kind, pkg string) error {
+	run, err := startUpgradeJob(kind, pkg)
+	if err != nil {
+		switch {
+		case errors.Is(err, models.ErrUpgradeInProgress):
+			return errUpgradeInProgress()
+		case errors.Is(err, models.ErrPackageNotFound):
+			return newAPIError(fiber.StatusNotFound, codePackageNotFound, "no pending update for this package")
+		}
+		return errInternal(err)
+	}
+	job := run.Job()
+	go func() {
+		_ = run.Run() // the job records the outcome
+		run.Complete()
+	}()
+	return c.Status(fiber.StatusAccepted).JSON(okEnvelope{Msg: "accepted", Data: job})
 }

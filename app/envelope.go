@@ -20,6 +20,7 @@ const (
 	codePasswordTooShort  = "password_too_short"
 	codeInvalidRequest    = "invalid_request"
 	codeNotFound          = "not_found"
+	codePackageNotFound   = "package_not_found"
 	codeMethodNotAllowed  = "method_not_allowed"
 	codeAdminNotSet       = "admin_not_set"
 	codeAdminAlreadySet   = "admin_already_set"
@@ -72,8 +73,13 @@ func errInvalid(msg string) *apiError {
 	return newAPIError(fiber.StatusBadRequest, codeInvalidRequest, msg)
 }
 
+// errUpgradeInProgress carries the running job, if the lock holder is one.
 func errUpgradeInProgress() *apiError {
-	return newAPIError(fiber.StatusConflict, codeUpgradeInProgress, "an upgrade is already in progress")
+	e := newAPIError(fiber.StatusConflict, codeUpgradeInProgress, "an upgrade is already in progress")
+	if id := runningJobID(); id != "" {
+		e.data = fiber.Map{"job_id": id}
+	}
+	return e
 }
 
 func sendOK(c *fiber.Ctx, status int, data any) error {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -195,5 +196,53 @@ func TestEventsWSFallsBackToLegacy(t *testing.T) {
 	_ = conn.Close()
 	if hit != "legacy" {
 		t.Fatalf("dialed %q, want legacy", hit)
+	}
+}
+
+func TestStartUpgradeAndJobStatus(t *testing.T) {
+	var body string
+	capi := newFakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v2/update/upgrade": func(w http.ResponseWriter, r *http.Request) {
+			b := new(strings.Builder)
+			_, _ = io.Copy(b, r.Body)
+			body = b.String()
+			reply(202, `{"error":false,"msg":"accepted","data":{"id":"3f9c2a7e5b1d4c80","kind":"upgrade","package":"calaos-server","status":"running","reboot_required":false,"daemon_restart":false,"started_at":"2026-10-22T09:12:03Z"}}`)(w, r)
+		},
+		"/api/v2/update/status": reply(200, `{"error":false,"msg":"ok","data":{"progress":{"status":"idle"},"job":{"id":"3f9c2a7e5b1d4c80","status":"done","reboot_required":true,"finished_at":"2026-10-22T09:20:00Z"}}}`),
+	})
+
+	job, err := capi.StartUpgrade("tok", "calaos-server")
+	if err != nil || job.ID != "3f9c2a7e5b1d4c80" || job.Package != "calaos-server" || job.Terminal() {
+		t.Fatalf("StartUpgrade: %+v %v", job, err)
+	}
+	if body != `{"package":"calaos-server"}` {
+		t.Fatalf("request body %q", body)
+	}
+	job, err = capi.JobStatus("tok")
+	if err != nil || !job.Terminal() || !job.RebootRequired {
+		t.Fatalf("JobStatus: %+v %v", job, err)
+	}
+}
+
+func TestStartUpgradeErrors(t *testing.T) {
+	capi := newFakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v2/update/upgrade-all": reply(409, `{"error":true,"code":"upgrade_in_progress","msg":"an upgrade is already in progress","data":{"job_id":"3f9c2a7e5b1d4c80"}}`),
+		"/api/v2/update/upgrade":     reply(202, `{"error":false,"msg":"accepted","data":null}`),
+	})
+
+	_, err := capi.StartUpgrade("tok", "")
+	if InProgressJobID(err) != "3f9c2a7e5b1d4c80" {
+		t.Fatalf("409: %v", err)
+	}
+	if _, err := capi.StartUpgrade("tok", "calaos-server"); err == nil {
+		t.Fatal("an answer without a job was accepted")
+	}
+	if InProgressJobID(errors.New("x")) != "" {
+		t.Fatal("job id from a plain error")
+	}
+
+	old := newFakeDaemon(t, nil)
+	if _, err := old.StartUpgrade("tok", ""); !errors.Is(err, ErrNoJobs) {
+		t.Fatalf("daemon without /api/v2: %v", err)
 	}
 }

@@ -51,8 +51,8 @@ func TestRebootGuardWaitsForCheck(t *testing.T) {
 	}
 
 	upgradeLock.Release(1)
-	if err := UpgradeAll(); !errors.Is(err, ErrUpgradeInProgress) {
-		t.Fatalf("UpgradeAll while the guard waits: %v", err)
+	if _, err := StartJob(JobKindUpgradeAll, ""); !errors.Is(err, ErrUpgradeInProgress) {
+		t.Fatalf("StartJob while the guard waits: %v", err)
 	}
 
 	if err := <-result; err != nil {
@@ -81,11 +81,11 @@ func TestRebootGuardKeepsLockAfterSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { upgradeLock.Release(1) })
 
-	if err := Upgrade("anything"); !errors.Is(err, ErrUpgradeInProgress) {
-		t.Fatalf("Upgrade after a reboot: %v", err)
+	if _, err := StartJob(JobKindUpgrade, "anything"); !errors.Is(err, ErrUpgradeInProgress) {
+		t.Fatalf("upgrade after a reboot: %v", err)
 	}
-	if err := UpgradeAll(); !errors.Is(err, ErrUpgradeInProgress) {
-		t.Fatalf("UpgradeAll after a reboot: %v", err)
+	if _, err := StartJob(JobKindUpgradeAll, ""); !errors.Is(err, ErrUpgradeInProgress) {
+		t.Fatalf("upgrade-all after a reboot: %v", err)
 	}
 }
 

@@ -9,8 +9,9 @@ var (
 	checkUpdates          = models.CheckUpdates
 	getNewVersions        = models.GetNewVersions
 	getInstalledPackages  = models.GetInstalledCalaosPackages
-	upgradeAll            = models.UpgradeAll
-	upgradePackage        = models.Upgrade
+	startUpgradeJob       = startJob
+	currentJob            = models.CurrentJob
+	runningJobID          = models.RunningJobID
 	updateStatus          = models.UpdateStatus
 	getSystemInfo         = models.GetSystemInfo
 	getNetInterfaces      = models.GetAllNetInterfaces
@@ -22,3 +23,18 @@ var (
 	installLogFile      = INSTALL_LOG_FILE
 	installExitCodeFile = INSTALL_EXIT_CODE_FILE
 )
+
+// upgradeRun is a started upgrade job (models.JobRun).
+type upgradeRun interface {
+	Job() models.Job
+	Run() error
+	Complete()
+}
+
+func startJob(kind, pkg string) (upgradeRun, error) {
+	r, err := models.StartJob(kind, pkg)
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}

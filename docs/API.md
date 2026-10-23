@@ -94,7 +94,7 @@ ignored.
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
-| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot | `{"job_id": "..."}` once upgrade jobs exist |
+| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
 | `rate_limited` | 429 | admin password limiter (see Rate limiting) | `{"retry_after": <seconds>}` |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
@@ -301,9 +301,9 @@ synchronous behaviour: they answer when apt ends.
 | `kind` | string | `upgrade_all` or `upgrade` |
 | `package` | string | for `upgrade` only |
 | `status` | string | `running`, `done` or `error` |
-| `error` | string | on `error`: a short summary, without apt or dpkg output (the journal has it) |
-| `reboot_required` | bool | computed by the daemon from what was installed, not from snapshots |
-| `daemon_restart` | bool | the run upgraded calaos-container itself: the daemon exits after the terminal event and systemd starts the new binary |
+| `error` | string | on `error`: a short summary, without apt or dpkg output (the journal has it): `interrupted`, `upgrade failed`, or `upgrade failed: <failed packages>` |
+| `reboot_required` | bool | computed by the daemon from what was installed, not from snapshots: a kernel, firmware or microcode package (the kiosk's kernel group: `linux-image*`, `linux-headers*`, `linux-firmware*`, `linux-libc*`, `linux-kbuild*`, `linux-compiler*`, `firmware-linux`, `firmware-linux-nonfree`, `intel-microcode`, `amd64-microcode`) |
+| `daemon_restart` | bool | the run installed calaos-container and replaced the running binary: the daemon exits after the terminal event and systemd starts the new binary |
 | `started_at`, `finished_at` | string | RFC 3339, UTC; `finished_at` once terminal |
 
 **Rules**
@@ -312,7 +312,7 @@ synchronous behaviour: they answer when apt ends.
   kiosk). Every run is recorded as a job, so `update/status` shows a run started from the kiosk.
 - While a run is in progress, `POST update/upgrade*`, `GET update/check`,
   `POST system/reboot` and `POST system/rollback_snapshot` answer `409 upgrade_in_progress`
-  (with `data.job_id` once jobs exist).
+  (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
   `"package not found"` unchanged. One deliberate exception: the legacy `POST /api/system/reboot`
@@ -334,6 +334,11 @@ synchronous behaviour: they answer when apt ends.
 - Progress is published as `upgrade_progress` events, each job state change as `upgrade_job`
   (see Events). The terminal `upgrade_job` is published before the daemon exits for a
   self-upgrade, and after the legacy POST that started the run (if any) has been answered.
+- After a self-upgrade, until it exits, the daemon keeps the run's lock (runs, checks and reboots
+  are refused as during a run, without `job_id`) and the progress stays at its terminal `status`: the
+  deferred restart of the package (CC-042) never sees it idle, so it never restarts it a second
+  time.
+- A daemon asked to stop while a job runs waits for apt to end, within the unit's stop timeout.
 
 A client following a job:
 
@@ -520,5 +525,6 @@ The contract above is complete; the daemon implements it in steps.
 | `202` upgrade jobs, `upgrade_job`, `job` in `update/status` and in `409` answers, interrupted jobs | ADM-CC3 |
 | `push_code`, `admin/push/{code_id}`, approver and console routes | phase 2 (AP1a, CO1) |
 
-Until ADM-CC3, `/api/v2/` has no upgrade route (`404`): the CLI upgrades through the legacy
-routes, and `update/status` returns `"job": null`.
+A daemon that serves `/api/v2/` but predates ADM-CC3 answers `404 not_found` on the upgrade
+routes: the CLI then upgrades through the legacy routes, as it does against a daemon without
+`/api/v2/`.

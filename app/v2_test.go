@@ -161,7 +161,6 @@ func TestV2Errors(t *testing.T) {
 
 		{"unknown route", httpCase{method: "GET", path: "/api/v2/nope"}, 404, codeNotFound, "not found"},
 		{"unknown route, other case", httpCase{method: "GET", path: "/API/V2/nope"}, 404, codeNotFound, ""},
-		{"upgrade route not served yet", httpCase{method: "POST", path: "/api/v2/update/upgrade-all"}, 404, codeNotFound, ""},
 		{"wrong method", httpCase{method: "GET", path: "/api/v2/system/reboot"}, 405, codeMethodNotAllowed, ""},
 		{"plain GET on events", httpCase{method: "GET", path: "/api/v2/events"}, 426, codeUpgradeRequired, ""},
 
