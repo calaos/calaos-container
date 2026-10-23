@@ -23,9 +23,19 @@ Authorization: Bearer <token>
 - The scheme is compared case-insensitively (old kiosks send `bearer`).
 - The token is re-read when the file changes; a client that gets a bearer 401 re-reads the file
   and retries once.
-- An empty or missing token file rejects every request (fail closed).
+- An empty, missing or unreadable token file rejects every request (fail closed). The token is
+  compared in constant time.
 - `?token=<token>` is accepted only on the legacy `GET /api/events` WebSocket, because published
-  kiosks open it without a header. It is never accepted on `/api/v2/`.
+  kiosks open it without a header. Every other route, legacy or `/api/v2/`, answers `401` to a
+  request that only carries `?token=`.
+- `init_calaosfs` writes the file at boot when it is absent: 32 bytes from `/dev/urandom`,
+  hex-encoded (64 characters and a newline), owned by root, mode `0600`. Kiosks append the
+  token to a URL without percent-encoding it, so it stays hex. An existing non-empty regular file
+  owned by root keeps its value (only its mode is set to `0600`): after an upgrade without reboot
+  the previous token stays valid until the next boot. Anything else at that path is replaced.
+- Every reader must run as root on the host: the kiosk container (privileged, no `--user`, no
+  userns remap), calaos_server and `calaos-os`. A kiosk run under another uid or a userns remap
+  cannot read the token and sends an empty bearer.
 
 On `/api/v2/` a bearer failure answers `401` with the code `bad_bearer` (see the error
 vocabulary). A `401` is never anything but `bad_bearer` or `bad_session`: a client that gets a
@@ -449,9 +459,10 @@ vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_n
 
 ## Legacy API (frozen)
 
-These routes answer exactly as they did before `/api/v2/`. `app/testdata/golden/` pins their
-status, content type and body, and `app/legacy_golden_test.go` fails on any change. `<err>` is
-the raw Go error text.
+These routes answer exactly as they did before `/api/v2/`, except that `?token=` now only
+authenticates `/api/events` (see Authentication). `app/testdata/golden/` pins their status,
+content type and body, and `app/legacy_golden_test.go` fails on any change. `<err>` is the raw
+Go error text.
 
 | Method | Path | Success | Error |
 |---|---|---|---|

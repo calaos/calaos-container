@@ -55,13 +55,13 @@ func NewTokenMiddleware() fiber.Handler {
 			}
 		}
 
-		// Published kiosks open the legacy /api/events with ?token= since
-		// they cannot set a header there. /api/v2 never had a query token.
+		// Published kiosks open the legacy /api/events WebSocket with ?token=
+		// because they cannot set a header there. Every other route, /api/v2
+		// included, takes the header only.
 		v2 := isV2Path(c.Path())
-		if token == "" && !v2 {
+		if token == "" && isLegacyEventsPath(c.Path()) {
 			token = c.Query("token")
 		}
-		c.Locals("token", token)
 
 		expected, ok := currentToken()
 		if !ok {
@@ -77,8 +77,7 @@ func NewTokenMiddleware() fiber.Handler {
 			})
 		}
 
-		//Check token validity (constant-time to avoid a timing side-channel)
-		if subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+		if !tokenEqual(token, expected) {
 			if v2 {
 				return sendAPIError(c, errBadBearer())
 			}
@@ -150,6 +149,21 @@ func currentToken() (string, bool) {
 	tokenStr = trimmed
 	tokenValid = true
 	return tokenStr, true
+}
+
+// tokenEqual compares in constant time so a client cannot recover the token
+// byte by byte from response timings. An empty expected token never matches.
+func tokenEqual(got, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(expected)) == 1
+}
+
+// isLegacyEventsPath matches the paths fiber routes to the legacy /api/events
+// (case-insensitive, trailing slashes ignored).
+func isLegacyEventsPath(p string) bool {
+	return strings.TrimRight(strings.ToLower(p), "/") == "/api/events"
 }
 
 func errBadBearer() *apiError {

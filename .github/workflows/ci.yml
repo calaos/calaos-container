@@ -56,6 +56,9 @@ jobs:
       - name: go test -race
         run: make test
 
+      - name: init_calaosfs under concurrent units
+        run: scripts/tests/init_calaosfs_test.sh
+
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
