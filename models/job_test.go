@@ -301,7 +301,6 @@ func TestJobHeldPackage(t *testing.T) {
 	if CurrentJob() != nil || len(env.apt.installs) != 0 {
 		t.Fatalf("held package: job %+v, installs %v", CurrentJob(), env.apt.installs)
 	}
-	// The lock was released.
 	run, err := StartJob(JobKindUpgrade, "calaos-server")
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +308,6 @@ func TestJobHeldPackage(t *testing.T) {
 	_ = run.Run()
 	run.Complete()
 
-	// Released, the package is an update again.
 	env.apt.cache[1].Held = false
 	if err := CheckUpdates(); err != nil {
 		t.Fatal(err)
