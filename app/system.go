@@ -347,7 +347,7 @@ func (a *AppServer) apiSystemInfo(c *fiber.Ctx) error {
 // guardedError maps a RebootGuard failure to the v2 vocabulary.
 func guardedError(err error) error {
 	if errors.Is(err, models.ErrUpgradeInProgress) {
-		return errUpgradeInProgress()
+		return errUpgradeInProgress(err)
 	}
 	return errInternal(err)
 }

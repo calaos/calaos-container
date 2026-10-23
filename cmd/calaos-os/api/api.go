@@ -50,11 +50,13 @@ type Envelope struct {
 	Data  json.RawMessage `json:"data"`
 }
 
-// APIError is an error answer of the daemon. Code is set by /api/v2 only.
+// APIError is an error answer of the daemon. Code and Data are set by
+// /api/v2 only.
 type APIError struct {
 	Status int
 	Code   string
 	Msg    string
+	Data   json.RawMessage
 }
 
 func (e *APIError) Error() string {
@@ -242,7 +244,7 @@ func (capi *CalaosApi) callV2(token, method, path string, body, out any) error {
 	}
 
 	if env.Error || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{Status: resp.StatusCode, Code: env.Code, Msg: env.Msg}
+		return &APIError{Status: resp.StatusCode, Code: env.Code, Msg: env.Msg, Data: env.Data}
 	}
 
 	if out != nil {
@@ -309,8 +311,8 @@ func apiError(resp *http.Response, body []byte) error {
 	return &APIError{Status: resp.StatusCode}
 }
 
-// UpgradePackages upgrades all packages. Upgrades stay on the legacy
-// synchronous route until /api/v2 serves them as jobs.
+// UpgradePackages upgrades all packages on the legacy synchronous route, for
+// a daemon that predates upgrade jobs.
 func (capi *CalaosApi) UpgradePackages(token string) (err error) {
 	resp, body, err := capi.callWithToken("POST", "/api/update/upgrade-all", token, nil, nil)
 	if err != nil {
@@ -320,8 +322,7 @@ func (capi *CalaosApi) UpgradePackages(token string) (err error) {
 	return apiError(resp, body)
 }
 
-// UpdatePackage upgrades a single package, on the legacy route like
-// UpgradePackages.
+// UpdatePackage upgrades a single package on the legacy synchronous route.
 func (capi *CalaosApi) UpdatePackage(token string, pkg string) (err error) {
 	params := url.Values{
 		"package": []string{pkg},
@@ -333,6 +334,78 @@ func (capi *CalaosApi) UpdatePackage(token string, pkg string) (err error) {
 	}
 
 	return apiError(resp, body)
+}
+
+// Job is an upgrade job of the daemon (docs/API.md, Upgrade jobs).
+type Job struct {
+	ID             string `json:"id"`
+	Kind           string `json:"kind"`
+	Package        string `json:"package,omitempty"`
+	Status         string `json:"status"`
+	Error          string `json:"error,omitempty"`
+	RebootRequired bool   `json:"reboot_required"`
+	DaemonRestart  bool   `json:"daemon_restart"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at,omitempty"`
+}
+
+// Terminal reports whether the job has ended.
+func (j *Job) Terminal() bool {
+	return j.Status == "done" || j.Status == "error"
+}
+
+// ErrNoJobs means the daemon in memory runs upgrades on the legacy
+// synchronous routes only.
+var ErrNoJobs = errors.New("daemon does not run upgrade jobs")
+
+// StartUpgrade starts an upgrade job: of pkg, or of everything when pkg is
+// empty. The daemon answers at once; the job is followed on the events.
+func (capi *CalaosApi) StartUpgrade(token, pkg string) (*Job, error) {
+	path, body := "/update/upgrade-all", any(nil)
+	if pkg != "" {
+		path, body = "/update/upgrade", struct {
+			Package string `json:"package"`
+		}{pkg}
+	}
+	job := &Job{}
+	err := capi.callV2(token, "POST", path, body, job)
+	var ae *APIError
+	// A daemon serving /api/v2 before jobs answers not_found on these routes.
+	if errors.Is(err, errNoV2) || (errors.As(err, &ae) && ae.Status == http.StatusNotFound && ae.Code == "not_found") {
+		return nil, ErrNoJobs
+	}
+	if err != nil {
+		return nil, fmt.Errorf("StartUpgrade failed: %w", err)
+	}
+	if job.ID == "" {
+		return nil, fmt.Errorf("StartUpgrade failed: no job in the answer")
+	}
+	return job, nil
+}
+
+// JobStatus returns the running job, else the last one, or nil.
+func (capi *CalaosApi) JobStatus(token string) (*Job, error) {
+	var data struct {
+		Job *Job `json:"job"`
+	}
+	if err := capi.callV2(token, "GET", "/update/status", nil, &data); err != nil {
+		return nil, fmt.Errorf("JobStatus failed: %w", err)
+	}
+	return data.Job, nil
+}
+
+// InProgressJobID returns the running job id of an upgrade_in_progress
+// error, or "".
+func InProgressJobID(err error) string {
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != "upgrade_in_progress" || len(ae.Data) == 0 {
+		return ""
+	}
+	var d struct {
+		JobID string `json:"job_id"`
+	}
+	_ = json.Unmarshal(ae.Data, &d)
+	return d.JobID
 }
 
 // UpgradeStatus returns the status of the upgrade

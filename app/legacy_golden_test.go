@@ -35,6 +35,7 @@ type stubBackend struct {
 	upgradeErr    error
 	upgradeAllErr error
 	upgradedPkg   string
+	job           *models.Job
 	status        structs.Status
 	sysInfo       *models.SystemInfo
 	sysInfoErr    error
@@ -74,6 +75,17 @@ func (p *fakeProcess) ExitCode() (int, bool) {
 	}
 }
 
+// stubRun is a job whose apt run returns err.
+type stubRun struct {
+	job       models.Job
+	err       error
+	completed bool
+}
+
+func (r *stubRun) Job() models.Job { return r.job }
+func (r *stubRun) Run() error      { return r.err }
+func (r *stubRun) Complete()       { r.completed = true }
+
 type stubResult struct {
 	out string
 	err error
@@ -83,7 +95,7 @@ func (s *stubBackend) install(t *testing.T) {
 	t.Helper()
 
 	prev := []any{runCommand, checkUpdates, getNewVersions, getInstalledPackages,
-		upgradeAll, upgradePackage, updateStatus, getSystemInfo, getNetInterfaces,
+		startUpgradeJob, currentJob, updateStatus, getSystemInfo, getNetInterfaces,
 		interfaceExists, configureNetInterface, installLogFile, installExitCodeFile,
 		rebootGuard, startLoggedCommand}
 
@@ -108,11 +120,19 @@ func (s *stubBackend) install(t *testing.T) {
 		return s.newVersions
 	}
 	getInstalledPackages = func() (structs.ImageMap, error) { return s.installed, s.installedErr }
-	upgradeAll = func() error { return s.upgradeAllErr }
-	upgradePackage = func(pkg string) error {
-		s.upgradedPkg = pkg
-		return s.upgradeErr
+	startUpgradeJob = func(kind, pkg string) (upgradeRun, error) {
+		err := s.upgradeAllErr
+		if kind == models.JobKindUpgrade {
+			s.upgradedPkg = pkg
+			err = s.upgradeErr
+		}
+		// Refusals come before any job exists.
+		if err != nil && (err.Error() == models.ErrUpgradeInProgress.Error() || err.Error() == models.ErrPackageNotFound.Error()) {
+			return nil, err
+		}
+		return &stubRun{job: models.Job{ID: "0123456789abcdef", Kind: kind, Package: pkg, Status: models.JobRunning}, err: err}, nil
 	}
+	currentJob = func() *models.Job { return s.job }
 	updateStatus = func() (*structs.Status, error) {
 		st := s.status
 		return &st, nil
@@ -148,8 +168,8 @@ func (s *stubBackend) install(t *testing.T) {
 		checkUpdates = prev[1].(func() error)
 		getNewVersions = prev[2].(func() structs.ImageMap)
 		getInstalledPackages = prev[3].(func() (structs.ImageMap, error))
-		upgradeAll = prev[4].(func() error)
-		upgradePackage = prev[5].(func(string) error)
+		startUpgradeJob = prev[4].(func(string, string) (upgradeRun, error))
+		currentJob = prev[5].(func() *models.Job)
 		updateStatus = prev[6].(func() (*structs.Status, error))
 		getSystemInfo = prev[7].(func() (*models.SystemInfo, error))
 		getNetInterfaces = prev[8].(func() ([]*structs.NetInterface, error))

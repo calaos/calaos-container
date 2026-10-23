@@ -4,23 +4,19 @@ package main
 //It's main purpose is to start/manage updates from CLI
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/calaos/calaos-container/cmd/calaos-os/api"
-	"github.com/calaos/calaos-container/events"
 	"github.com/calaos/calaos-container/models/structs"
 
 	"github.com/fatih/color"
 	cli "github.com/jawher/mow.cli"
 	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/raoulh/go-progress"
 )
 
 const (
@@ -29,11 +25,6 @@ const (
 	CharArrow = "‒▶"
 
 	TOKEN_FILE = "/run/calaos/calaos-ct.token"
-
-	// upgradeOverallTimeout bounds how long cmdUpgrade will wait on the
-	// event bus for a terminal (done/error) event before giving up, so a
-	// daemon that stops publishing mid-upgrade doesn't hang the CLI forever.
-	upgradeOverallTimeout = 30 * time.Minute
 )
 
 // Exit codes let calling shell scripts distinguish failure classes instead
@@ -205,170 +196,9 @@ func cmdUpgrade(cmd *cli.Cmd) {
 			exit(err, ExitConfig)
 		}
 
-		// Connect to the event bus BEFORE issuing the upgrade request: the
-		// POST is blocking on the daemon side and progress events can start
-		// flowing as soon as it starts, so we must be subscribed first.
-		conn, err := a.EventsWS(token)
-		if err != nil {
-			if errors.Is(err, api.ErrDaemonTooOld) {
-				exit(fmt.Errorf("le daemon calaos-container est trop ancien et ne supporte pas /api/events. Redémarrez le service (systemctl restart calaos-container) puis réessayez"), ExitServer)
-			}
-			exitAPIErr(err)
+		if err := runUpgrade(a, token, *pkg); err != nil {
+			exit(err, exitCode(err))
 		}
-		defer func() { _ = conn.Close() }()
-
-		// Run the (blocking) upgrade request in the background and collect
-		// its outcome via a channel.
-		postDone := make(chan error, 1)
-		go func() {
-			if (*pkg) != "" {
-				postDone <- a.UpdatePackage(token, *pkg)
-			} else {
-				postDone <- a.UpgradePackages(token)
-			}
-		}()
-
-		bar := progress.New(100)
-		bar.Format = progress.ProgressFormats[0]
-		bar.ShowNumeric = false
-		bar.ShowTextSuffix = true
-
-		// Decode incoming events in a dedicated goroutine so the main loop can
-		// also react to the POST outcome: an upgrade rejected before it starts
-		// (unknown package, upgrade already in progress...) never publishes any
-		// terminal event, and waiting on the WebSocket alone would hang.
-		stCh := make(chan structs.Status)
-		readErr := make(chan error, 1)
-		go func() {
-			first := true
-			for {
-				var ev api.Event
-				if err := conn.ReadJSON(&ev); err != nil {
-					readErr <- err
-					return
-				}
-
-				if ev.Type != events.EventUpgradeProgress {
-					// Ignore unknown event types (the bus is extensible).
-					continue
-				}
-
-				var st structs.Status
-				if err := json.Unmarshal(ev.Data, &st); err != nil {
-					continue
-				}
-
-				// The first event is the connection snapshot: it reflects the
-				// daemon state BEFORE our upgrade request was sent (possibly
-				// the stale terminal state of a previous upgrade), never ours.
-				if first {
-					first = false
-					continue
-				}
-
-				stCh <- st
-			}
-		}()
-
-		currentPkg := ""
-		var st structs.Status
-		var postErr error
-		postCh := postDone
-		var giveUp <-chan time.Time
-		// overallDeadline is a wall-clock backstop: if the daemon stops
-		// publishing events mid-upgrade (crash, restart...) the CLI must
-		// not hang forever waiting on the WebSocket.
-		overallDeadline := time.After(upgradeOverallTimeout)
-
-		// clearBarLine erases the live progress-bar line so permanent
-		// output (package-done lines, errors) never lands after the bar's
-		// space padding. The bar library itself only ever repaints over
-		// the current line with \r and cannot print at 100% (Set(total)
-		// clears instead of painting), so all permanent lines are ours.
-		clearBarLine := func() { fmt.Print("\r\x1b[2K") }
-
-	readLoop:
-		for {
-			select {
-			case s := <-stCh:
-				// "idle" is the return-to-rest event (reset of a previous
-				// upgrade): nothing to render.
-				if s.Status == "idle" {
-					continue
-				}
-				st = s
-
-				// Global phases (download, cache rebuild...) publish
-				// events with an empty CurrentPkg: they only move the
-				// total bar and must not be treated as a package
-				// transition, or each one would flush a bogus
-				// "installed" line.
-				if st.CurrentPkg != "" {
-					if currentPkg != "" && currentPkg != st.CurrentPkg {
-						clearBarLine()
-						fmt.Printf("%s %s installed\n", green(CharCheck), currentPkg)
-					}
-					currentPkg = st.CurrentPkg
-					bar.SetTextSuffix(fmt.Sprintf("  [%d/%d] %s (%s) %d%%", st.PkgIndex, st.PkgCount, st.CurrentPkg, st.CurrentStep, st.CurrentPercent))
-				}
-				bar.Set(st.TotalPercent)
-
-				switch st.Status {
-				case "done", "error":
-					break readLoop
-				}
-
-			case err := <-readErr:
-				clearBarLine()
-				exit(fmt.Errorf("connexion au daemon perdue: %w", err), ExitNetwork)
-
-			case postErr = <-postCh:
-				postCh = nil
-				if postErr != nil {
-					// The upgrade request itself failed (network error, or
-					// the daemon rejected it before starting: unknown
-					// package, upgrade already in progress...). No terminal
-					// event will ever be published for it, so there is
-					// nothing to wait for: abort immediately instead of
-					// polling the event bus.
-					break readLoop
-				}
-				// The request succeeded; if the upgrade actually ran, its
-				// terminal done/error event has already been published or
-				// will arrive shortly. Leave a short grace period for it.
-				giveUp = time.After(3 * time.Second)
-
-			case <-giveUp:
-				break readLoop
-
-			case <-overallDeadline:
-				clearBarLine()
-				exit(fmt.Errorf("upgrade timed out after %s waiting for the daemon", upgradeOverallTimeout), ExitNetwork)
-			}
-		}
-
-		_ = conn.Close()
-
-		if postCh != nil {
-			postErr = <-postDone
-		}
-
-		// Leave the bar line before printing any permanent outcome; a
-		// no-op if the bar never painted (e.g. rejected upgrade).
-		clearBarLine()
-
-		if st.Status == "error" {
-			exit(fmt.Errorf("%s", st.Error), ExitServer)
-		}
-
-		if postErr != nil {
-			exitAPIErr(postErr)
-		}
-
-		if currentPkg != "" {
-			fmt.Printf("%s %s installed\n", green(CharCheck), currentPkg)
-		}
-		fmt.Printf("%s Done.\n", green(CharCheck))
 	}
 }
 

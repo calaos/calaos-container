@@ -51,6 +51,12 @@ type AppServer struct {
 	sessions sessionValidator
 
 	admin *admin.Manager
+
+	// wsConns counts the event streams, so Shutdown lets them flush the
+	// last events before the process exits. No Add once wsClosing is set.
+	wsMu      sync.Mutex
+	wsClosing bool
+	wsConns   sync.WaitGroup
 }
 
 var logging *logrus.Entry
@@ -196,6 +202,8 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Get("/update/available", s, a.v2UpdateAvailable)
 	v2.Get("/update/installed", s, a.v2UpdateInstalled)
 	v2.Get("/update/status", s, a.v2UpdateStatus)
+	v2.Post("/update/upgrade-all", s, a.v2UpdateUpgradeAll)
+	v2.Post("/update/upgrade", s, a.v2UpdateUpgrade)
 
 	v2.Post("/system/reboot", s, a.v2SystemReboot)
 	v2.Post("/system/restart", s, a.v2SystemRestart)
@@ -333,10 +341,25 @@ func validateOrigins(origins string) error {
 
 // Stop the app
 func (a *AppServer) Shutdown() {
+	a.wsMu.Lock()
+	a.wsClosing = true
+	a.wsMu.Unlock()
+
 	// Close the event hub first: hijacked WebSocket connections are not
 	// closed by fiber's Shutdown, so closing the subscriber channels is what
 	// makes the WS handlers return.
 	a.hub.Close()
 	_ = a.appFiber.Shutdown()
 	a.wgDone.Wait()
+
+	flushed := make(chan struct{})
+	go func() {
+		a.wsConns.Wait()
+		close(flushed)
+	}()
+	select {
+	case <-flushed:
+	case <-time.After(wsWriteWait):
+		logging.Warnln("event streams still open at shutdown")
+	}
 }

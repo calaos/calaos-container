@@ -10,6 +10,10 @@ import "sync"
 // in progress.
 const EventUpgradeProgress = "upgrade_progress"
 
+// EventUpgradeJob carries an upgrade job when it is created and when it
+// reaches a terminal state.
+const EventUpgradeJob = "upgrade_job"
+
 // subscriberBufferSize is the size of the per-subscriber channel buffer.
 // Publish is non-blocking: if a subscriber's channel is full, the event is
 // dropped for that subscriber.
