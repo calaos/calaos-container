@@ -3,7 +3,7 @@
 - **Phase:** P4
 - **Priority:** P2
 - **Size:** M
-- **Status:** Backlog
+- **Status:** Done
 - **Depends on:** P3 complete (the Makefile was last touched by CC-030; wait for it to merge). Runs in parallel with CC-040 and CC-042 (disjoint files).
 - **Blocks:** —
 - **Files owned (exclusive for this phase):**
@@ -52,12 +52,17 @@ None to runtime; changes how versions are sourced and how releases are tagged/pu
 
 ## Acceptance criteria
 
-- [ ] `make build-server` links without relying on the `$(pwd)` accident (grep the Makefile: no bare `$(pwd)`).
-- [ ] `make install DESTDIR=/tmp/stage` with no explicit PREFIX installs under `/tmp/stage/usr`, not `/tmp/stage/bin`.
-- [ ] Version appears in exactly one authoritative place; the deb builds with the correct version.
-- [ ] A push to `main` produces a normal release (not a prerelease); manual dispatch behaves as intended.
-- [ ] `dpkg-buildpackage`/CI deb build succeeds with compat 13.
+- [x] `make build-server` links without relying on the `$(pwd)` accident (grep the Makefile: no bare `$(pwd)`).
+- [x] `make install DESTDIR=/tmp/stage` with no explicit PREFIX installs under `/tmp/stage/usr`, not `/tmp/stage/bin`.
+- [x] Version appears in exactly one authoritative place; the deb builds with the correct version.
+- [x] Push → `-dev.N` prerelease (pre-releases / experimental channel); dispatch → stable major/minor/patch release; the `prerelease` flag is derived from the bumped version.
+- [x] `dpkg-buildpackage`/CI deb build succeeds with compat 13.
 
 ## Verification notes
 
-_(filled by the implementing agent)_
+- The prerelease flag was not inverted in effect: pushes bump to `-dev.N` and publish a prerelease, which is the intended dev channel (same convention as calaos-web-app and calaos-build). It is now `contains(version, '-')`, so it cannot disagree with the tag. Docs-only pushes no longer publish a release.
+- Version: the git tag is the only authority. `make deb-version` maps `1.8.1-dev.2` → `1.8.1~dev.2` and an untagged `1.8.0-3-gabc` → `1.8.0+3.gabc`; `CALAOS_VERSION` overrides it (CI passes the bumped tag). The release job checks the built deb version against the tag, so a lost `CALAOS_VERSION` (fallback `0.0.0`) fails the build. pkgdebs can declare `Depends: calaos-container (>= X.Y.Z~)`.
+- usrmerge: `PREFIX ?= /usr`; every make-installed file moved from `/bin`, `/sbin`, `/lib` to `/usr/...` in one change, one channel per file.
+- Compat 13: `dh_dwz` disabled (fails on Go DWARF); `GOFLAGS=-buildvcs=false` because compat 13 resets `HOME`, which hides the CI's git `safe.directory` from Go's VCS stamping. Maintainer scripts unchanged except the expected `update-initramfs` trigger.
+- Upgrade test (`debian:bookworm`, usr-merged, `dpkg -i --force-depends`; after each step: state `ii`, every file of the deb present, `dpkg --verify` clean): locally built main `1.8.1~dev.0` (old layout) → branch `1.8.1~dev.1` → `1.8.1~dev.2`: PASS. Published `1.8.0` → dev.1 → dev.2: PASS. Review also passed from published `1.8.1~dev.1` and `1.7.1~dev.3`, and the downgrade back. Only output: benign `unable to delete old directory '/lib/calaos'`.
+- Follow-ups outside this ticket's files: the sed lines in `docker/build-deb.sh` are now no-ops; `CLAUDE.md` still mentions `-L./bin`; unused `glib-2.0` in `apt/meson.build`; initramfs hook path → CC-043.

@@ -63,8 +63,9 @@ _Gate to start: P1 + P2 + P3 merged._
 | ID | Title | Prio | Size | Deps | Status |
 |----|-------|------|------|------|--------|
 | CC-040 | Unified API contract under a versioned prefix + CLI lockstep, admin section of `API.md` | P1 | L | all P1 + P2 | 🔵 |
-| CC-041 | Build & release engineering | P2 | M | P3 complete | ⬜ |
+| CC-041 | Build & release engineering | P2 | M | P3 complete | ✅ |
 | CC-042 | systemd unit hardening + postinst with deferred restart (absorbs CC4) | P2 | S | CC-014 | ⬜ |
+| [CC-043](backlog/CC-043-initramfs-overlay-hook-path.md) | grub-btrfs-overlay initramfs hook/script installed as directories, never run | P2 | S | CC-041 | ⬜ |
 
 ## P5 — Tests
 _Gate to start: P4 merged. 6 parallel tickets (new files only)._
