@@ -45,20 +45,32 @@ func (a *AppServer) apiUpdateUpgradeAll(c *fiber.Ctx) error {
 	return a.legacyUpgrade(c, models.JobKindUpgradeAll, "")
 }
 
+// apiUpdateUpgrade refuses a name outside the package rule with the body of
+// an unknown package: no such name has a pending update anyway.
 func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) error {
-	return a.legacyUpgrade(c, models.JobKindUpgrade, c.Query("package"))
+	pkg := c.Query("package")
+	if !validPackageName(pkg) {
+		return legacyError(c, fiber.StatusInternalServerError, models.ErrPackageNotFound)
+	}
+	return a.legacyUpgrade(c, models.JobKindUpgrade, pkg)
 }
 
 // legacyUpgrade answers once apt has ended: old kiosks take any 2xx for a
-// finished upgrade. The job completes after the answer is written, so the
-// terminal event and a self-upgrade exit never overtake it.
+// finished upgrade. The job completes before the answer, so a kiosk posting
+// the next package of its queue right away never finds the lock held; a
+// self-upgrade exit still waits for the answer (graceful server shutdown).
 func (a *AppServer) legacyUpgrade(c *fiber.Ctx, kind, pkg string) error {
 	run, err := startUpgradeJob(kind, pkg)
 	if err != nil {
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 	err = run.Run()
-	a.afterResponse(c, run.Complete)
+	if run.Job().DaemonRestart {
+		// A pipelined answer is only flushed with the next one, which this
+		// daemon will not serve.
+		c.Context().SetConnectionClose()
+	}
+	run.Complete()
 	if err != nil {
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
@@ -80,7 +92,7 @@ func (a *AppServer) apiUpdateStatus(c *fiber.Ctx) (err error) {
 func (a *AppServer) v2UpdateCheck(c *fiber.Ctx) error {
 	if err := checkUpdates(); err != nil {
 		if errors.Is(err, models.ErrUpgradeInProgress) {
-			return errUpgradeInProgress()
+			return errUpgradeInProgress(err)
 		}
 		return errInternal(err)
 	}
@@ -146,7 +158,7 @@ func startV2Job(c *fiber.Ctx, kind, pkg string) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, models.ErrUpgradeInProgress):
-			return errUpgradeInProgress()
+			return errUpgradeInProgress(err)
 		case errors.Is(err, models.ErrPackageNotFound):
 			return newAPIError(fiber.StatusNotFound, codePackageNotFound, "no pending update for this package")
 		}

@@ -154,6 +154,20 @@ the session path (calaos_server) never reaches them.
 (`status`, `total_percent`, `current_pkg`, `current_step`, `current_percent`, `pkg_index`,
 `pkg_count`, `packages[]`, `message`, `error`, ...).
 
+What each `<Status>` field carries, on every surface (REST, `/api/events`, `/api/v2/events`):
+
+| Field | Content |
+|---|---|
+| `status`, `total_percent`, `current_step`, `current_percent`, `pkg_index`, `pkg_count`, `progress`, `progress_total` | state and counters, no text from apt |
+| `current_pkg`, `packages[].name` | Debian package names of the transaction (no version, path or URL): the box's package inventory |
+| `packages[].state`, `packages[].percent` | per-package state and counter |
+| `error` | on `error`: the job's summary (`upgrade failed` or `upgrade failed: <failed packages>`), never apt or dpkg output |
+| `message` | never filled: apt messages (repository URLs, archive paths) go to the daemon log only |
+
+A relay that must not expose the inventory drops `current_pkg` and `packages[].name`; nothing
+else in `<Status>` comes from apt. The legacy `POST /api/update/upgrade*` error body still carries
+the raw apt error (frozen, bearer only).
+
 ## Sessions
 
 An admin session is what `admin/verify` returns after a correct admin password. calaos_server
@@ -302,8 +316,8 @@ synchronous behaviour: they answer when apt ends.
 | `package` | string | for `upgrade` only |
 | `status` | string | `running`, `done` or `error` |
 | `error` | string | on `error`: a short summary, without apt or dpkg output (the journal has it): `interrupted`, `upgrade failed`, or `upgrade failed: <failed packages>` |
-| `reboot_required` | bool | computed by the daemon from what was installed, not from snapshots: a kernel, firmware or microcode package (the kiosk's kernel group: `linux-image*`, `linux-headers*`, `linux-firmware*`, `linux-libc*`, `linux-kbuild*`, `linux-compiler*`, `firmware-linux`, `firmware-linux-nonfree`, `intel-microcode`, `amd64-microcode`) |
-| `daemon_restart` | bool | the run installed calaos-container and replaced the running binary: the daemon exits after the terminal event and systemd starts the new binary |
+| `reboot_required` | bool | computed by the daemon from what was installed (removals excluded), not from snapshots: a kernel, firmware or microcode package (`linux-image*`, `linux-firmware*`, `firmware-linux`, `firmware-linux-nonfree`, `intel-microcode`, `amd64-microcode`, `raspberrypi-kernel`, `raspberrypi-bootloader`, `raspi-firmware`) |
+| `daemon_restart` | bool | the run replaced the running calaos-container binary: the daemon exits after the terminal event and systemd starts the new binary, whose `dpkg --configure -a` finishes a half-configured package |
 | `started_at`, `finished_at` | string | RFC 3339, UTC; `finished_at` once terminal |
 
 **Rules**
@@ -319,26 +333,34 @@ synchronous behaviour: they answer when apt ends.
   answers `409 {"error": true, "msg": "upgrade already in progress"}` during a run, so that an old
   kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and ignore the reboot result.
   The legacy `POST /api/system/rollback_snapshot` is unchanged.
-- `package` must match `^[A-Za-z0-9.+-]+$`, start with a letter or a digit, contain no `..` and
-  be at most 128 characters long; otherwise `400 invalid_request`. A valid name without a
+- `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
+  digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
+  The legacy `POST /api/update/upgrade?package=` applies the same rule and answers its
+  `"package not found"` body. A valid name without a
   pending update gives `404 package_not_found`, and no job.
-- The last job is persisted in `/var/log/calaos-container/last_job.json` (0600). `/var/log` is its
+- The last job is persisted in `/var/log/calaos-container/last_job.json` (0600, in a 0700
+  directory owned by the daemon; neither is used through a symlink). `/var/log` is its
   own btrfs subvolume: it survives daemon restarts and reboots, and no snapshot or rollback ever
   restores it. `GET update/status` returns the running job, or the last finished one, or `null`
   if none ever ran.
-- The job records the kernel boot id (`/proc/sys/kernel/random/boot_id`). Once the boot id
-  differs, the daemon reports `reboot_required: false` for it: the reboot has happened.
+- The job records the kernel boot id (`/proc/sys/kernel/random/boot_id`, else the `btime` of
+  `/proc/stat`). Once the boot id differs, the daemon reports `reboot_required: false` for it: the
+  reboot has happened. A job started while the previous one still requires a reboot on the same
+  boot requires it too, whatever it installs.
 - At start, before any route is served, a persisted job still `running` (crash, OOM kill)
   becomes `error` with `error: "interrupted"` and a `finished_at`. The interrupted dpkg run itself
   is resumed by the unit's `dpkg --configure -a`.
 - Progress is published as `upgrade_progress` events, each job state change as `upgrade_job`
   (see Events). The terminal `upgrade_job` is published before the daemon exits for a
-  self-upgrade, and after the legacy POST that started the run (if any) has been answered.
+  self-upgrade. A legacy run completes (lock released, terminal `upgrade_job`) before its POST is
+  answered, so the next POST of a kiosk queue never finds it in progress; the daemon exits only
+  after that POST has been answered, on a connection it closes.
 - After a self-upgrade, until it exits, the daemon keeps the run's lock (runs, checks and reboots
   are refused as during a run, without `job_id`) and the progress stays at its terminal `status`: the
   deferred restart of the package (CC-042) never sees it idle, so it never restarts it a second
   time.
-- A daemon asked to stop while a job runs waits for apt to end, within the unit's stop timeout.
+- A daemon asked to stop while a job runs waits up to 25 s for apt to end; past that the job is
+  cut and reads `interrupted` at the next start.
 
 A client following a job:
 
@@ -347,7 +369,9 @@ A client following a job:
 3. renders `upgrade_progress`, and stops on the `upgrade_job` with that `id` and a terminal
    `status`;
 4. after any disconnection (including the daemon's own restart), reconnects with backoff and
-   reads `GET update/status`: events are not replayed, the persisted job is the source of truth.
+   reads `GET update/status`: events are not replayed, the persisted job is the source of truth;
+5. also reads `GET update/status` now and then (`calaos-os`: every 15 s), since a subscriber that
+   falls behind loses events, the terminal `upgrade_job` included.
 
 If the terminal `upgrade_job` arrives before the POST answer, the client reads
 `GET update/status` once it has the `id`.

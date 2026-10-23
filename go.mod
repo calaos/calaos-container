@@ -8,7 +8,6 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jawher/mow.cli v1.2.0
 	github.com/knadh/koanf v1.5.0
-	github.com/valyala/fasthttp v1.52.0
 	golang.org/x/crypto v0.31.0
 	golang.org/x/term v0.27.0
 )
@@ -24,6 +23,7 @@ require (
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/savsgio/gotils v0.0.0-20240303185622-093b76447511 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
+	github.com/valyala/fasthttp v1.52.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
 	golang.org/x/net v0.33.0 // indirect
 	modernc.org/libc v1.34.11 // indirect

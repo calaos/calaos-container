@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -233,6 +234,9 @@ func (m *MultiError) Error() string {
 // events emitted by the C++ layer (the exact transaction, dependencies
 // included).
 func initUpgradeStatus() {
+	removedMu.Lock()
+	removedPkgs = map[string]bool{}
+	removedMu.Unlock()
 	upgradeStatus.SetStatus(structs.Status{
 		Status:        "upgrading",
 		TotalPercent:  0,
@@ -287,6 +291,11 @@ func applyAptProgress(p apt.Progress) {
 
 	// A "pending" event declares a package that is part of the transaction.
 	if p.Stage == "pending" {
+		if p.Msg == "remove" {
+			removedMu.Lock()
+			removedPkgs[p.Pkg] = true
+			removedMu.Unlock()
+		}
 		st.Packages = append(st.Packages, structs.PkgStatus{
 			Name:  p.Pkg,
 			State: structs.PkgStatePending,
@@ -337,7 +346,9 @@ func applyAptProgress(p apt.Progress) {
 		st.CurrentPercent = p.PkgPercent
 	}
 	st.TotalPercent = p.TotalPercent
-	st.Message = p.Msg
+	// apt messages carry repository URLs and archive paths: they stay in the
+	// journal, the progress goes to every event subscriber.
+	logging.Debugf("apt %s %s: %s", p.Stage, p.Pkg, p.Msg)
 
 	// Retro-compat with the old coarse progress fields.
 	st.Progress = st.PkgIndex
@@ -346,7 +357,21 @@ func applyAptProgress(p apt.Progress) {
 	upgradeStatus.SetStatus(st)
 }
 
+// removedPkgs are the packages the current transaction removes, guarded by
+// removedMu: apt reports them done like the installed ones.
+var (
+	removedMu   sync.Mutex
+	removedPkgs = map[string]bool{}
+)
+
+func isRemoved(name string) bool {
+	removedMu.Lock()
+	defer removedMu.Unlock()
+	return removedPkgs[name]
+}
+
 // finishUpgrade writes the terminal status (done/error) on the shared Status.
+// Error gets the job's summary: the apt error itself is only logged.
 // It MUST be called before resetStatus() so the terminal event is published
 // on the hub before the return-to-idle event.
 func finishUpgrade(err error) {
@@ -354,7 +379,7 @@ func finishUpgrade(err error) {
 
 	if err != nil {
 		st.Status = "error"
-		st.Error = err.Error()
+		st.Error = jobErrorSummary(st)
 		upgradeStatus.SetStatus(st)
 		return
 	}

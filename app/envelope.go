@@ -7,6 +7,8 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/sirupsen/logrus"
+
+	"github.com/calaos/calaos-container/models"
 )
 
 const apiV2Prefix = "/api/v2"
@@ -74,9 +76,14 @@ func errInvalid(msg string) *apiError {
 }
 
 // errUpgradeInProgress carries the running job, if the lock holder is one.
-func errUpgradeInProgress() *apiError {
+func errUpgradeInProgress(err error) *apiError {
 	e := newAPIError(fiber.StatusConflict, codeUpgradeInProgress, "an upgrade is already in progress")
-	if id := runningJobID(); id != "" {
+	id := runningJobID()
+	var ip *models.InProgressError
+	if errors.As(err, &ip) {
+		id = ip.JobID
+	}
+	if id != "" {
 		e.data = fiber.Map{"job_id": id}
 	}
 	return e

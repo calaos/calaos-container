@@ -33,10 +33,11 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 	t.Cleanup(srv.Close)
 	d.api = api.NewCalaosApi(strings.TrimPrefix(srv.URL, "http://"))
 
-	prev := []time.Duration{upgradeOverallTimeout, reconnectFirstDelay, reconnectGiveUp, legacyGrace}
+	prev := []time.Duration{upgradeOverallTimeout, reconnectFirstDelay, reconnectGiveUp, legacyGrace, jobPollInterval}
 	upgradeOverallTimeout, reconnectFirstDelay, reconnectGiveUp, legacyGrace = 10*time.Second, 10*time.Millisecond, 2*time.Second, 100*time.Millisecond
+	jobPollInterval = time.Hour
 	t.Cleanup(func() {
-		upgradeOverallTimeout, reconnectFirstDelay, reconnectGiveUp, legacyGrace = prev[0], prev[1], prev[2], prev[3]
+		upgradeOverallTimeout, reconnectFirstDelay, reconnectGiveUp, legacyGrace, jobPollInterval = prev[0], prev[1], prev[2], prev[3], prev[4]
 	})
 	return d
 }
@@ -334,5 +335,23 @@ func TestUpgradeDaemonWithoutEvents(t *testing.T) {
 	err := wait(t, d.run(t, ""))
 	if err == nil || exitCode(err) != ExitServer {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// TestUpgradeDroppedTerminalEvent: the daemon dropped the terminal event, the
+// periodic job read ends the wait.
+func TestUpgradeDroppedTerminalEvent(t *testing.T) {
+	d := newFakeDaemon(t)
+	jobPollInterval = 50 * time.Millisecond
+	d.events("/api/v2/events")
+	d.post("/api/v2/update/upgrade-all", http.StatusAccepted, accepted, nil)
+	d.reply("/api/v2/update/status", 200, `{"error":false,"msg":"ok","data":{"progress":{"status":"idle"},"job":{"id":"`+jobID+`","status":"done"}}}`)
+
+	res := d.run(t, "")
+	conn := next(t, d.conns)
+	next(t, d.posts)
+	send(t, conn, progressUp, progressDone)
+	if err := wait(t, res); err != nil {
+		t.Fatal(err)
 	}
 }

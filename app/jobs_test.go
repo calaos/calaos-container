@@ -1,12 +1,10 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,8 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gofiber/fiber/v2"
 
 	"github.com/calaos/calaos-container/apt"
 	"github.com/calaos/calaos-container/events"
@@ -316,8 +312,8 @@ func TestLegacyUpgradeIsAJob(t *testing.T) {
 	}
 }
 
-// TestLegacySelfUpgradeExitAfterAnswer: the legacy caller gets its answer,
-// then the terminal job goes out, then the exit is requested.
+// TestLegacySelfUpgradeExitAfterAnswer: the legacy caller gets its answer on
+// a connection the daemon closes, and the exit is requested.
 func TestLegacySelfUpgradeExitAfterAnswer(t *testing.T) {
 	f := newJobFixture(t, stubBackend{}, "calaos-container")
 	f.selfNew.Store(true)
@@ -333,8 +329,8 @@ func TestLegacySelfUpgradeExitAfterAnswer(t *testing.T) {
 	}
 
 	resp, b := doCase(t, f.a, httpCase{method: "POST", path: "/api/update/upgrade-all"})
-	if resp.StatusCode != http.StatusOK || string(b) != `{"msg":"Upgrade done"}` {
-		t.Fatalf("legacy answer: %d %s", resp.StatusCode, b)
+	if resp.StatusCode != http.StatusOK || string(b) != `{"msg":"Upgrade done"}` || !resp.Close {
+		t.Fatalf("legacy answer: %d %s, close %v", resp.StatusCode, b, resp.Close)
 	}
 	<-completed
 	j := f.status(t)
@@ -418,86 +414,6 @@ func drainJob(sub *events.Subscriber, id string) <-chan models.Job {
 	}
 }
 
-// newHookServer serves a route that registers an afterResponse callback,
-// on a real listener.
-func newHookServer(t *testing.T, handlerDelay time.Duration) (string, chan string) {
-	t.Helper()
-	tf := filepath.Join(t.TempDir(), "calaos-ct.token")
-	if err := os.WriteFile(tf, []byte(testToken+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	resetTokenCache(t, tf)
-	useAdminDirs(t)
-	a, err := NewApp()
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.hub = events.NewHub()
-
-	order := make(chan string, 4)
-	a.appFiber.Get("/test/after", func(c *fiber.Ctx) error {
-		a.afterResponse(c, func() { order <- "hook" })
-		time.Sleep(handlerDelay)
-		order <- "handler"
-		return c.SendString("answer")
-	})
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = a.appFiber.Listener(ln) }()
-	a.wgDone.Add(1)
-	t.Cleanup(a.Shutdown)
-	waitReady(t, ln.Addr().String())
-	return ln.Addr().String(), order
-}
-
-func TestAfterResponse(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		header  string
-		hangUp  bool
-		wantAns bool
-	}{
-		{name: "keep-alive", wantAns: true},
-		{name: "connection close", header: "Connection: close\r\n", wantAns: true},
-		{name: "client gone", hangUp: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			addr, order := newHookServer(t, 100*time.Millisecond)
-			conn, err := net.Dial("tcp", addr)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = conn.Close() }()
-			_, _ = fmt.Fprintf(conn, "GET /test/after HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n%s\r\n", testToken, tc.header)
-			if tc.hangUp {
-				time.Sleep(20 * time.Millisecond)
-				_ = conn.Close()
-			}
-
-			if tc.wantAns {
-				resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-				if err != nil || resp.StatusCode != http.StatusOK {
-					t.Fatalf("answer: %v %v", resp, err)
-				}
-				_ = resp.Body.Close()
-			}
-			for _, want := range []string{"handler", "hook"} {
-				select {
-				case got := <-order:
-					if got != want {
-						t.Fatalf("got %s, want %s", got, want)
-					}
-				case <-time.After(5 * time.Second):
-					t.Fatalf("no %s", want)
-				}
-			}
-		})
-	}
-}
-
 // TestShutdownFlushesEvents: an event published just before Shutdown, such
 // as the terminal job of a self-upgrade, reaches the connected client before
 // the close frame.
@@ -525,42 +441,31 @@ func TestShutdownFlushesEvents(t *testing.T) {
 	}
 }
 
-// blockingRun holds Complete until released.
-type blockingRun struct {
-	stubRun
-	release chan struct{}
-	done    chan struct{}
+// TestLegacyQueue: a kiosk posts the next package of its queue as soon as
+// the previous answer arrives; it must never find the run still in progress.
+func TestLegacyQueue(t *testing.T) {
+	f := newJobFixture(t, stubBackend{}, "calaos-server")
+	close(f.apt.gate)
+
+	for i := 0; i < 20; i++ {
+		resp, b := doCase(t, f.a, httpCase{method: "POST", path: "/api/update/upgrade?package=calaos-server"})
+		if resp.StatusCode != http.StatusOK || string(b) != `{"msg":"Upgrade done"}` || resp.Close {
+			t.Fatalf("upgrade %d: %d %s", i, resp.StatusCode, b)
+		}
+	}
 }
 
-func (r *blockingRun) Complete() {
-	<-r.release
-	close(r.done)
-}
-
-// TestLegacyAnswerBeforeComplete: the legacy caller has its answer while the
-// job has not completed yet (no terminal event, no exit before it).
-func TestLegacyAnswerBeforeComplete(t *testing.T) {
-	(&stubBackend{}).install(t)
-	run := &blockingRun{release: make(chan struct{}), done: make(chan struct{})}
-	startUpgradeJob = func(string, string) (upgradeRun, error) { return run, nil }
-	_, addr, cleanup := newTestServer(t)
-	defer cleanup()
-
-	req, _ := http.NewRequest("POST", "http://"+addr+"/api/update/upgrade-all", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("no answer while the job completes: %v", err)
+// TestLegacyPackageRule: the legacy route applies the v2 package rule, with
+// the body of an unknown package, and starts no job.
+func TestLegacyPackageRule(t *testing.T) {
+	f := newJobFixture(t, stubBackend{}, "calaos-server")
+	for _, q := range []string{"", "-y", "..%2Fetc", "calaos..server", "a%2Fb", strings.Repeat("a", 129)} {
+		resp, b := doCase(t, f.a, httpCase{method: "POST", path: "/api/update/upgrade?package=" + q})
+		if got := renderGolden(resp, b); string(got) != "status: 500\ncontent-type: application/json\n\n{\"error\":true,\"msg\":\"package not found\"}\n" {
+			t.Fatalf("package %q:\n%s", q, got)
+		}
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d", resp.StatusCode)
-	}
-	close(run.release)
-	select {
-	case <-run.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("job never completed")
+	if f.status(t) != nil {
+		t.Fatal("a job was started for an invalid name")
 	}
 }

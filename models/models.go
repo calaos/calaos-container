@@ -2,6 +2,7 @@ package models
 
 import (
 	"sync"
+	"time"
 
 	logger "github.com/calaos/calaos-container/log"
 	cimg "github.com/calaos/calaos-container/models/structs"
@@ -89,7 +90,20 @@ func Shutdown() {
 
 	wgDone.Wait()
 
-	// apt cannot be cancelled: give a running job the chance to end before
-	// systemd's stop timeout.
-	jobsWG.Wait()
+	// apt cannot be cancelled: give a running job the chance to end, short of
+	// the unit's 30 s stop timeout. Past that it is cut and reads interrupted
+	// at the next start.
+	done := make(chan struct{})
+	go func() {
+		jobsWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownJobWait):
+		logging.Warnln("upgrade job still running at shutdown")
+	}
 }
+
+// shutdownJobWait is a variable for tests.
+var shutdownJobWait = 25 * time.Second

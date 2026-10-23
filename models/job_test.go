@@ -29,6 +29,7 @@ type fakeApt struct {
 	gate     chan struct{}
 	started  chan struct{}
 	installs []string
+	removed  string // also removed by the transaction
 }
 
 func (f *fakeApt) GetCachePackages() ([]*apt.Pkg, error) {
@@ -47,6 +48,9 @@ func (f *fakeApt) InstallPackage(name string, cb func(apt.Progress)) error {
 }
 
 func (f *fakeApt) transaction(cb func(apt.Progress)) error {
+	if f.removed != "" {
+		cb(apt.Progress{Stage: "pending", Pkg: f.removed, PkgPercent: -1, Msg: "remove"})
+	}
 	for _, p := range f.pkgs {
 		cb(apt.Progress{Stage: "pending", Pkg: p, PkgPercent: -1})
 	}
@@ -275,8 +279,8 @@ func TestJobPackage(t *testing.T) {
 	}
 }
 
-// TestJobAptError: the apt error reaches the legacy caller and the progress,
-// the job gets a summary without apt output.
+// TestJobAptError: the apt error reaches the legacy caller only; the job and
+// the progress get a summary without apt output.
 func TestJobAptError(t *testing.T) {
 	env := newJobEnv(t, &fakeApt{
 		pkgs: []string{"calaos-server", "calaos-home"},
@@ -293,7 +297,7 @@ func TestJobAptError(t *testing.T) {
 	if err := run.Run(); err == nil || !strings.Contains(err.Error(), "dpkg") {
 		t.Fatalf("Run: %v", err)
 	}
-	if st, _ := UpdateStatus(); st.Status != "error" || !strings.Contains(st.Error, "dpkg") {
+	if st, _ := UpdateStatus(); st.Status != "error" || st.Error != "upgrade failed: calaos-home" {
 		t.Fatalf("progress %+v", st)
 	}
 	run.Complete()
@@ -347,8 +351,18 @@ func TestJobSurvivesRestart(t *testing.T) {
 func TestNeedsReboot(t *testing.T) {
 	for name, want := range map[string]bool{
 		"linux-image-6.1.0-26-amd64": true,
+		"linux-image-rpi-v8":         true,
+		"linux-firmware":             true,
 		"intel-microcode":            true,
+		"amd64-microcode":            true,
 		"firmware-linux-nonfree":     true,
+		"raspberrypi-kernel":         true,
+		"raspberrypi-bootloader":     true,
+		"raspi-firmware":             true,
+		"linux-headers-6.1.0-26":     false,
+		"linux-libc-dev":             false,
+		"linux-kbuild-6.1":           false,
+		"linux-compiler-gcc-12-x86":  false,
 		"calaos-container":           false,
 		"libc6":                      false,
 	} {
@@ -466,23 +480,159 @@ func TestJobSelfUpgrade(t *testing.T) {
 	}
 }
 
-// TestJobSelfPackageWithoutNewBinary: calaos-container in the transaction but
-// the running binary untouched (nothing to restart into).
-func TestJobSelfPackageWithoutNewBinary(t *testing.T) {
-	newJobEnv(t, &fakeApt{pkgs: []string{"calaos-container"}})
+// TestJobRestartFollowsTheBinary: only a replaced binary asks for the exit,
+// even when the run failed before calaos-container was configured.
+func TestJobRestartFollowsTheBinary(t *testing.T) {
+	t.Run("package done, binary untouched", func(t *testing.T) {
+		newJobEnv(t, &fakeApt{pkgs: []string{"calaos-container"}})
+		run, err := StartJob(JobKindUpgradeAll, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = run.Run()
+		run.Complete()
+		if run.Job().DaemonRestart {
+			t.Fatal("restart without a replaced binary")
+		}
+		select {
+		case <-RestartRequested():
+			t.Fatal("exit requested")
+		default:
+		}
+	})
+	t.Run("binary replaced, configure failed", func(t *testing.T) {
+		env := newJobEnv(t, &fakeApt{
+			pkgs: []string{"calaos-container"},
+			fail: map[string]bool{"calaos-container": true},
+			err:  errors.New("dpkg: error processing package calaos-container (--configure)"),
+		})
+		env.selfNew.Store(true)
+		run, err := StartJob(JobKindUpgradeAll, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = run.Run()
+		run.Complete()
+		if j := run.Job(); !j.DaemonRestart || j.Status != JobError {
+			t.Fatalf("job %+v", j)
+		}
+		select {
+		case <-RestartRequested():
+		case <-time.After(5 * time.Second):
+			t.Fatal("the old binary keeps running")
+		}
+	})
+}
+
+// TestJobKeepsPendingReboot: a kernel installed earlier on this boot still
+// needs its reboot after a job that installs no kernel.
+func TestJobKeepsPendingReboot(t *testing.T) {
+	f := &fakeApt{pkgs: []string{"linux-image-amd64"}}
+	env := newJobEnv(t, f)
+	runJob := func() Job {
+		t.Helper()
+		run, err := StartJob(JobKindUpgradeAll, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = run.Run()
+		run.Complete()
+		return run.Job()
+	}
+
+	if !runJob().RebootRequired {
+		t.Fatal("kernel job")
+	}
+	f.pkgs = []string{"calaos-server"}
+	if !runJob().RebootRequired {
+		t.Fatal("a later job hid the pending reboot")
+	}
+
+	env.setBootID(t, "boot-2")
+	env.hook(t)
+	loadLastJob()
+	if runJob().RebootRequired {
+		t.Fatal("reboot still required after the reboot")
+	}
+}
+
+// TestJobIgnoresRemovals: an autoremoved old kernel is no reason to reboot.
+func TestJobIgnoresRemovals(t *testing.T) {
+	newJobEnv(t, &fakeApt{pkgs: []string{"calaos-server"}, removed: "linux-image-6.1.0-25-amd64"})
 	run, err := StartJob(JobKindUpgradeAll, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = run.Run()
 	run.Complete()
-	if run.Job().DaemonRestart {
-		t.Fatal("restart without a replaced binary")
+	if run.Job().RebootRequired {
+		t.Fatal("a removed kernel requires a reboot")
 	}
-	select {
-	case <-RestartRequested():
-		t.Fatal("exit requested")
-	default:
+}
+
+func TestBootIDFallback(t *testing.T) {
+	env := newJobEnv(t, &fakeApt{})
+	if err := os.Remove(env.bootID); err != nil {
+		t.Fatal(err)
+	}
+	env.hook(t)
+	id := currentBootID()
+	if !strings.HasPrefix(id, "btime:") || len(id) <= len("btime:") {
+		t.Fatalf("boot id %q", id)
+	}
+	if currentBootID() != id {
+		t.Fatal("boot id not stable")
+	}
+}
+
+// TestJobDirHardened: the job directory is a real 0700 directory, never a
+// symlink, and the job file is never read through a symlink.
+func TestJobDirHardened(t *testing.T) {
+	env := newJobEnv(t, &fakeApt{})
+	dir := filepath.Dir(env.jobFile)
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // a loose directory the daemon must tighten
+		t.Fatal(err)
+	}
+	run, err := StartJob(JobKindUpgradeAll, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = run.Run()
+	run.Complete()
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("job dir mode: %v %v", fi.Mode(), err)
+	}
+
+	// The file replaced by a symlink: not followed.
+	target := filepath.Join(t.TempDir(), "forged.json")
+	if err := writeJobFile(target, jobRecord{Job: Job{ID: "ffffffffffffffff", Status: JobDone, RebootRequired: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(env.jobFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, env.jobFile); err != nil {
+		t.Fatal(err)
+	}
+	env.hook(t)
+	loadLastJob()
+	if j := CurrentJob(); j != nil {
+		t.Fatalf("job read through a symlink: %+v", j)
+	}
+
+	// The directory replaced by a symlink: no write through it.
+	other := t.TempDir()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJobFile(env.jobFile, jobRecord{Job: Job{ID: "0123456789abcdef"}}); err == nil {
+		t.Fatal("job written through a symlinked directory")
+	}
+	if entries, _ := os.ReadDir(other); len(entries) != 0 {
+		t.Fatalf("files written through the symlink: %v", entries)
 	}
 }
 
@@ -515,6 +665,54 @@ func TestShutdownWaitsForJob(t *testing.T) {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Shutdown did not return after the job")
+	}
+}
+
+// TestShutdownWaitIsBounded: past the bound the daemon stops anyway, short
+// of the unit's SIGKILL.
+func TestShutdownWaitIsBounded(t *testing.T) {
+	prev := shutdownJobWait
+	shutdownJobWait = 50 * time.Millisecond
+	t.Cleanup(func() { shutdownJobWait = prev })
+	started := make(chan struct{})
+	env := newJobEnv(t, &fakeApt{pkgs: []string{"calaos-server"}, gate: make(chan struct{}), started: started})
+	run, err := StartJob(JobKindUpgradeAll, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_ = run.Run()
+		run.Complete()
+	}()
+	<-started
+
+	stopped := make(chan struct{})
+	go func() {
+		Shutdown()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown waited past its bound")
+	}
+	close(env.apt.gate)
+	_ = jobsDone(t)
+}
+
+func jobsDone(t *testing.T) bool {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		jobsWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(5 * time.Second):
+		t.Fatal("job never completed")
+		return false
 	}
 }
 

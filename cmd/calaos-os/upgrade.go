@@ -26,6 +26,10 @@ var (
 	reconnectMaxDelay   = 10 * time.Second
 	reconnectGiveUp     = 2 * time.Minute
 
+	// jobPollInterval paces the job reads that catch a terminal event the
+	// daemon dropped (events are best effort).
+	jobPollInterval = 15 * time.Second
+
 	// legacyGrace is how long the legacy path waits for the terminal
 	// progress once the synchronous POST has answered.
 	legacyGrace = 3 * time.Second
@@ -166,11 +170,18 @@ func runUpgrade(a *api.CalaosApi, token, pkg string) error {
 
 	view := newProgressView()
 	deadline := time.After(upgradeOverallTimeout)
+	poll := time.NewTicker(jobPollInterval)
+	defer poll.Stop()
 	for {
 		select {
 		case ev := <-stream.evs:
 			if end := handleJobEvent(view, job.ID, ev); end != nil {
 				return jobResult(view, end)
+			}
+
+		case <-poll.C:
+			if j, err := a.JobStatus(token); err == nil && j != nil && j.ID == job.ID && j.Terminal() {
+				return jobResult(view, j)
 			}
 
 		case <-stream.errs:

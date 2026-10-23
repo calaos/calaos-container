@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/calaos/calaos-container/apt"
@@ -32,11 +33,12 @@ const (
 const (
 	defaultJobFile    = "/var/log/calaos-container/last_job.json"
 	defaultBootIDFile = "/proc/sys/kernel/random/boot_id"
-
-	selfPackage = "calaos-container"
+	procStatFile      = "/proc/stat"
 
 	jobErrInterrupted = "interrupted"
 	jobErrFailed      = "upgrade failed"
+
+	jobDirMode = 0o700
 
 	maxJobFileSize = 64 * 1024
 )
@@ -103,6 +105,10 @@ var (
 	jobMu   sync.Mutex
 	lastJob *jobRecord
 
+	// bootID is read once per daemon: the boot id cannot change under it.
+	bootIDOnce sync.Once
+	bootID     string
+
 	// jobsWG counts the runs between StartJob and Complete.
 	jobsWG sync.WaitGroup
 
@@ -144,6 +150,7 @@ func SetUpgradeHooks(h UpgradeHooks) (restore func()) {
 	prev := hooks
 	hooks = h
 	hooksMu.Unlock()
+	bootIDOnce = sync.Once{}
 	jobMu.Lock()
 	prevJob := lastJob
 	lastJob = nil
@@ -157,6 +164,7 @@ func SetUpgradeHooks(h UpgradeHooks) (restore func()) {
 		hooksMu.Lock()
 		hooks = prev
 		hooksMu.Unlock()
+		bootIDOnce = sync.Once{}
 		jobMu.Lock()
 		lastJob = prevJob
 		jobMu.Unlock()
@@ -206,13 +214,39 @@ func exeReplaced() bool {
 	return err == nil && strings.HasSuffix(p, " (deleted)")
 }
 
-func readBootID(path string) string {
-	b, err := os.ReadFile(path) //nolint:gosec // fixed system path
+// currentBootID identifies this boot. Without boot_id it falls back on the
+// boot time of /proc/stat, which changes at every boot too; without either,
+// "" keeps every recorded reboot_required as it is.
+func currentBootID() string {
+	bootIDOnce.Do(func() {
+		path := currentHooks().BootIDFile
+		b, err := os.ReadFile(path) //nolint:gosec // fixed system path
+		if id := strings.TrimSpace(string(b)); err == nil && id != "" {
+			bootID = id
+			return
+		}
+		if bt := bootTime(); bt != "" {
+			logging.Warnf("reading %s: %v; using the boot time instead", path, err)
+			bootID = "btime:" + bt
+			return
+		}
+		logging.Warnf("reading %s: %v; reboot_required will not reset after a reboot", path, err)
+		bootID = ""
+	})
+	return bootID
+}
+
+func bootTime() string {
+	b, err := os.ReadFile(procStatFile)
 	if err != nil {
-		logging.Warnf("reading the boot id: %v", err)
 		return ""
 	}
-	return strings.TrimSpace(string(b))
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "btime "); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func newJobID() string {
@@ -239,7 +273,7 @@ func CurrentJob() *Job {
 	}
 	j := rec.Job
 	if j.RebootRequired && rec.BootID != "" {
-		if cur := readBootID(currentHooks().BootIDFile); cur != "" && cur != rec.BootID {
+		if cur := currentBootID(); cur != "" && cur != rec.BootID {
 			j.RebootRequired = false
 		}
 	}
@@ -277,7 +311,7 @@ func writeJobFile(path string, rec jobRecord) error {
 		return err
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := prepareJobDir(dir); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
@@ -338,8 +372,40 @@ func loadLastJob() {
 	setLastJob(rec)
 }
 
+// prepareJobDir makes the job directory a real 0700 directory of ours: the
+// record decides what admins are told (reboot_required, interrupted runs).
+func prepareJobDir(dir string) error {
+	if err := os.MkdirAll(dir, jobDirMode); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s is owned by uid %d", dir, st.Uid)
+	}
+	if fi.Mode().Perm() != jobDirMode {
+		if err := os.Chmod(dir, jobDirMode); err != nil { //nolint:gosec // a directory needs x
+			return err
+		}
+	}
+	// A crash between writing and renaming leaves a temp file behind.
+	stale, _ := filepath.Glob(filepath.Join(dir, ".*.tmp*"))
+	for _, f := range stale {
+		_ = os.Remove(f)
+	}
+	return nil
+}
+
 func readJobFile(path string) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // daemon-owned path
+	if fi, err := os.Lstat(filepath.Dir(path)); err == nil && !fi.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", filepath.Dir(path))
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // daemon-owned path
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +428,8 @@ type JobRun struct {
 	runOnce sync.Once
 	runErr  error
 	done    sync.Once
+
+	pendingReboot bool
 }
 
 // StartJob takes the upgrade lock and records a running job. Every upgrade
@@ -377,6 +445,11 @@ func StartJob(kind, pkg string) (*JobRun, error) {
 	upgrading.Store(true)
 
 	r := &JobRun{}
+	// A kernel installed by an earlier job on this boot still waits for its
+	// reboot: a later job must not hide it.
+	if prev := CurrentJob(); prev != nil && prev.RebootRequired {
+		r.pendingReboot = true
+	}
 	if kind == JobKindUpgrade {
 		img, found := getNewVersion(pkg)
 		if !found {
@@ -398,7 +471,7 @@ func StartJob(kind, pkg string) (*JobRun, error) {
 			Status:    JobRunning,
 			StartedAt: nowRFC3339(),
 		},
-		BootID: readBootID(currentHooks().BootIDFile),
+		BootID: currentBootID(),
 	}
 	setLastJob(r.rec)
 	saveJob(r.rec)
@@ -460,8 +533,10 @@ func (r *JobRun) run() error {
 		rec.Status = JobError
 		rec.Error = jobErrorSummary(st)
 	}
-	rec.RebootRequired = needsReboot(installed)
-	rec.DaemonRestart = installed[selfPackage] && h.ExeReplaced()
+	rec.RebootRequired = r.pendingReboot || needsReboot(installed)
+	// The replaced binary is what matters, even when dpkg did not get to
+	// configure the package: the restart's dpkg --configure -a finishes it.
+	rec.DaemonRestart = h.ExeReplaced()
 	rec.FinishedAt = nowRFC3339()
 
 	r.rec = rec
@@ -492,22 +567,26 @@ func (r *JobRun) Complete() {
 }
 
 // installedPackages returns the packages of the transaction that apt
-// completed.
+// installed or upgraded, removals excluded.
 func installedPackages(st structs.Status) map[string]bool {
 	m := map[string]bool{}
 	for _, p := range st.Packages {
-		if p.State == structs.PkgStateDone {
+		if p.State == structs.PkgStateDone && !isRemoved(p.Name) {
 			m[p.Name] = true
 		}
 	}
 	return m
 }
 
-// rebootPrefixes and rebootNames match the kernel group of the kiosk update
-// page: what only takes effect after a reboot.
+// rebootPrefixes and rebootNames are what only takes effect after a reboot:
+// kernels, firmware and microcode, Raspberry Pi ones included.
 var (
-	rebootPrefixes = []string{"linux-image", "linux-headers", "linux-firmware", "linux-libc", "linux-kbuild", "linux-compiler"}
-	rebootNames    = map[string]bool{"firmware-linux": true, "firmware-linux-nonfree": true, "intel-microcode": true, "amd64-microcode": true}
+	rebootPrefixes = []string{"linux-image", "linux-firmware"}
+	rebootNames    = map[string]bool{
+		"firmware-linux": true, "firmware-linux-nonfree": true,
+		"intel-microcode": true, "amd64-microcode": true,
+		"raspberrypi-kernel": true, "raspberrypi-bootloader": true, "raspi-firmware": true,
+	}
 )
 
 func needsReboot(installed map[string]bool) bool {

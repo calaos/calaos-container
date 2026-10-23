@@ -52,8 +52,6 @@ type AppServer struct {
 
 	admin *admin.Manager
 
-	hooks responseHooks
-
 	// wsConns counts the event streams, so Shutdown lets them flush the
 	// last events before the process exits. No Add once wsClosing is set.
 	wsMu      sync.Mutex
@@ -103,7 +101,6 @@ func NewApp() (a *AppServer, err error) {
 		Publish:    func(evType string, data any) { publishAdmin(a.hub, evType, data) },
 	})
 	a.sessions = a.admin
-	a.appFiber.Server().ConnState = a.connState
 
 	a.appFiber.
 		Use(fiberLog.New(fiberLog.Config{})).
