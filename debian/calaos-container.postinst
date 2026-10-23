@@ -3,6 +3,21 @@ set -e
 
 unit=calaos-container.service
 
+# SD-card images were built from a Docker export and still carry Debian's
+# Docker policy-rc.d (exit 101), which blocks every package's service
+# (re)start. Only that exact stub goes; any other policy-rc.d is the admin's.
+remove_docker_policy_rc() {
+    local f=/usr/sbin/policy-rc.d
+    [ -z "${DPKG_ROOT:-}" ] && [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    [ -d /run/systemd/system ] || return 0
+    ! systemd-detect-virt --quiet --container 2>/dev/null || return 0
+    ! dpkg-query -S "$f" >/dev/null 2>&1 || return 0
+    grep -q '^# For most Docker users, "apt-get install" only happens during "docker build",$' "$f" ||
+        return 0
+    [ "$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$f")" = "exit 101" ] || return 0
+    rm -f "$f" || true
+}
+
 # Takes over the debhelper "deb-systemd-invoke start" of our unit below: its
 # plain "systemctl start" blocks dpkg, and when dpkg runs from the unit's own
 # ExecStartPre it waits on that very start job until TimeoutStartSec. There,
@@ -24,12 +39,18 @@ deb-systemd-invoke() {
     command deb-systemd-invoke "$@"
 }
 
+# Must run before the debhelper start below, which consults policy-rc.d.
+case "$1" in
+configure) remove_docker_policy_rc || true ;;
+esac
+
 #DEBHELPER#
 
 # The daemon may be the process driving this very upgrade (apt is linked into
 # it), so it is not restarted here; a transient unit does it once dpkg and the
 # daemon's job are done. Our ExecStartPre needs nothing: ExecStart follows.
-# policy-rc.d is not consulted: SD images still ship Docker's exit-101 stub.
+# policy-rc.d is not consulted: without this restart the upgraded daemon only
+# takes over at the next reboot.
 case "$1" in
 configure|abort-upgrade)
     if [ -z "${CALAOS_CT_STARTPRE:-}" ] && [ -z "${DPKG_ROOT:-}" ] &&
