@@ -55,7 +55,6 @@ func (a *AppServer) registerAdmin(v2 fiber.Router) {
 	v2.Get("/admin/push/:code_id", bearerOnly, a.v2PushPayload)
 
 	v2.Post("/admin/console", r, a.v2ConsoleOpen)
-	v2.Post("/admin/console/:id/activity", bearerOnly, a.v2ConsoleActivity)
 }
 
 func adminError(err error) *apiError {
@@ -258,11 +257,6 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	}
 
 	err := c.Next()
-	// Reported every few seconds while a console is used: its open and
-	// close lines are what the audit log keeps.
-	if err == nil && !hasSession && isConsoleActivityPath(path) && auditResult(c, nil) == "ok" {
-		return nil
-	}
 
 	e := admin.AuditEntry{
 		Client: auditClient(c),

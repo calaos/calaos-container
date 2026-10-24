@@ -40,7 +40,6 @@ const (
 	codeBadCode           = "bad_code"
 	codeCodeExpired       = "code_expired"
 	codeConsoleLimit      = "console_limit"
-	codeConsoleUnavail    = "console_unavailable"
 )
 
 type okEnvelope struct {

@@ -122,7 +122,6 @@ func NewApp() (a *AppServer, err error) {
 	}
 	a.consoles = console.New(console.Options{
 		Dir:    filepath.Join(adminRuntimeDir, "console"),
-		TTYD:   consoleTTYD,
 		Now:    a.now,
 		Closed: a.consoleClosed,
 	})

@@ -1,21 +1,17 @@
-// Package console runs the root web consoles: one ttyd per console, listening
-// on a Unix socket that calaos_server tunnels the browser WebSocket to. The
-// daemon only gates and bounds them; ttyd is the terminal (docs/API.md,
-// Console).
+// Package console runs root login shells in ptys behind private Unix
+// WebSockets. The daemon gates, bounds and audits each console.
 package console
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,20 +23,13 @@ import (
 )
 
 const (
-	DefaultTTYD = "/usr/bin/ttyd"
-
 	MaxConsoles    = 2
 	MaxLifetime    = time.Hour
 	IdleTimeout    = 15 * time.Minute
 	ConnectTimeout = 30 * time.Second
 
-	// WSPath and WSProtocol are what ttyd 1.7 serves on its socket.
 	WSPath     = "/ws"
-	WSProtocol = "tty"
-
-	EventConnected = "connected"
-	EventInput     = "input"
-	EventClosed    = "closed"
+	WSProtocol = "calaos-console.v1"
 
 	// Close reasons, as written to the audit log.
 	ReasonClosed       = "closed"
@@ -50,17 +39,15 @@ const (
 	ReasonNotConnected = "not_connected"
 	ReasonShutdown     = "shutdown"
 
-	pingInterval = "30"
-	startTimeout = 5 * time.Second
-	killGrace    = 2 * time.Second
-	sockPrefix   = "console-"
-	sockSuffix   = ".sock" // ttyd only takes -i as a socket path with this suffix
+	killGrace  = 2 * time.Second
+	sockPrefix = "console-"
+	sockSuffix = ".sock"
 )
 
 // Terms is the TERM whitelist; the first one is the default.
 var Terms = []string{"xterm-256color", "xterm", "vt100"}
 
-// The shell gets this environment and nothing of the daemon's; ttyd adds TERM.
+// The shell gets this environment and nothing of the daemon's, plus TERM.
 var shellEnv = []string{
 	"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 	"HOME=/root",
@@ -71,9 +58,8 @@ var shellEnv = []string{
 }
 
 var (
-	ErrLimit       = errors.New("too many consoles")
-	ErrUnavailable = errors.New("ttyd is not installed")
-	ErrNotFound    = errors.New("unknown console")
+	ErrLimit    = errors.New("too many consoles")
+	ErrNotFound = errors.New("unknown console")
 	// ErrEnded: the session was invalidated while its console started.
 	ErrEnded = errors.New("session ended")
 )
@@ -95,10 +81,9 @@ func ValidTerm(t string) bool {
 
 type Options struct {
 	Dir   string   // socket directory, bind-mounted into calaos_server
-	TTYD  string   // ttyd binary
-	Shell []string // the command ttyd runs
+	Shell []string // the login command run in the pty
 	Now   func() time.Time
-	// Closed is called once per console that started, after it is gone.
+	// Closed is called once per granted console, after it is gone.
 	Closed func(info Info, reason string)
 }
 
@@ -121,14 +106,35 @@ type Info struct {
 
 type console struct {
 	Info
-	session   string // hash
-	pgid      int
-	started   bool
-	exited    bool
-	attached  time.Time
-	lastInput time.Time
-	reason    string
-	done      chan struct{}
+	session     string
+	granted     bool
+	started     bool
+	exited      bool
+	attached    time.Time
+	lastInput   time.Time
+	reason      string
+	done        chan struct{}
+	stop        chan struct{}
+	listener    net.Listener
+	cmd         *exec.Cmd
+	pty         *os.File
+	pgid        int
+	shellDone   chan struct{}
+	clientDone  chan struct{}
+	clientOnce  sync.Once
+	ptyOnce     sync.Once
+	serverEnded bool
+	claimed     bool
+	termSent    bool
+	shellExited bool
+}
+
+func (c *console) closePTY() {
+	c.ptyOnce.Do(func() {
+		if c.pty != nil {
+			_ = c.pty.Close()
+		}
+	})
 }
 
 type Manager struct {
@@ -140,14 +146,10 @@ type Manager struct {
 }
 
 // New prepares the socket directory and removes the sockets of a previous
-// run: their ttyd died with it (Pdeathsig). It never fails: a broken
-// directory only makes Open fail.
+// run. It never replaces the directory, which calaos_server bind-mounts.
 func New(o Options) *Manager {
-	if o.TTYD == "" {
-		o.TTYD = DefaultTTYD
-	}
 	if len(o.Shell) == 0 {
-		o.Shell = []string{"/bin/bash", "--login"}
+		o.Shell = []string{"/bin/login", "-f", "root"}
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -209,22 +211,18 @@ func ValidID(s string) bool {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+		ch := s[i]
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 			return false
 		}
 	}
 	return true
 }
 
-// Open reserves a slot, runs take (which consumes the console_open grant),
-// then starts ttyd. A refused slot or a missing ttyd leaves the grant alone.
+// Open reserves a slot, consumes the grant, then starts the private listener.
 func (m *Manager) Open(req Request, take func() error) (Info, error) {
 	if m.initErr != nil {
 		return Info{}, m.initErr
-	}
-	if fi, err := os.Stat(m.o.TTYD); err != nil || fi.IsDir() || fi.Mode()&0o111 == 0 {
-		return Info{}, ErrUnavailable
 	}
 	id, err := newID()
 	if err != nil {
@@ -237,12 +235,13 @@ func (m *Manager) Open(req Request, take func() error) (Info, error) {
 			AuditID: req.AuditID,
 			Client:  req.Client,
 		},
-		session: req.SessionHash,
-		done:    make(chan struct{}),
+		session:    req.SessionHash,
+		done:       make(chan struct{}),
+		stop:       make(chan struct{}),
+		shellDone:  make(chan struct{}),
+		clientDone: make(chan struct{}),
 	}
 
-	// Registered before the grant is taken, so an invalidation from then on
-	// marks it and the start below gives up.
 	m.mu.Lock()
 	if len(m.consoles) >= MaxConsoles {
 		m.mu.Unlock()
@@ -264,9 +263,18 @@ func (m *Manager) Open(req Request, take func() error) (Info, error) {
 		release()
 		return Info{}, err
 	}
+	m.mu.Lock()
+	c.granted = true
+	m.mu.Unlock()
 
-	// On failure the slot is freed once ttyd is reaped, not before.
-	if err := m.start(c, req.Term); err != nil {
+	if err := m.serve(c, req.Term); err != nil {
+		m.mu.Lock()
+		delete(m.consoles, id)
+		c.exited = true
+		info := c.Info
+		m.mu.Unlock()
+		close(c.done)
+		m.o.Closed(info, ReasonExited)
 		return Info{}, err
 	}
 
@@ -278,133 +286,13 @@ func (m *Manager) Open(req Request, take func() error) (Info, error) {
 	}
 	if c.exited {
 		m.mu.Unlock()
-		return Info{}, errors.New("ttyd exited at start")
+		return Info{}, errors.New("console exited at start")
 	}
 	c.started = true
 	c.Opened = m.o.Now()
 	info := c.Info
 	m.mu.Unlock()
 	return info, nil
-}
-
-func (m *Manager) args(c *console, term string) []string {
-	a := []string{
-		"-i", c.Socket,
-		"--once",
-		"--max-clients", "1",
-		"--terminal-type", term,
-		"--cwd", "/root",
-		// Errors and warnings only: nothing of the terminal is ever logged.
-		"--debug", "3",
-	}
-	help := m.help()
-	// ttyd before 1.7.4 is writable by default and does not know the flag.
-	if bytes.Contains(help, []byte("--writable")) {
-		a = append(a, "--writable")
-	}
-	// Only built against libwebsockets 4.
-	if bytes.Contains(help, []byte("--ping-interval")) {
-		a = append(a, "--ping-interval", pingInterval)
-	}
-	return append(a, m.o.Shell...)
-}
-
-func (m *Manager) help() []byte {
-	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, m.o.TTYD, "--help") //nolint:gosec // daemon-configured path
-	cmd.Env = shellEnv
-	out, _ := cmd.CombinedOutput()
-	return out
-}
-
-// start runs ttyd and returns once its socket is up and 0600.
-func (m *Manager) start(c *console, term string) error {
-	_ = os.Remove(c.Socket)
-	cmd := exec.Command(m.o.TTYD, m.args(c, term)...) //nolint:gosec // daemon-configured path
-	cmd.Env = shellEnv
-	cmd.Dir = "/"
-	lw := &lineLogger{prefix: "console " + c.ID + ": ttyd: "}
-	cmd.Stdout = lw
-	cmd.Stderr = lw
-	// Something left holding ttyd's stderr must not keep Wait, and the
-	// cleanup behind it, waiting.
-	cmd.WaitDelay = time.Second
-	// Pdeathsig: KillMode=process leaves children alive when the daemon
-	// stops, and a console whose daemon is gone has no limit left.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
-
-	started := make(chan error, 1)
-	go m.run(c, cmd, started)
-	if err := <-started; err != nil {
-		return err
-	}
-
-	deadline := time.Now().Add(startTimeout)
-	for {
-		select {
-		case <-c.done:
-			return errors.New("ttyd exited at start")
-		default:
-		}
-		fi, err := os.Lstat(c.Socket)
-		if err == nil && fi.Mode()&os.ModeSocket != 0 {
-			// The directory is 0700 already; the mode is a second barrier.
-			if err := os.Chmod(c.Socket, 0o600); err != nil {
-				m.kill(c, ReasonExited)
-				return err
-			}
-			return nil
-		}
-		if time.Now().After(deadline) {
-			m.kill(c, ReasonExited)
-			return errors.New("ttyd socket did not appear")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// run keeps its OS thread for ttyd's lifetime: Pdeathsig fires when the
-// thread that forked exits, not the process.
-func (m *Manager) run(c *console, cmd *exec.Cmd, started chan<- error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	if err := cmd.Start(); err != nil {
-		m.mu.Lock()
-		delete(m.consoles, c.ID)
-		m.mu.Unlock()
-		close(c.done)
-		started <- err
-		return
-	}
-	m.mu.Lock()
-	c.pgid = cmd.Process.Pid
-	m.mu.Unlock()
-	started <- nil
-
-	_ = cmd.Wait()
-
-	m.mu.Lock()
-	c.exited = true
-	// Whatever ttyd left in its group goes with it.
-	_ = syscall.Kill(-c.pgid, syscall.SIGKILL)
-	reason := c.reason
-	if reason == "" {
-		reason = ReasonExited
-	}
-	wasStarted := c.started
-	delete(m.consoles, c.ID)
-	info := c.Info
-	m.mu.Unlock()
-
-	if fi, err := os.Lstat(c.Socket); err == nil && fi.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(c.Socket)
-	}
-	close(c.done)
-	if wasStarted {
-		m.o.Closed(info, reason)
-	}
 }
 
 func (m *Manager) kill(c *console, reason string) {
@@ -415,25 +303,45 @@ func (m *Manager) kill(c *console, reason string) {
 
 // killLocked never blocks: SessionsEnded calls it under the admin lock.
 func (m *Manager) killLocked(c *console, reason string) {
-	if c.reason == "" {
+	if c.reason == "" && reason != "" {
 		c.reason = reason
+		close(c.stop)
 	}
-	if c.pgid == 0 || c.exited {
+	if c.listener != nil {
+		_ = c.listener.Close()
+	}
+	_ = os.Remove(c.Socket)
+	if c.pgid == 0 || c.shellExited || c.termSent {
 		return
 	}
+	c.termSent = true
 	pgid := c.pgid
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	_ = syscall.Kill(-pgid, syscall.SIGHUP)
 	go func() {
 		select {
 		case <-c.done:
 		case <-time.After(killGrace):
-			m.mu.Lock()
-			if !c.exited {
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
-			}
-			m.mu.Unlock()
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		}
 	}()
+}
+
+func (m *Manager) attach(c *console) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c.attached.IsZero() {
+		c.attached = m.o.Now()
+	}
+}
+
+func (m *Manager) touch(c *console) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.o.Now()
+	if c.attached.IsZero() {
+		c.attached = now
+	}
+	c.lastInput = now
 }
 
 // SessionsEnded kills the consoles of an invalidated session, or every
@@ -448,56 +356,11 @@ func (m *Manager) SessionsEnded(sessionHash, reason string) {
 	}
 }
 
-// Status is what an activity report answers.
-type Status struct {
-	ExpiresIn int `json:"expires_in"`
-	IdleIn    int `json:"idle_in"`
-}
-
-// Activity records what the tunnel reports: its connection, input sent to
-// the terminal (never pings or resizes), or its end.
-func (m *Manager) Activity(id, event string) (Status, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	c := m.consoles[id]
-	if c == nil || !c.started || c.reason != "" {
-		return Status{}, ErrNotFound
-	}
-	now := m.o.Now()
-	switch event {
-	case EventConnected:
-		if c.attached.IsZero() {
-			c.attached = now
-		}
-	case EventInput:
-		if c.attached.IsZero() {
-			c.attached = now
-		}
-		c.lastInput = now
-	case EventClosed:
-		m.killLocked(c, ReasonClosed)
-		return Status{}, nil
-	default:
-		return Status{}, fmt.Errorf("unknown console event %q", event)
-	}
-	return Status{
-		ExpiresIn: seconds(c.Opened.Add(MaxLifetime).Sub(now)),
-		IdleIn:    seconds(c.lastActive().Add(IdleTimeout).Sub(now)),
-	}, nil
-}
-
 func (c *console) lastActive() time.Time {
 	if c.lastInput.After(c.attached) {
 		return c.lastInput
 	}
 	return c.attached
-}
-
-func seconds(d time.Duration) int {
-	if d <= 0 {
-		return 0
-	}
-	return int((d + time.Second - 1) / time.Second)
 }
 
 // Sweep applies the time limits; Run calls it every second.
@@ -563,47 +426,3 @@ func (m *Manager) Count() int {
 	defer m.mu.Unlock()
 	return len(m.consoles)
 }
-
-// lineLogger forwards ttyd's own messages; at --debug 3 they never contain
-// terminal data.
-type lineLogger struct {
-	prefix string
-	mu     sync.Mutex
-	buf    []byte
-}
-
-const maxLogLine = 256
-
-func (l *lineLogger) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.buf = append(l.buf, p...)
-	for {
-		i := bytes.IndexByte(l.buf, '\n')
-		if i < 0 {
-			if len(l.buf) > maxLogLine {
-				l.emit(l.buf)
-				l.buf = l.buf[:0]
-			}
-			return len(p), nil
-		}
-		l.emit(l.buf[:i])
-		l.buf = l.buf[i+1:]
-	}
-}
-
-func (l *lineLogger) emit(b []byte) {
-	if len(b) > maxLogLine {
-		b = b[:maxLogLine]
-	}
-	s := strings.TrimSpace(string(bytes.ToValidUTF8(b, []byte("?"))))
-	switch {
-	case s == "":
-	case strings.Contains(s, "] N: "): // libwebsockets notice
-		logging.Infoln(l.prefix + s)
-	default:
-		logging.Warnln(l.prefix + s)
-	}
-}
-
-var _ io.Writer = (*lineLogger)(nil)

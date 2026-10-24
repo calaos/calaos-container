@@ -1,22 +1,22 @@
 package console
 
 import (
+	"context"
 	"errors"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
+
 	"github.com/calaos/calaos-container/app/console/consoletest"
 )
-
-func TestMain(m *testing.M) {
-	consoletest.MaybeRun()
-	os.Exit(m.Run())
-}
 
 type clock struct {
 	mu sync.Mutex
@@ -50,7 +50,6 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	// Short: a Unix socket path is limited to 108 bytes.
 	root, err := os.MkdirTemp("", "cc")
 	if err != nil {
 		t.Fatal(err)
@@ -64,10 +63,10 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f.m = New(Options{
 		Dir:    f.dir,
-		TTYD:   consoletest.Install(t),
 		Now:    f.clk.Now,
 		Closed: func(i Info, r string) { f.closed <- closedEvent{i, r} },
 	})
+	f.m.o.Shell = consoletest.Shell(f.dir)
 	t.Cleanup(f.m.Shutdown)
 	return f
 }
@@ -78,46 +77,74 @@ func (f *fixture) open(session string) Info {
 	if err != nil {
 		f.t.Fatalf("open: %v", err)
 	}
-	// The fake's group is complete once its grandchild has started.
-	consoletest.ReadPid(f.t, info.Socket+".child")
 	return info
+}
+
+func (f *fixture) attach(info Info) *gws.Conn {
+	f.t.Helper()
+	dialer := gws.Dialer{
+		NetDialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", info.Socket)
+		},
+		Subprotocols:     []string{WSProtocol},
+		HandshakeTimeout: 5 * time.Second,
+	}
+	conn, _, err := dialer.Dial("ws://localhost"+WSPath, http.Header{})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if err := conn.WriteMessage(gws.TextMessage, []byte(`{"AuthToken":"","columns":120,"rows":40}`)); err != nil {
+		f.t.Fatal(err)
+	}
+	return conn
 }
 
 func (f *fixture) waitClosed(id string) closedEvent {
 	f.t.Helper()
+	ev := f.waitAnyClosed()
+	if id != "" && ev.info.ID != id {
+		f.t.Fatalf("closed %s, want %s", ev.info.ID, id)
+	}
+	return ev
+}
+
+func (f *fixture) waitAnyClosed() closedEvent {
+	f.t.Helper()
 	select {
 	case ev := <-f.closed:
-		if ev.info.ID != id {
-			f.t.Fatalf("closed %s, want %s", ev.info.ID, id)
-		}
 		return ev
 	case <-time.After(5 * time.Second):
-		f.t.Fatalf("console %s not closed", id)
+		f.t.Fatal("console not closed")
 	}
 	return closedEvent{}
 }
 
 func (f *fixture) expectGone(info Info, reason string) {
 	f.t.Helper()
-	pid := consoletest.ReadPid(f.t, info.Socket+".pid")
-	child := consoletest.ReadPid(f.t, info.Socket+".child")
 	if ev := f.waitClosed(info.ID); ev.reason != reason {
 		f.t.Fatalf("closed for %q, want %q", ev.reason, reason)
 	}
-	consoletest.Eventually(f.t, "ttyd and its group gone", func() bool {
-		return !consoletest.Alive(pid) && !consoletest.Alive(child)
-	})
 	if _, err := os.Lstat(info.Socket); !os.IsNotExist(err) {
 		f.t.Fatalf("socket left behind: %v", err)
 	}
-	if _, err := f.m.Activity(info.ID, EventInput); !errors.Is(err, ErrNotFound) {
-		f.t.Fatalf("activity on a closed console: %v", err)
-	}
+}
+
+func (f *fixture) expectShellGone(info Info, reason string) {
+	f.t.Helper()
+	pid := consoletest.ReadPid(f.t, info.Socket+".pid")
+	child := consoletest.ReadPid(f.t, info.Socket+".child")
+	f.expectGone(info, reason)
+	consoletest.Eventually(f.t, "shell and its group gone", func() bool {
+		return !consoletest.Alive(pid) && !consoletest.Alive(child)
+	})
 }
 
 func TestOpenSocketAndCommandLine(t *testing.T) {
 	f := newFixture(t)
 	info := f.open("aaaaaaaa")
+	conn := f.attach(info)
+	defer func() { _ = conn.Close() }()
+	consoletest.ReadPid(t, info.Socket+".child")
 
 	fi, err := os.Lstat(info.Socket)
 	if err != nil || fi.Mode()&os.ModeSocket == 0 || fi.Mode().Perm() != 0o600 {
@@ -131,16 +158,16 @@ func TestOpenSocketAndCommandLine(t *testing.T) {
 	}
 
 	args, _ := os.ReadFile(info.Socket + ".args")
-	got := strings.Split(string(args), "\n")
-	want := []string{"-i", info.Socket, "--once", "--max-clients", "1", "--terminal-type", "xterm",
-		"--cwd", "/root", "--debug", "3", "--writable", "--ping-interval", "30", "/bin/bash", "--login"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("ttyd args\n got %q\nwant %q", got, want)
+	if strings.TrimSpace(string(args)) != f.dir {
+		t.Fatalf("shell args %q, want %q", args, f.dir)
 	}
-
 	env, _ := os.ReadFile(info.Socket + ".env")
-	if strings.Join(strings.Split(string(env), "\n"), " ") != strings.Join(shellEnv, " ") {
-		t.Fatalf("ttyd environment %q", env)
+	got := strings.Split(strings.TrimSpace(string(env)), "\n")
+	want := append(append([]string{}, shellEnv...), "TERM=xterm", "PWD=/root")
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("shell environment %q", env)
 	}
 }
 
@@ -155,9 +182,7 @@ func TestCapOfTwo(t *testing.T) {
 		t.Fatalf("third console: %v, grant taken %v", err, took)
 	}
 
-	if _, err := f.m.Activity(a.ID, EventClosed); err != nil {
-		t.Fatal(err)
-	}
+	f.m.kill(infoConsole(f.m, a.ID), ReasonClosed)
 	f.expectGone(a, ReasonClosed)
 	f.open("cccccccc")
 }
@@ -196,56 +221,62 @@ func TestTakeFailureStartsNothing(t *testing.T) {
 	}
 }
 
-func TestMissingTTYDLeavesTheGrant(t *testing.T) {
+func TestListenFailureConsumesGrantAndAudits(t *testing.T) {
 	f := newFixture(t)
-	f.m.o.TTYD = filepath.Join(f.dir, "absent")
+	if err := os.RemoveAll(f.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	took := false
-	if _, err := f.m.Open(Request{SessionHash: "aaaaaaaa", Term: "xterm"}, func() error { took = true; return nil }); !errors.Is(err, ErrUnavailable) || took {
+	_, err := f.m.Open(Request{SessionHash: "aaaaaaaa", Term: "xterm"}, func() error { took = true; return nil })
+	if err == nil || !took {
 		t.Fatalf("open: %v, grant taken %v", err, took)
 	}
+	ev := f.waitClosed("")
+	if ev.reason != ReasonExited || !ev.info.Opened.IsZero() {
+		t.Fatalf("close event %+v", ev)
+	}
+}
+
+func TestShellStartFailureAudits(t *testing.T) {
+	f := newFixture(t)
+	f.m.o.Shell = []string{filepath.Join(f.dir, "absent")}
+	info := f.open("aaaaaaaa")
+	conn := f.attach(info)
+	defer func() { _ = conn.Close() }()
+	f.expectGone(info, ReasonExited)
 }
 
 func TestAbsoluteLimit(t *testing.T) {
 	f := newFixture(t)
 	info := f.open("aaaaaaaa")
-	if _, err := f.m.Activity(info.ID, EventConnected); err != nil {
-		t.Fatal(err)
-	}
+	conn := f.attach(info)
+	defer func() { _ = conn.Close() }()
+	consoletest.ReadPid(t, info.Socket+".pid")
 	for i := 0; i < 4; i++ {
 		f.clk.Advance(IdleTimeout - time.Minute)
-		if _, err := f.m.Activity(info.ID, EventInput); err != nil {
-			t.Fatalf("input after %d steps: %v", i, err)
-		}
+		f.m.touch(infoConsole(f.m, info.ID))
 		f.m.Sweep()
-	}
-	st, err := f.m.Activity(info.ID, EventInput)
-	if err != nil || st.ExpiresIn != 240 {
-		t.Fatalf("status %+v %v", st, err)
 	}
 	f.clk.Advance(4 * time.Minute)
 	f.m.Sweep()
-	f.expectGone(info, ReasonExpired)
+	f.expectShellGone(info, ReasonExpired)
 }
 
 func TestIdleLimitCountsInputOnly(t *testing.T) {
 	f := newFixture(t)
 	info := f.open("aaaaaaaa")
 	f.clk.Advance(10 * time.Second)
-	if _, err := f.m.Activity(info.ID, EventConnected); err != nil {
-		t.Fatal(err)
-	}
+	conn := f.attach(info)
+	defer func() { _ = conn.Close() }()
+	consoletest.ReadPid(t, info.Socket+".pid")
 	f.clk.Advance(10 * time.Minute)
-	// A repeated connected report (a reconnecting tunnel, a ping) does not
-	// rearm the idle limit.
-	if _, err := f.m.Activity(info.ID, EventConnected); err != nil {
-		t.Fatal(err)
-	}
+	f.m.attach(infoConsole(f.m, info.ID))
 	f.clk.Advance(5*time.Minute - time.Second)
 	f.m.Sweep()
-	st, err := f.m.Activity(info.ID, EventInput)
-	if err != nil || st.IdleIn != int(IdleTimeout/time.Second) {
-		t.Fatalf("after input: %+v %v", st, err)
-	}
+	f.m.touch(infoConsole(f.m, info.ID))
 	f.clk.Advance(IdleTimeout - time.Second)
 	f.m.Sweep()
 	if f.m.Count() != 1 {
@@ -253,7 +284,13 @@ func TestIdleLimitCountsInputOnly(t *testing.T) {
 	}
 	f.clk.Advance(time.Second)
 	f.m.Sweep()
-	f.expectGone(info, ReasonIdle)
+	f.expectShellGone(info, ReasonIdle)
+}
+
+func infoConsole(m *Manager, id string) *console {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.consoles[id]
 }
 
 func TestNotConnectedWithin30s(t *testing.T) {
@@ -276,8 +313,8 @@ func TestSessionsEnded(t *testing.T) {
 
 	f.m.SessionsEnded("aaaaaaaa", "bad_code")
 	f.expectGone(a, "bad_code")
-	if _, err := f.m.Activity(b.ID, EventConnected); err != nil {
-		t.Fatalf("other session's console: %v", err)
+	if infoConsole(f.m, b.ID) == nil {
+		t.Fatal("other session's console was killed")
 	}
 
 	f.m.SessionsEnded("", "admin_reset")
@@ -293,48 +330,36 @@ func TestSessionEndedWhileStarting(t *testing.T) {
 	if !errors.Is(err, ErrEnded) {
 		t.Fatalf("open: %v", err)
 	}
-	consoletest.Eventually(t, "console gone", func() bool { return f.m.Count() == 0 })
-	select {
-	case ev := <-f.closed:
-		t.Fatalf("a console that never opened reported closed: %+v", ev)
-	default:
+	ev := f.waitClosed("")
+	if ev.reason != "admin_set" || !ev.info.Opened.IsZero() {
+		t.Fatalf("close event %+v", ev)
 	}
 }
 
 func TestTunnelDisconnectEndsTheConsole(t *testing.T) {
 	f := newFixture(t)
 	info := f.open("aaaaaaaa")
-	conn, err := net.Dial("unix", info.Socket)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := f.attach(info)
+	consoletest.ReadPid(t, info.Socket+".child")
 	_ = conn.Close()
-	f.expectGone(info, ReasonExited)
+	f.expectShellGone(info, ReasonClosed)
 }
 
 func TestKillFallsBackToSigkill(t *testing.T) {
 	f := newFixture(t)
-	if err := os.WriteFile(filepath.Join(f.dir, "fake-mode"), []byte(consoletest.ModeIgnoreTerm), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.dir, "fake-mode"), []byte(consoletest.ModeIgnoreHUP), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	info := f.open("aaaaaaaa")
+	conn := f.attach(info)
+	defer func() { _ = conn.Close() }()
+	consoletest.ReadPid(t, info.Socket+".child")
 	start := time.Now()
 	f.m.SessionsEnded("", "admin_reset")
-	f.expectGone(info, "admin_reset")
+	f.expectShellGone(info, "admin_reset")
 	if d := time.Since(start); d < killGrace {
-		t.Fatalf("gone after %v, before the grace: SIGTERM was not ignored", d)
+		t.Fatalf("gone after %v, before the grace: SIGHUP was not ignored", d)
 	}
-}
-
-func TestNoSocketFailsTheOpen(t *testing.T) {
-	f := newFixture(t)
-	if err := os.WriteFile(filepath.Join(f.dir, "fake-mode"), []byte(consoletest.ModeNoSocket), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.m.Open(Request{SessionHash: "aaaaaaaa", Term: "xterm"}, func() error { return nil }); err == nil {
-		t.Fatal("open without a socket succeeded")
-	}
-	consoletest.Eventually(t, "console gone", func() bool { return f.m.Count() == 0 })
 }
 
 func TestShutdownKillsEverything(t *testing.T) {
@@ -357,7 +382,7 @@ func TestNewRemovesStaleSockets(t *testing.T) {
 	_ = os.WriteFile(other, nil, 0o600)
 	_ = os.Chmod(f.dir, 0o755) //nolint:gosec // the loose mode under test
 
-	New(Options{Dir: f.dir, TTYD: f.m.o.TTYD})
+	New(Options{Dir: f.dir})
 	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
 		t.Fatalf("stale socket: %v", err)
 	}
@@ -366,17 +391,6 @@ func TestNewRemovesStaleSockets(t *testing.T) {
 	}
 	if di, _ := os.Lstat(f.dir); di.Mode().Perm() != 0o700 {
 		t.Fatalf("directory mode %v", di.Mode())
-	}
-}
-
-func TestActivityRejectsUnknown(t *testing.T) {
-	f := newFixture(t)
-	if _, err := f.m.Activity("0123456789abcdef", EventInput); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("unknown console: %v", err)
-	}
-	info := f.open("aaaaaaaa")
-	if _, err := f.m.Activity(info.ID, "ping"); err == nil {
-		t.Fatal("unknown event accepted")
 	}
 }
 

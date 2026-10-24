@@ -3,7 +3,6 @@ package app
 import (
 	"errors"
 	"strconv"
-	"strings"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -11,22 +10,12 @@ import (
 	"github.com/calaos/calaos-container/app/console"
 )
 
-// Overridden by tests with a fake ttyd.
-var consoleTTYD = console.DefaultTTYD
-
-func isConsoleActivityPath(p string) bool {
-	p = strings.TrimRight(strings.ToLower(p), "/")
-	return strings.HasPrefix(p, apiV2Prefix+"/admin/console/") && strings.HasSuffix(p, "/activity")
-}
-
 func consoleError(c *fiber.Ctx, err error) error {
 	switch {
 	case errors.Is(err, console.ErrLimit):
 		e := newAPIError(fiber.StatusConflict, codeConsoleLimit, "too many open consoles")
 		e.data = fiber.Map{"max": console.MaxConsoles}
 		return e
-	case errors.Is(err, console.ErrUnavailable):
-		return newAPIError(fiber.StatusConflict, codeConsoleUnavail, "the console is not installed on this box")
 	case errors.Is(err, console.ErrEnded):
 		return errBadSession()
 	case errors.Is(err, console.ErrNotFound):
@@ -92,36 +81,6 @@ func (a *AppServer) v2ConsoleOpen(c *fiber.Ctx) error {
 		ExpiresIn:     int(console.MaxLifetime.Seconds()),
 		IdleTimeout:   int(console.IdleTimeout.Seconds()),
 	})
-}
-
-// v2ConsoleActivity is how calaos_server, which carries the terminal
-// traffic, tells the daemon the tunnel is up, used, or gone.
-func (a *AppServer) v2ConsoleActivity(c *fiber.Ctx) error {
-	id := c.Params("id")
-	if !console.ValidID(id) {
-		return adminError(admin.ErrNotFound)
-	}
-	var b struct {
-		Event *string `json:"event"`
-	}
-	if err := decodeBody(c, &b); err != nil {
-		return err
-	}
-	if b.Event == nil {
-		return errInvalid("missing event")
-	}
-	switch *b.Event {
-	case console.EventConnected, console.EventInput, console.EventClosed:
-	default:
-		return errInvalid("invalid event")
-	}
-	auditField(c, "console", id)
-	auditField(c, "event", *b.Event)
-	st, err := a.consoles.Activity(id, *b.Event)
-	if err != nil {
-		return consoleError(c, err)
-	}
-	return sendOK(c, fiber.StatusOK, st)
 }
 
 // consoleClosed writes the close line; the open line is the audit of
