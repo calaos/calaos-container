@@ -30,6 +30,7 @@ const (
 	EventAdminReset      = "admin_reset"
 	EventApproverSet     = "approver_set"
 	EventApproverRemoved = "approver_removed"
+	EventConsoleOpened   = "console_opened"
 
 	hashFileName    = "password.hash"
 	alertsFileName  = "alerts.json"
@@ -68,12 +69,16 @@ type Options struct {
 	Hash       HashParams
 	Publish    func(evType string, data any)
 	Now        func() time.Time
+	// SessionsEnded is told of every invalidation, with the session hash or
+	// "" for all sessions. It runs under the manager lock: no call back in.
+	SessionsEnded func(sessionHash, reason string)
 }
 
 type Manager struct {
 	hashPath string
 	params   HashParams
 	publish  func(string, any)
+	ended    func(string, string)
 	now      func() time.Time
 	initErr  error
 
@@ -123,11 +128,15 @@ func New(o Options) *Manager {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.SessionsEnded == nil {
+		o.SessionsEnded = func(string, string) {}
+	}
 
 	m := &Manager{
 		hashPath:  filepath.Join(o.DataDir, hashFileName),
 		params:    o.Hash,
 		publish:   o.Publish,
+		ended:     o.SessionsEnded,
 		now:       o.Now,
 		limiter:   newLimiter(),
 		audit:     auditLog{path: filepath.Join(o.DataDir, auditFileName)},
@@ -392,7 +401,7 @@ func (m *Manager) Set(mode Mode, password, session string, code CodeRef) error {
 		}
 	}
 
-	m.invalidateSessionsLocked()
+	m.invalidateSessionsLocked(EventAdminSet)
 	m.raiseLocked(EventAdminSet)
 	return nil
 }
@@ -428,7 +437,7 @@ func (m *Manager) Reset() (wasSet bool, err error) {
 	defer m.mu.Unlock()
 	// Even a failed reset ends every session: none may outlive a half-wiped
 	// approver list.
-	defer m.invalidateSessionsLocked()
+	defer m.invalidateSessionsLocked(EventAdminReset)
 
 	if err := m.approvers.wipe(); err != nil {
 		return false, err
@@ -499,11 +508,22 @@ func (m *Manager) Audit(e AuditEntry) {
 	}
 }
 
-func (m *Manager) invalidateSessionsLocked() {
+func (m *Manager) invalidateSessionsLocked(reason string) {
+	m.ended("", reason)
 	m.codes.clear()
 	if err := m.sessions.invalidateAll(); err != nil {
 		logging.Errorf("invalidating the admin sessions: %v", err)
 	}
+}
+
+// RaiseConsoleOpened tells every phone that a root console was opened.
+func (m *Manager) RaiseConsoleOpened(sessionAuditID string) {
+	if m.initErr != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.raiseAlertLocked(Alert{Type: EventConsoleOpened, SessionAuditID: sessionAuditID})
 }
 
 // raiseLocked never fails the request: the password change has already

@@ -12,3 +12,5 @@ Depends: ${misc:Depends}, ${shlibs:Depends},
          btrfs-progs, parted, dosfstools, snapper, mount, rsync,
          sed, inotify-tools, curl, ifupdown2, snapper, jq,
          calaos-ddns, inputattach
+# Not Depends: bookworm has no ttyd, and the console is the only user.
+Recommends: ttyd

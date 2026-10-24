@@ -106,6 +106,8 @@ ignored.
 | `code_required` | 403 | a code-protected action sent without `code_id` and `code` | none |
 | `bad_code` | 403 | wrong push code, or a code requested for another action or other parameters | `{"attempts_left": <int>}` |
 | `code_expired` | 410 | the push code is unknown to this session, expired, used, replaced or dropped | none |
+| `console_limit` | 409 | a console is opened while 2 are open or opening | `{"max": 2}` |
+| `console_unavailable` | 409 | ttyd is not installed on the box | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -161,6 +163,8 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/admin/codes` | session only | 200 | `{"code_id", "approver_id", "expires_in"}`; body `{"action", "params", "approver_id"}` |
 | POST | `/api/v2/admin/codes/verify` | session only | 200 | `{"action", "expires_in"}`; body `{"code_id", "code"}` |
 | GET | `/api/v2/admin/push/{code_id}` | bearer only | 200 | `{"token": "<push token>", "message": "<text>"}`, single use |
+| POST | `/api/v2/admin/console` | session only | 200 | `<ConsoleOpened>`; body `{"code_id", "term"}` (see Console) |
+| POST | `/api/v2/admin/console/{console_id}/activity` | bearer only | 200 | `{"expires_in", "idle_in"}`; body `{"event"}` (see Console) |
 
 "Bearer only" routes refuse a request that carries `X-Calaos-Admin-Session` (`403 not_allowed`):
 the session path (calaos_server) never reaches them. "Session only" routes need a valid
@@ -207,12 +211,13 @@ keeps none: it relays the session the browser holds, in `X-Calaos-Admin-Session`
 - **Bound:** at most 32 live sessions; issuing one more drops the oldest.
 - **Validation:** whenever the header is present, on any `/api/v2/` route, before the route runs:
   - on a bearer-only route (`system/install/*`, `system/rollback_snapshot`, `network/*`,
-    `admin/reset`, `admin/alerts/ack`, `admin/push/*`, recovery `admin/set`): `403 not_allowed`,
+    `admin/reset`, `admin/alerts/ack`, `admin/push/*`, `admin/console/*/activity`, recovery
+    `admin/set`): `403 not_allowed`,
     without looking the session up;
   - elsewhere, empty, unknown, expired or invalidated: `401 bad_session`;
   - otherwise the route runs.
 
-  On a session-only route (`admin/approvers*`, `admin/codes*`) an absent header is also
+  On a session-only route (`admin/approvers*`, `admin/codes*`, `admin/console`) an absent header is also
   `401 bad_session`.
 
   A header present with an empty value counts as present. calaos_server never sends an empty
@@ -275,7 +280,7 @@ with `admin/verify`.
 ### `POST /api/v2/admin/reset`
 
 Bearer only, no body. Removes the password hash and the approvers, invalidates all sessions,
-closes open consoles (phase 2), and publishes the `admin_reset` alert if a password existed.
+kills every open console (see Console), and publishes the `admin_reset` alert if a password existed.
 Idempotent: `{"was_set": false}` when there was nothing to reset. Only `calaos-os admin reset`
 calls it.
 
@@ -328,7 +333,7 @@ it to an approver, the user types it back in the webapp.
 
 | `action` | Consumed by | Bound to `params` |
 |---|---|---|
-| `console_open` | `admin/codes/verify`, then the console ticket (CO1) | `{}` |
+| `console_open` | `admin/codes/verify`, then `POST admin/console` | `{}` |
 | `admin_password` | `POST admin/set`, change mode | `{"password": "<new password>"}` |
 | `approver_enroll` | `POST admin/approvers/enroll` while an approver exists | `{}` |
 | `approver_remove` | `POST admin/approvers/remove` | `{"approver_id": "<id>"}` |
@@ -423,6 +428,124 @@ codes sent to the removed phone die, and `approver_removed` is raised. Answer
 `{"approver_id": "..."}`. Errors: `invalid_request`, `approver_not_found`, `approver_last` (checked
 before the code, which stays usable), `code_required`, `bad_code`, `code_expired`.
 
+### Console
+
+A root shell on the host, served by [ttyd](https://github.com/tsl0922/ttyd) 1.7. The daemon decides
+who opens a console and for how long; ttyd is the terminal; calaos_server carries the browser's
+WebSocket to ttyd's socket and reports what it sees.
+
+**Opening**
+
+1. The client gets a `console_open` code (`POST admin/codes`) and verifies it
+   (`POST admin/codes/verify`): the code becomes a grant, usable once within 30 s by that session.
+2. calaos_server calls `POST admin/console` with the **same** `X-Calaos-Admin-Session`, body
+   `{"code_id": "<the verified code>", "term": "xterm-256color"}`. `term` is optional, one of
+   `xterm-256color` (default), `xterm`, `vt100`. Answer `<ConsoleOpened>`:
+
+   ```json
+   {"console_id": "4fbd81b12ca13a2b", "socket": "/run/calaos-container/console/console-4fbd81b12ca13a2b.sock", "ws_path": "/ws", "ws_protocol": "tty", "connect_within": 30, "expires_in": 3600, "idle_timeout": 900}
+   ```
+
+   Checks run in this order: body (`invalid_request`), session (`bad_session`), ttyd installed
+   (`console_unavailable`), a free slot (`console_limit`), the grant (`code_expired`), the start of
+   ttyd (`internal`). Up to the slot, the grant stays usable. The grant is bound to the session that
+   verified the code: another session gets `410 code_expired` and the grant stays with its session.
+   A session invalidated while its console starts gets `401 bad_session` and no console.
+3. The daemon raises `console_opened` (see Alerts) and runs, for this console only:
+
+   ```
+   ttyd -i <socket> --once --max-clients 1 --terminal-type <term> --cwd /root --debug 3 \
+        --writable --ping-interval 30 /bin/bash --login
+   ```
+
+   `--writable` (ttyd 1.7.4 and later are read-only without it) and `--ping-interval` (ttyd built
+   with libwebsockets 4) are passed only when `ttyd --help` lists them. ttyd and the shell get an
+   explicit environment, nothing of the daemon's: `PATH`, `HOME=/root`, `USER=root`,
+   `LOGNAME=root`, `SHELL=/bin/bash`, `LANG=C.UTF-8`, plus `TERM` set by ttyd from
+   `--terminal-type`. No credential and no `--url-arg`: the socket's mode is the gate, and the
+   client cannot pass arguments to the shell.
+
+**Socket**
+
+- `/run/calaos-container/console/console-<console_id>.sock`: Unix stream socket, owner root, mode
+  `0600`, in a `0700` directory owned by root. ttyd listens on nothing else.
+- calaos_server's container bind-mounts `/run/calaos-container/console` and nothing else of
+  `/run/calaos-container`, which holds the sessions. The daemon creates the directory at start and
+  never removes or replaces it, since a bind mount would keep showing the old one; it deletes the
+  sockets left by a previous run inside it.
+- The socket is removed when its console ends.
+
+**WebSocket protocol (ttyd 1.7)**
+
+calaos_server opens a WebSocket on the socket: HTTP upgrade on `ws_path` (`/ws`), subprotocol
+`ws_protocol` (`tty`). Host and Origin are not checked. Messages are binary; the first byte is the
+type, except in the first message.
+
+| Direction | Message | Meaning |
+|---|---|---|
+| to ttyd | `{"AuthToken": "", "columns": <int>, "rows": <int>}` (JSON, no type byte) | must be the first message; ttyd starts the shell only then |
+| to ttyd | `0` + bytes | input to the terminal |
+| to ttyd | `1` + `{"columns": <int>, "rows": <int>}` | resize |
+| to ttyd | `2`, `3` | pause, resume the output (flow control) |
+| from ttyd | `0` + bytes | terminal output |
+| from ttyd | `1` + text, `2` + JSON | window title, ttyd's client preferences; may be ignored |
+
+- ttyd pings every 30 s.
+- One client per console: while one is connected, another connection is refused, and when it
+  disconnects ttyd exits and the console ends (`reason=exited`). A console is one WebSocket; it
+  cannot be reattached.
+- ttyd does not bound resize values or buffer output for a slow reader: calaos_server bounds the
+  resize it relays and uses pause/resume.
+
+**Limits**
+
+- At most 2 consoles at once, those being opened included: `409 console_limit`.
+- 1 h after the open, absolute.
+- 30 s (`connect_within`) for calaos_server to report `connected`; otherwise the console is killed
+  (`not_connected`).
+- 15 min (`idle_timeout`) without an `input` report, counted from `connected`. Nothing else rearms
+  it: not the pings, not a resize, not a repeated `connected`.
+- 5 wrong push codes in the session that opened it kill it; every `admin/set` and `admin/reset`
+  (they invalidate every session) kill every console. The end of the session's own 15 minutes does
+  not: the console has its own limits.
+- A daemon that stops kills its consoles; one that dies takes its ttyd with it (`SIGKILL` from the
+  kernel on the parent's death).
+- A kill is `SIGTERM` to ttyd's process group, then `SIGKILL` after 2 s. ttyd's end hangs up the
+  shell's terminal. Processes the user detached from it (`nohup`, `setsid`, `systemd-run`) survive,
+  as after an SSH logout.
+
+**`POST admin/console/{console_id}/activity`**
+
+Bearer only: calaos_server reports what it sees on the tunnel, body `{"event": "<event>"}`.
+
+| `event` | When |
+|---|---|
+| `connected` | its WebSocket to ttyd is open (after the upgrade answer). Repeats change nothing |
+| `input` | it relayed at least one input message (`0`) since its last report. Never for pings, resize, pause or resume. At most one report per 30 s is enough: the idle limit then has 30 s of slack |
+| `closed` | the browser side is gone; the daemon kills the console. calaos_server also closes its WebSocket to ttyd |
+
+Answer `{"expires_in": <seconds to the 1 h limit>, "idle_in": <seconds to the idle limit>}` (zeros
+for `closed`). `404 not_found`: the console is unknown, ending or ended; calaos_server closes the
+browser's WebSocket. `400 invalid_request`: unknown event.
+
+**Trace**
+
+- `console_opened` alert at every open (see Alerts): calaos_server pushes "Console ouverte" to
+  every phone.
+- Audit: the open is the audit line of `POST admin/console`, with `action=console_open`,
+  `code_id=` and `console=`. The end writes
+  `<time> client=<client of the open> result=ok session=<audit id> action=console_close console=<id> reason=<reason> duration=<seconds> - "-"`,
+  `reason` one of `closed`, `exited`, `expired`, `idle`, `not_connected`, `shutdown`, `admin_set`,
+  `admin_reset`, `bad_code`. Both lines also go to journald. Accepted activity reports are not
+  audited (refused ones are).
+- Never any terminal content: ttyd runs with `--debug 3` (errors and warnings, no data), and its
+  messages go to the daemon log.
+
+**Packaging**
+
+The package recommends `ttyd`. Debian bookworm does not ship it; without it `POST admin/console`
+answers `409 console_unavailable` and nothing else changes.
+
 ### Rate limiting
 
 - One argon2id operation at a time (`verify` or `set`). A second one is refused at once with
@@ -436,7 +559,7 @@ before the code, which stays usable), `code_required`, `bad_code`, `code_expired
 
 ### Alerts
 
-`admin_set`, `admin_reset`, `approver_set` and `approver_removed` are persisted in
+`admin_set`, `admin_reset`, `approver_set`, `approver_removed` and `console_opened` are persisted in
 `/mnt/calaos/admin/` when they happen, then
 published on the event bus and replayed to every new `/events` subscriber until acknowledged. A
 connected subscriber that missed one (full buffer) gets it again at the next ping (30 s).
@@ -461,7 +584,8 @@ A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, a
 second: anything on the host can send the first, calaos_server relays a household client's guessed
 session on `update_status`, and in `audit.log` they would rotate the real entries away.
 
-`GET admin/status` without a session is not audited (calaos_server polls it). `audit.log` is
+`GET admin/status` without a session is not audited (calaos_server polls it), nor an accepted
+`admin/console/*/activity` report (see Console). `audit.log` is
 rotated at 1 MiB, one old file kept.
 
 ## Upgrade jobs
@@ -578,6 +702,7 @@ On connect the daemon sends, in order: one `upgrade_progress` with the current `
 | `admin_reset` | `{"id": "<16 hex>", "ts": "<RFC 3339>"}` | Alert, replayed until acknowledged |
 | `approver_set` | `{"id", "ts", "device_name", "token_id"}` | Alert, replayed until acknowledged: an approver was enrolled. Never the token |
 | `approver_removed` | `{"id", "ts", "device_name", "token_id"}` | Alert, replayed until acknowledged: an approver was removed. Never the token |
+| `console_opened` | `{"id", "ts", "session_audit_id"}` | Alert, replayed until acknowledged: a console was opened by the session with that audit id |
 | `push_code` | `{"approver_id": "...", "code_id": "..."}` | Carries neither token nor code; calaos_server fetches the message with `GET /api/v2/admin/push/{code_id}`. Not replayed |
 
 - Clients ignore types they do not know.
@@ -613,10 +738,11 @@ validated `package`.
 | `admin {action: approver_remove, params: {approver_id, code_id, code}}` | `POST /api/v2/admin/approvers/remove {"approver_id", "code_id", "code"}` | yes |
 | `admin {action: code_request, params: {code_action, code_params, approver_id}}` | `POST /api/v2/admin/codes {"action", "params", "approver_id"}`; `params` rebuilt per action from the Push codes table | yes |
 | `admin {action: code_verify, params: {code_id, code}}` | `POST /api/v2/admin/codes/verify {"code_id", "code"}` | yes |
-| `admin {action: console_open}` | console ticket, named by CO1 | yes |
+| `admin {action: console_open}` | `POST /api/v2/admin/console {"code_id", "term"}`, then the console socket (see Console); the session is the one that verified the code | yes |
 
 calaos_server's own calls, outside the table: `GET /api/v2/admin/status`,
-`POST /api/v2/admin/alerts/ack`, `GET /api/v2/events` and `GET /api/v2/admin/push/{code_id}`.
+`POST /api/v2/admin/alerts/ack`, `GET /api/v2/events`, `GET /api/v2/admin/push/{code_id}` and
+`POST /api/v2/admin/console/{console_id}/activity`.
 
 Actions calaos_server serves itself while admin is set (`config get/put`, `get_mcp_info`,
 `mcp_regenerate`) validate the session with `GET /api/v2/admin/status` carrying
@@ -627,7 +753,7 @@ without it the bearer alone authorizes.
 
 Never relayed, whatever the client sends: `system/install/*`, `system/rollback_snapshot`,
 `system/fs_status`, `network/*`, `update/installed`, `admin/reset`, `admin/alerts/ack` and
-`admin/push/*` (for a client), `admin/set` with `recovery`. The daemon refuses a session on the bearer-only ones as a second barrier.
+`admin/push/*` and `admin/console/*/activity` (for a client), `admin/set` with `recovery`. The daemon refuses a session on the bearer-only ones as a second barrier.
 
 `package` is checked by calaos_server with the same rule as the daemon (regex
 `^[A-Za-z0-9.+-]+$`, first character a letter or a digit, no `..`, at most 128 characters) and
@@ -641,9 +767,11 @@ the fields above and drops anything else the client sent.
 calaos_server forwards to household clients, as `admin_event {type, ts, data}`, only:
 
 - `upgrade_progress`, `data` = `<Status>`;
-- `admin_set`, `admin_reset`, `approver_set` and `approver_removed`, with `ts` only (`id` stripped,
-  no `data`). For the approver alerts calaos_server also pushes "approver phone <device_name>
-  enrolled" (or removed) to every token and stores the `EventPushNotification` shown at login.
+- `admin_set`, `admin_reset`, `approver_set`, `approver_removed` and `console_opened`, with `ts`
+  only (`id` stripped, no `data`). For the approver alerts calaos_server also pushes "approver
+  phone <device_name> enrolled" (or removed) to every token and stores the
+  `EventPushNotification` shown at login; for `console_opened` it pushes "Console ouverte" the same
+  way.
 
 `upgrade_job` is not forwarded: a client that resumes, or sees `upgrade_progress` reach `done` or
 `error`, reads the job through `update_status`. `push_code` is consumed by calaos_server,
@@ -656,12 +784,12 @@ never forwarded. Every other type is dropped.
 | connection refused, timeout, invalid answer | `daemon_unreachable` or `admin_unavailable`, per `AdminState` |
 | `401` without `code: bad_session`, after re-reading the token and one retry | `daemon_unreachable` |
 | `404` on `GET /api/v2/admin/status` (any body), or any `/api/v2/` `404` whose body is not an envelope with a `code` | `daemon_too_old` |
-| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired` | same code |
+| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired`, `console_limit`, `console_unavailable` | same code |
 | `invalid_request`, `package_not_found`, `package_held` | same code, with the daemon `msg` (safe to display) |
 | `internal`, `not_found`, `method_not_allowed`, any unknown code | `internal` |
 
 `rate_limited` copies `retry_after`; `upgrade_in_progress` copies `job_id`; `bad_code` copies
-`attempts_left`; `approver_limit` copies `max`. The calaos_server
+`attempts_left`; `approver_limit` and `console_limit` copy `max`. The calaos_server
 vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_not_found`,
 `package_held` and `internal`, and cites this file's `package` rule rather than the bare regex.
 
@@ -738,7 +866,7 @@ The contract above is complete; the daemon implements it in steps.
 | `admin/*` routes, sessions, `X-Calaos-Admin-Session`, rate limiting, alerts, audit, `calaos-os admin set|reset` | ADM-CC1 |
 | `202` upgrade jobs, `upgrade_job`, `job` in `update/status` and in `409` answers, interrupted jobs | ADM-CC3 |
 | approvers, push codes, `push_code`, `approver_set` and `approver_removed` alerts, `admin/push/{code_id}`, code required on change `admin/set` | AP1a, released together with AP1b and WA3: `admin/p7` merges to main only then, since against an older calaos_server the change-mode `admin/set` fails (`internal`) |
-| console routes | CO1 |
+| `admin/console` and its activity route, ttyd, `console_opened` | CO1 |
 
 A daemon that serves `/api/v2/` but predates ADM-CC3 answers `404 not_found` on the upgrade
 routes: the CLI then upgrades through the legacy routes, as it does against a daemon without

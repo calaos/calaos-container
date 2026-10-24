@@ -46,6 +46,9 @@ func sessionHash(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// SessionHash names a session the way SessionsEnded reports it.
+func SessionHash(s string) string { return sessionHash(s) }
+
 // SessionAuditID is the only form of a session that may appear in a log.
 func SessionAuditID(s string) string {
 	return sessionHash(s)[:8]
