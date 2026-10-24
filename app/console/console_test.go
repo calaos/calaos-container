@@ -93,7 +93,7 @@ func (f *fixture) attach(info Info) *gws.Conn {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if err := conn.WriteMessage(gws.TextMessage, []byte(`{"AuthToken":"","columns":120,"rows":40}`)); err != nil {
+	if err := conn.WriteMessage(gws.TextMessage, []byte(`{"columns":120,"rows":40}`)); err != nil {
 		f.t.Fatal(err)
 	}
 	return conn
@@ -285,6 +285,24 @@ func TestIdleLimitCountsInputOnly(t *testing.T) {
 	f.clk.Advance(time.Second)
 	f.m.Sweep()
 	f.expectShellGone(info, ReasonIdle)
+}
+
+func TestEmptyInputDoesNotRearmIdle(t *testing.T) {
+	f := newFixture(t)
+	info := f.open("aaaaaaaa")
+	conn := f.attach(info)
+	defer func() { _ = conn.Close() }()
+	f.clk.Advance(IdleTimeout - time.Second)
+	if err := conn.WriteMessage(gws.BinaryMessage, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(gws.TextMessage, []byte(`{"type":"input","data":""}`)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	f.clk.Advance(time.Second)
+	f.m.Sweep()
+	f.expectGone(info, ReasonIdle)
 }
 
 func infoConsole(m *Manager, id string) *console {

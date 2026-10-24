@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -25,9 +26,8 @@ const (
 )
 
 type initialFrame struct {
-	AuthToken string `json:"AuthToken"`
-	Columns   *int   `json:"columns"`
-	Rows      *int   `json:"rows"`
+	Columns *int `json:"columns"`
+	Rows    *int `json:"rows"`
 }
 
 type inputFrame struct {
@@ -103,9 +103,6 @@ func (m *Manager) run(c *console, app *fiber.App, ln net.Listener) {
 	}
 
 	m.mu.Lock()
-	if c.pgid != 0 {
-		_ = syscall.Kill(-c.pgid, syscall.SIGKILL)
-	}
 	c.closePTY()
 	_ = os.Remove(c.Socket)
 	c.exited = true
@@ -193,6 +190,32 @@ func (m *Manager) bridge(c *console, conn *websocket.Conn, term string) {
 	inputErr := make(chan error, 1)
 	go m.readInput(c, conn, inputErr)
 
+	writeOutput := func(b []byte) bool {
+		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		return conn.WriteMessage(websocket.BinaryMessage, b) == nil
+	}
+	drainOutput := func() bool {
+		if out == nil {
+			return true
+		}
+		for b := range out {
+			if !writeOutput(b) {
+				return false
+			}
+		}
+		return true
+	}
+	closeWS := func() {
+		m.mu.Lock()
+		reason := c.reason
+		m.mu.Unlock()
+		code := websocket.CloseGoingAway
+		if reason == ReasonClosed || reason == ReasonExited {
+			code = websocket.CloseNormalClosure
+		}
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, "console closed"), time.Now().Add(wsWriteWait))
+	}
+
 	ticker := time.NewTicker(wsPingPeriod)
 	defer ticker.Stop()
 	for {
@@ -202,8 +225,7 @@ func (m *Manager) bridge(c *console, conn *websocket.Conn, term string) {
 				out = nil
 				continue
 			}
-			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-			if err := conn.WriteMessage(websocket.BinaryMessage, b); err != nil {
+			if !writeOutput(b) {
 				return
 			}
 		case err := <-inputErr:
@@ -215,16 +237,19 @@ func (m *Manager) bridge(c *console, conn *websocket.Conn, term string) {
 				return
 			}
 		case <-c.shellDone:
+			if drainOutput() {
+				closeWS()
+			}
 			return
 		case <-c.stop:
-			m.mu.Lock()
-			reason := c.reason
-			m.mu.Unlock()
-			code := websocket.CloseGoingAway
-			if reason == ReasonClosed || reason == ReasonExited {
-				code = websocket.CloseNormalClosure
+			select {
+			case <-c.shellDone:
+				if !drainOutput() {
+					return
+				}
+			default:
 			}
-			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, "console closed"), time.Now().Add(wsWriteWait))
+			closeWS()
 			return
 		}
 	}
@@ -244,6 +269,13 @@ func (m *Manager) runShell(c *console, cmd *exec.Cmd, size *pty.Winsize, started
 		m.mu.Unlock()
 		close(c.shellDone)
 		return
+	}
+	// A pollable master lets Close interrupt pending reads and hang up the
+	// slave even when its foreground process ignores SIGHUP.
+	if fd, derr := syscall.Dup(int(master.Fd())); derr == nil {
+		_ = master.Close()
+		_ = syscall.SetNonblock(fd, true)
+		master = os.NewFile(uintptr(fd), "/dev/ptmx")
 	}
 	m.mu.Lock()
 	c.pty = master
@@ -271,12 +303,31 @@ func readPTY(c *console, out chan<- []byte) {
 		if n > 0 {
 			select {
 			case out <- buf[:n]:
-			case <-c.stop:
-				return
+			default:
+				select {
+				case out <- buf[:n]:
+				case <-c.stop:
+					select {
+					case <-c.shellDone:
+						out <- buf[:n]
+					default:
+						return
+					}
+				}
 			}
 		}
 		if err != nil {
-			// Linux returns EIO when the last slave closes; it is ordinary EOF.
+			if errors.Is(err, syscall.EIO) {
+				// util-linux login briefly disconnects the slave around vhangup.
+				select {
+				case <-c.shellDone:
+					return
+				case <-c.stop:
+					return
+				case <-time.After(20 * time.Millisecond):
+					continue
+				}
+			}
 			return
 		}
 	}
@@ -291,7 +342,9 @@ func (m *Manager) readInput(c *console, conn *websocket.Conn, failed chan<- erro
 		}
 		switch kind {
 		case websocket.BinaryMessage:
-			m.touch(c)
+			if len(data) > 0 {
+				m.touch(c)
+			}
 			if _, err := c.pty.Write(data); err != nil {
 				failed <- err
 				return
@@ -303,7 +356,9 @@ func (m *Manager) readInput(c *console, conn *websocket.Conn, failed chan<- erro
 			}
 			switch frame.Type {
 			case "input":
-				m.touch(c)
+				if frame.Data != "" {
+					m.touch(c)
+				}
 				if _, err := io.WriteString(c.pty, frame.Data); err != nil {
 					failed <- err
 					return

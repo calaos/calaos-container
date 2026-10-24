@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,9 +50,10 @@ func dialConsole(t *testing.T, d consoleOpened) *gws.Conn {
 	if conn.Subprotocol() != console.WSProtocol {
 		t.Fatalf("subprotocol %q", conn.Subprotocol())
 	}
-	if err := conn.WriteMessage(gws.TextMessage, []byte(`{"AuthToken":"","columns":120,"rows":40}`)); err != nil {
+	if err := conn.WriteMessage(gws.TextMessage, []byte(`{"columns":120,"rows":40}`)); err != nil {
 		t.Fatal(err)
 	}
+	readUntil(t, conn, regexp.MustCompile(`# `))
 	return conn
 }
 
@@ -88,6 +91,16 @@ func readUntil(t *testing.T, conn *gws.Conn, re *regexp.Regexp) []string {
 			return m
 		}
 	}
+}
+
+func bridgeGoroutines(t *testing.T) int {
+	t.Helper()
+	var profile bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&profile, 1); err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Count(profile.Bytes(), []byte("console.readPTY(")) +
+		bytes.Count(profile.Bytes(), []byte("console.(*Manager).readInput("))
 }
 
 func TestConsoleRunsAndIsKilled(t *testing.T) {
@@ -131,6 +144,22 @@ func TestConsoleRunsAndIsKilled(t *testing.T) {
 			break
 		}
 	}
+}
+
+func TestConsoleExpiryHangsUpIgnoringShell(t *testing.T) {
+	c, clk, s := realConsoleApp(t)
+	d := c.openConsole(s, c.grant(clk, s))
+	conn := dialConsole(t, d)
+	defer func() { _ = conn.Close() }()
+	send(t, conn, `trap '' HUP TERM; echo P=$$`)
+	m := readUntil(t, conn, regexp.MustCompile(`P=(\d+)`))
+	shell, _ := strconv.Atoi(m[1])
+
+	clk.Advance(console.MaxLifetime)
+	c.a.consoles.Sweep()
+	waitAudit(t, "action=console_close console="+d.ConsoleID+" reason=expired")
+	consoletest.Eventually(t, "signal-ignoring shell gone", func() bool { return !consoletest.Alive(shell) })
+	consoletest.Eventually(t, "bridge goroutines gone", func() bool { return bridgeGoroutines(t) == 0 })
 }
 
 func TestConsoleResizeAndBinaryInput(t *testing.T) {
@@ -182,7 +211,18 @@ func TestConsoleShellExit(t *testing.T) {
 	d := c.openConsole(s, c.grant(clk, s))
 	conn := dialConsole(t, d)
 	defer func() { _ = conn.Close() }()
-	send(t, conn, "exit")
+	send(t, conn, "echo last-output; exit")
+	readUntil(t, conn, regexp.MustCompile(`last-output\r\n`))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var closeErr error
+	for {
+		if _, _, closeErr = conn.ReadMessage(); closeErr != nil {
+			break
+		}
+	}
+	if err, ok := closeErr.(*gws.CloseError); !ok || err.Code != gws.CloseNormalClosure {
+		t.Fatalf("shell exit close: %v", closeErr)
+	}
 	waitAudit(t, "action=console_close console="+d.ConsoleID+" reason=exited")
 }
 

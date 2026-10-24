@@ -463,8 +463,7 @@ calaos_server only tunnels the browser's WebSocket to the console's private Unix
   `/run/calaos-container`, which holds the sessions. The daemon creates the directory at start and
   never removes or replaces it, since a bind mount would keep showing the old one; it deletes the
   sockets left by a previous run inside it.
-- The socket is removed when its console ends. Its HTTP upgrade response is unchanged by the
-  native bridge; only the WebSocket protocol below replaces the old terminal protocol.
+- The socket is removed when its console ends.
 
 **WebSocket protocol (`calaos-console.v1`)**
 
@@ -474,19 +473,23 @@ not call a console activity route or interpret terminal traffic. Host and Origin
 
 | Direction | Message | Meaning |
 |---|---|---|
-| to daemon | text JSON `{"AuthToken": "", "columns": <int>, "rows": <int>}` | must be the first message; both dimensions are 1..1000; starts `/bin/login -f root` in the pty |
+| to daemon | text JSON `{"columns": <int>, "rows": <int>}` | must be the first message; both dimensions are 1..1000; starts `/bin/login -f root` in the pty |
 | to daemon | text JSON `{"type": "input", "data": "<text>"}` | input to the pty |
 | to daemon | text JSON `{"type": "resize", "columns": <int>, "rows": <int>}` | resize; both dimensions are 1..1000 |
 | to daemon | binary bytes | raw input to the pty |
 | from daemon | binary bytes | raw output from the pty |
 
 - After initialization, malformed JSON, unknown text message types and invalid resizes are ignored.
-  There are no pause/resume messages or output flow-control commands.
-- The daemon pings every 30 s.
+  There are no pause/resume messages or output flow-control commands. Empty input does not rearm the
+  idle timer. Input sent before the first prompt may be discarded by `login`.
+- The daemon pings every 30 s. A client that does not answer with a pong within 60 s is disconnected
+  (`reason=closed`).
 - Output passes through a bounded queue. A slow client applies backpressure to the pty; one write
   blocked for 10 s closes the console instead of growing daemon memory without bound.
 - One client per console: a second connection is refused, and when the client disconnects the
   console ends (`reason=closed`). A console is one WebSocket; it cannot be reattached.
+- The close frame carries reason text `console closed` and code `1000` for `closed` and `exited`,
+  or `1001` for every other reason. Final pty output is sent before the close frame.
 
 **Limits**
 
@@ -501,8 +504,9 @@ not call a console activity route or interpret terminal traffic. Host and Origin
   not: the console has its own limits.
 - A daemon that stops kills its consoles; one that dies takes the login process with it
   (`SIGKILL` from the kernel on the parent's death).
-- A kill is `SIGHUP` to the login process group, then `SIGKILL` after 2 s. Processes the user
-  detached from the terminal (`nohup`, `setsid`, `systemd-run`) survive, as after an SSH logout.
+- A kill sends `SIGHUP` to the login process group and closes the pty master, hanging up the
+  terminal, then sends `SIGKILL` to login after 2 s. Processes the user detached from the terminal
+  (`nohup`, `setsid`, `systemd-run`) survive, as after an SSH logout.
 
 **Trace**
 
