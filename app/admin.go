@@ -22,6 +22,7 @@ const (
 	localErrCode       = "calaos.err_code"
 	localIssuedSession = "calaos.issued_session"
 	localAuditFields   = "calaos.audit_fields"
+	localSessionLive   = "calaos.session_live"
 )
 
 // Overridden by tests so they never touch the box directories.
@@ -274,8 +275,10 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	}
 	// Anything on the host can send a bad bearer, and calaos_server relays a
 	// household client's guessed session: in audit.log either would rotate
-	// the real entries away.
-	if e.Result == codeBadBearer || e.Result == codeBadSession {
+	// the real entries away. A session live at entry (one that ended while
+	// its console started) keeps its line. Not e.Fields: admin/set sets them
+	// before it checks the session.
+	if (e.Result == codeBadBearer || e.Result == codeBadSession) && c.Locals(localSessionLive) == nil {
 		a.admin.AuditRefused(e)
 	} else {
 		a.admin.Audit(e)

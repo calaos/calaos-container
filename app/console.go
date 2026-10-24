@@ -34,6 +34,9 @@ type consoleOpened struct {
 	IdleTimeout   int    `json:"idle_timeout"`
 }
 
+// takeGrant lets tests end the session while its console starts.
+var takeGrant = (*admin.Manager).TakeGrant
+
 // v2ConsoleOpen takes the console_open grant of this very session: the grant
 // is bound to the session that verified the code.
 func (a *AppServer) v2ConsoleOpen(c *fiber.Ctx) error {
@@ -64,7 +67,7 @@ func (a *AppServer) v2ConsoleOpen(c *fiber.Ctx) error {
 		Client:      auditClient(c),
 		Term:        term,
 	}, func() error {
-		return a.admin.TakeGrant(s, *b.CodeID, admin.ActionConsoleOpen)
+		return takeGrant(a.admin, s, *b.CodeID, admin.ActionConsoleOpen)
 	})
 	if err != nil {
 		return consoleError(c, err)

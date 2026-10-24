@@ -141,6 +141,27 @@ func TestConsoleKilledOnAdminSet(t *testing.T) {
 	waitAudit(t, "action=console_close console="+d.ConsoleID+" reason=admin_set")
 }
 
+// The grant is used up and the close line written: the open needs its line.
+func TestConsoleEndedWhileStartingIsAudited(t *testing.T) {
+	c, clk, s := consoleApp(t)
+	id := c.grant(clk, s)
+	prev := takeGrant
+	takeGrant = func(m *admin.Manager, session, codeID, action string) error {
+		err := prev(m, session, codeID, action)
+		c.a.consoles.SessionsEnded(admin.SessionHash(session), "admin_set")
+		return err
+	}
+	t.Cleanup(func() { takeGrant = prev })
+
+	c.expect("POST", "/api/v2/admin/console", `{"code_id":"`+id+`"}`, session(s), 401, codeBadSession)
+	log := waitAudit(t, "action=console_close")
+	sid := admin.SessionAuditID(s)
+	if !strings.Contains(log, "result=bad_session session="+sid+" action=console_open code_id="+id+` POST "/api/v2/admin/console"`) ||
+		!strings.Contains(log, "result=ok session="+sid+" action=console_close") || !strings.Contains(log, "reason=admin_set") {
+		t.Fatalf("audit log:\n%s", log)
+	}
+}
+
 func TestConsoleKilledAfterFiveBadCodes(t *testing.T) {
 	c, clk, s := consoleApp(t)
 	other := c.verify(adminPw)

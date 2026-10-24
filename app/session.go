@@ -31,6 +31,7 @@ func (a *AppServer) sessionAllowed(c *fiber.Ctx) error {
 	if !a.sessions.Valid(s) {
 		return errBadSession()
 	}
+	c.Locals(localSessionLive, true)
 	return c.Next()
 }
 
@@ -41,6 +42,7 @@ func (a *AppServer) sessionRequired(c *fiber.Ctx) error {
 	if !present || !a.sessions.Valid(s) {
 		return errBadSession()
 	}
+	c.Locals(localSessionLive, true)
 	return c.Next()
 }
 

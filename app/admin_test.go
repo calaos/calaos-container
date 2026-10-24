@@ -494,7 +494,7 @@ func TestAdminAuditFlood(t *testing.T) {
 }
 
 // calaos_server relays a household client's well-formed session guess on
-// update_status: those refusals must not rotate audit.log either.
+// update_status or admin/set: those refusals must not rotate audit.log either.
 func TestAdminAuditBadSessionFlood(t *testing.T) {
 	c := newAdminApp(t)
 	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
@@ -502,6 +502,9 @@ func TestAdminAuditBadSessionFlood(t *testing.T) {
 	forged := session(strings.Repeat("ab", 32))
 	for i := 0; i < 10000; i++ {
 		tc := httpCase{method: "GET", path: "/api/v2/update/status", headers: forged}
+		if i%2 == 1 {
+			tc = httpCase{method: "POST", path: "/api/v2/admin/set", body: `{"password":"` + adminPwNew + `"}`, headers: forged}
+		}
 		if resp, body := doCase(t, c.a, tc); resp.StatusCode != 401 || !strings.Contains(string(body), codeBadSession) {
 			t.Fatalf("request %d: %d %s", i, resp.StatusCode, body)
 		}
