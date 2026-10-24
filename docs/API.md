@@ -379,8 +379,11 @@ offers `approver_candidates`, its `push_tokens` entries as `{token_id, device_na
 1. The daemon publishes `push_code {"approver_id", "code_id"}` on the event bus (see Events). It
    carries neither the token nor the code.
 2. calaos_server calls `GET /api/v2/admin/push/{code_id}` (bearer only) and gets
-   `{"token": "<push token>", "message": "<text>"}`. The message is a short English sentence with
-   the code and what it allows. One fetch per code: a second one, an unknown or an expired code
+   `{"token": "<push token>", "message": "<text>"}`. The message is
+   `Calaos admin code NNNNNN: <purpose>. Valid 60 s, never share it.`, `NNNNNN` being the code and
+   `<purpose>` one of `open the web console`, `change the admin password`, `add an approver phone`,
+   `remove an approver phone`, or `enroll this phone as the admin approver` (the enrolment code
+   sent to the new token). One fetch per code: a second one, an unknown or an expired code
    answers `404 not_found`.
 3. calaos_server pushes the message to that one token and never forwards `push_code` to a client.
 
