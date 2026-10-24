@@ -46,6 +46,9 @@ func sessionHash(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// SessionHash names a session the way SessionsEnded reports it.
+func SessionHash(s string) string { return sessionHash(s) }
+
 // SessionAuditID is the only form of a session that may appear in a log.
 func SessionAuditID(s string) string {
 	return sessionHash(s)[:8]
@@ -135,6 +138,15 @@ func (st *sessionStore) find(now time.Time, tok string) *session {
 		}
 	}
 	return nil
+}
+
+func (st *sessionStore) liveHash(now time.Time, h string) bool {
+	for _, s := range st.list {
+		if s.Hash == h && now.Before(s.Expires) {
+			return true
+		}
+	}
+	return false
 }
 
 func (st *sessionStore) prune(now time.Time) {

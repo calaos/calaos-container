@@ -82,7 +82,7 @@ func (e *env) manager() *Manager {
 
 func mustSet(t *testing.T, m *Manager, mode Mode, pw, session string) {
 	t.Helper()
-	if err := m.Set(mode, pw, session); err != nil {
+	if err := m.Set(mode, pw, session, CodeRef{}); err != nil {
 		t.Fatalf("Set(%s): %v", mode, err)
 	}
 }
@@ -206,7 +206,7 @@ func TestSymlinkedDirectoryRefused(t *testing.T) {
 	if _, err := m.Status(); err == nil {
 		t.Fatal("Status works on a symlinked data directory")
 	}
-	if err := m.Set(ModeBootstrap, goodPassword, ""); err == nil || errors.Is(err, ErrAlreadySet) {
+	if err := m.Set(ModeBootstrap, goodPassword, "", CodeRef{}); err == nil || errors.Is(err, ErrAlreadySet) {
 		t.Fatalf("Set on a symlinked data directory: %v", err)
 	}
 	if m.Valid(strings.Repeat("a", 64)) {
@@ -227,10 +227,10 @@ func TestSetModes(t *testing.T) {
 	if _, _, err := m.Verify(goodPassword); !errors.Is(err, ErrNotSet) {
 		t.Fatalf("verify before bootstrap: %v", err)
 	}
-	if err := m.Set(ModeChange, otherPassword, strings.Repeat("a", 64)); !errors.Is(err, ErrBadSession) {
+	if err := m.Set(ModeChange, otherPassword, strings.Repeat("a", 64), CodeRef{}); !errors.Is(err, ErrBadSession) {
 		t.Fatalf("change before bootstrap: %v", err)
 	}
-	if err := m.Set(ModeBootstrap, "short", ""); !errors.Is(err, ErrTooShort) {
+	if err := m.Set(ModeBootstrap, "short", "", CodeRef{}); !errors.Is(err, ErrTooShort) {
 		t.Fatalf("short bootstrap: %v", err)
 	}
 
@@ -239,25 +239,36 @@ func TestSetModes(t *testing.T) {
 		t.Fatal("not set after bootstrap")
 	}
 	// State is checked before length.
-	if err := m.Set(ModeBootstrap, "short", ""); !errors.Is(err, ErrAlreadySet) {
+	if err := m.Set(ModeBootstrap, "short", "", CodeRef{}); !errors.Is(err, ErrAlreadySet) {
 		t.Fatalf("second bootstrap: %v", err)
 	}
-	if err := m.Set(ModeBootstrap, otherPassword, ""); !errors.Is(err, ErrAlreadySet) {
+	if err := m.Set(ModeBootstrap, otherPassword, "", CodeRef{}); !errors.Is(err, ErrAlreadySet) {
 		t.Fatalf("second bootstrap: %v", err)
 	}
 
 	s := mustVerify(t, m, goodPassword)
-	if err := m.Set(ModeChange, otherPassword, "nope"); !errors.Is(err, ErrBadSession) {
+	if err := m.Set(ModeChange, otherPassword, "nope", CodeRef{}); !errors.Is(err, ErrBadSession) {
 		t.Fatalf("change with a bad session: %v", err)
 	}
 	// Session is checked before length.
-	if err := m.Set(ModeChange, "short", "nope"); !errors.Is(err, ErrBadSession) {
+	if err := m.Set(ModeChange, "short", "nope", CodeRef{}); !errors.Is(err, ErrBadSession) {
 		t.Fatalf("short change with a bad session: %v", err)
 	}
-	if err := m.Set(ModeChange, "short", s); !errors.Is(err, ErrTooShort) {
+	if err := m.Set(ModeChange, "short", s, CodeRef{}); !errors.Is(err, ErrTooShort) {
 		t.Fatalf("short change: %v", err)
 	}
-	mustSet(t, m, ModeChange, otherPassword, s)
+	if err := m.Set(ModeChange, otherPassword, s, CodeRef{}); !errors.Is(err, ErrApproverRequired) {
+		t.Fatalf("change without an approver: %v", err)
+	}
+	enrol(t, e, m, s, "tok-1")
+	e.clk.Advance(codeInterval)
+	if err := m.Set(ModeChange, otherPassword, s, CodeRef{}); !errors.Is(err, ErrCodeRequired) {
+		t.Fatalf("change without a code: %v", err)
+	}
+	ref := requestCode(t, e, m, s, ActionAdminPassword, Params{"password": otherPassword})
+	if err := m.Set(ModeChange, otherPassword, s, ref); err != nil {
+		t.Fatalf("change: %v", err)
+	}
 	if m.Valid(s) {
 		t.Fatal("change kept the session")
 	}
@@ -283,7 +294,7 @@ func TestSetModes(t *testing.T) {
 		t.Fatal("recovery on an unset box did not set the password")
 	}
 
-	if got := e.pub.types(); strings.Join(got, ",") != "admin_set,admin_set,admin_set,admin_reset,admin_set" {
+	if got := e.pub.types(); strings.Join(got, ",") != "admin_set,push_code,approver_set,push_code,admin_set,admin_set,admin_reset,admin_set" {
 		t.Fatalf("published %v", got)
 	}
 }
@@ -327,7 +338,7 @@ func TestConcurrentBootstrap(t *testing.T) {
 			wg.Add(1)
 			go func(i int, m *Manager) {
 				defer wg.Done()
-				errs <- m.Set(ModeBootstrap, goodPassword+strconv.Itoa(i), "")
+				errs <- m.Set(ModeBootstrap, goodPassword+strconv.Itoa(i), "", CodeRef{})
 			}(i, m)
 		}
 		wg.Wait()
@@ -429,7 +440,7 @@ func TestLimiterOneAtATime(t *testing.T) {
 	if _, _, err := m.Verify(goodPassword); !errors.As(err, &rl) || rl.RetryAfter != 1 {
 		t.Fatalf("concurrent verify: %v", err)
 	}
-	if err := m.Set(ModeRecovery, otherPassword, ""); !errors.As(err, &rl) || rl.RetryAfter != 1 {
+	if err := m.Set(ModeRecovery, otherPassword, "", CodeRef{}); !errors.As(err, &rl) || rl.RetryAfter != 1 {
 		t.Fatalf("concurrent set: %v", err)
 	}
 	if d := time.Since(start); d > time.Second {
@@ -754,7 +765,7 @@ func TestSessionDiesWithHashRemovedOutOfBand(t *testing.T) {
 	if m.Valid(s) {
 		t.Fatal("session valid without a password hash")
 	}
-	if err := m.Set(ModeChange, otherPassword, s); !errors.Is(err, ErrBadSession) {
+	if err := m.Set(ModeChange, otherPassword, s, CodeRef{}); !errors.Is(err, ErrBadSession) {
 		t.Fatalf("change without a hash: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
@@ -20,6 +21,8 @@ const (
 
 	localErrCode       = "calaos.err_code"
 	localIssuedSession = "calaos.issued_session"
+	localAuditFields   = "calaos.audit_fields"
+	localSessionLive   = "calaos.session_live"
 )
 
 // Overridden by tests so they never touch the box directories.
@@ -27,6 +30,7 @@ var (
 	adminDataDir    = admin.DefaultDataDir
 	adminRuntimeDir = admin.DefaultRuntimeDir
 	adminHashParams admin.HashParams
+	adminNow        func() time.Time
 
 	// publishAdmin lets tests lose a live alert, as a full subscriber would.
 	publishAdmin = func(h *events.Hub, evType string, data any) { h.Publish(evType, data) }
@@ -41,13 +45,50 @@ func (a *AppServer) registerAdmin(v2 fiber.Router) {
 	v2.Post("/admin/set", a.v2AdminSet)
 	v2.Post("/admin/reset", bearerOnly, a.v2AdminReset)
 	v2.Post("/admin/alerts/ack", bearerOnly, a.v2AdminAlertsAck)
+
+	r := a.sessionRequired
+	v2.Get("/admin/approvers", r, a.v2Approvers)
+	v2.Post("/admin/approvers/enroll", r, a.v2ApproverEnroll)
+	v2.Post("/admin/approvers/confirm", r, a.v2ApproverConfirm)
+	v2.Post("/admin/approvers/remove", r, a.v2ApproverRemove)
+	v2.Post("/admin/codes", r, a.v2CodeRequest)
+	v2.Post("/admin/codes/verify", r, a.v2CodeVerify)
+	v2.Get("/admin/push/:code_id", bearerOnly, a.v2PushPayload)
+
+	v2.Post("/admin/console", r, a.v2ConsoleOpen)
 }
 
 func adminError(err error) *apiError {
 	var rl *admin.RateLimitedError
+	var bc *admin.BadCodeError
+	var inv *admin.InvalidError
 	switch {
+	case errors.As(err, &bc):
+		e := newAPIError(fiber.StatusForbidden, codeBadCode, "wrong push code")
+		e.data = fiber.Map{"attempts_left": bc.AttemptsLeft}
+		return e
+	case errors.As(err, &inv):
+		return errInvalid(inv.Msg)
+	case errors.Is(err, admin.ErrApproverRequired):
+		return newAPIError(fiber.StatusConflict, codeApproverRequired, "this action needs an enrolled approver")
+	case errors.Is(err, admin.ErrApproverLimit):
+		e := newAPIError(fiber.StatusConflict, codeApproverLimit, "too many approvers")
+		e.data = fiber.Map{"max": admin.MaxApprovers}
+		return e
+	case errors.Is(err, admin.ErrApproverExists):
+		return newAPIError(fiber.StatusConflict, codeApproverExists, "this phone is already an approver")
+	case errors.Is(err, admin.ErrApproverLast):
+		return newAPIError(fiber.StatusConflict, codeApproverLast, "the last approver cannot be removed")
+	case errors.Is(err, admin.ErrApproverNotFound):
+		return newAPIError(fiber.StatusNotFound, codeApproverNotFound, "unknown approver")
+	case errors.Is(err, admin.ErrCodeRequired):
+		return newAPIError(fiber.StatusForbidden, codeCodeRequired, "this action needs a push code")
+	case errors.Is(err, admin.ErrCodeExpired):
+		return newAPIError(fiber.StatusGone, codeCodeExpired, "push code expired or unknown")
+	case errors.Is(err, admin.ErrNotFound):
+		return newAPIError(fiber.StatusNotFound, codeNotFound, "not found")
 	case errors.As(err, &rl):
-		e := newAPIError(fiber.StatusTooManyRequests, codeRateLimited, "too many admin password attempts")
+		e := newAPIError(fiber.StatusTooManyRequests, codeRateLimited, "too many attempts, retry later")
 		e.data = fiber.Map{"retry_after": rl.RetryAfter}
 		e.retryAfter = rl.RetryAfter
 		return e
@@ -76,6 +117,7 @@ func errPasswordTooLong() *apiError {
 type passwordBody struct {
 	Password *string `json:"password"`
 	Recovery *bool   `json:"recovery"`
+	codeFields
 }
 
 func parsePasswordBody(c *fiber.Ctx) (passwordBody, error) {
@@ -91,6 +133,9 @@ func parsePasswordBody(c *fiber.Ctx) (passwordBody, error) {
 	}
 	if !utf8.ValidString(*b.Password) {
 		return b, errInvalid("invalid password: not UTF-8")
+	}
+	if err := b.check(); err != nil {
+		return b, err
 	}
 	return b, nil
 }
@@ -139,8 +184,12 @@ func (a *AppServer) v2AdminSet(c *fiber.Ctx) error {
 		mode = admin.ModeChange
 	}
 
-	if err := a.admin.Set(mode, *b.Password, session); err != nil {
-		return adminError(err)
+	if mode == admin.ModeChange {
+		auditField(c, "action", admin.ActionAdminPassword)
+		auditField(c, "code_id", b.ref().ID)
+	}
+	if err := a.admin.Set(mode, *b.Password, session, b.ref()); err != nil {
+		return codeError(c, err)
 	}
 	return sendOK(c, fiber.StatusOK, struct {
 		Mode admin.Mode `json:"mode"`
@@ -221,10 +270,15 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	} else if id, ok := c.Locals(localIssuedSession).(string); ok {
 		e.Session = id
 	}
+	if f, ok := c.Locals(localAuditFields).([][2]string); ok {
+		e.Fields = f
+	}
 	// Anything on the host can send a bad bearer, and calaos_server relays a
 	// household client's guessed session: in audit.log either would rotate
-	// the real entries away.
-	if e.Result == codeBadBearer || e.Result == codeBadSession {
+	// the real entries away. A session live at entry (one that ended while
+	// its console started) keeps its line. Not e.Fields: admin/set sets them
+	// before it checks the session.
+	if (e.Result == codeBadBearer || e.Result == codeBadSession) && c.Locals(localSessionLive) == nil {
 		a.admin.AuditRefused(e)
 	} else {
 		a.admin.Audit(e)

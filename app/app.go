@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 	fiberLog "github.com/gofiber/fiber/v2/middleware/logger"
 
 	"github.com/calaos/calaos-container/app/admin"
+	"github.com/calaos/calaos-container/app/console"
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/events"
 	logger "github.com/calaos/calaos-container/log"
@@ -51,6 +54,11 @@ type AppServer struct {
 	sessions sessionValidator
 
 	admin *admin.Manager
+
+	now         func() time.Time
+	consoles    *console.Manager
+	stopConsole context.CancelFunc
+	consoleDone chan struct{}
 
 	// wsConns counts the event streams, so Shutdown lets them flush the
 	// last events before the process exits. No Add once wsClosing is set.
@@ -98,9 +106,25 @@ func NewApp() (a *AppServer, err error) {
 		DataDir:    adminDataDir,
 		RuntimeDir: adminRuntimeDir,
 		Hash:       adminHashParams,
+		Now:        adminNow,
 		Publish:    func(evType string, data any) { publishAdmin(a.hub, evType, data) },
+		// Set before any request is served.
+		SessionsEnded: func(hash, reason string) {
+			if a.consoles != nil {
+				a.consoles.SessionsEnded(hash, reason)
+			}
+		},
 	})
 	a.sessions = a.admin
+	a.now = adminNow
+	if a.now == nil {
+		a.now = time.Now
+	}
+	a.consoles = console.New(console.Options{
+		Dir:    filepath.Join(adminRuntimeDir, "console"),
+		Now:    a.now,
+		Closed: a.consoleClosed,
+	})
 
 	a.appFiber.
 		Use(fiberLog.New(fiberLog.Config{})).
@@ -255,6 +279,14 @@ func (a *AppServer) Start() <-chan error {
 
 	a.wgDone.Add(1)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	a.stopConsole = cancel
+	a.consoleDone = make(chan struct{})
+	go func() {
+		defer close(a.consoleDone)
+		a.consoles.Run(ctx)
+	}()
+
 	listenErr := make(chan error, 1)
 	go func() {
 		defer close(listenErr)
@@ -351,6 +383,11 @@ func (a *AppServer) Shutdown() {
 	a.hub.Close()
 	_ = a.appFiber.Shutdown()
 	a.wgDone.Wait()
+
+	if a.stopConsole != nil {
+		a.stopConsole()
+		<-a.consoleDone
+	}
 
 	flushed := make(chan struct{})
 	go func() {

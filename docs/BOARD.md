@@ -89,6 +89,14 @@ _Gate to start: CC-040 and CC-042 merged, ADM-CH1a done. Sequential: CC2, CC1, C
 | [ADM-CC3](backlog/ADM-CC3-async-upgrade.md) | Async versioned upgrade (202 + job), `reboot_required`; absorbs CC-050, CC-055 | P1 | L | ADM-CC1 | ✅ |
 | [ADM-CC2b](backlog/ADM-CC2b-retire-query-token.md) | Drop `?token=` on `/events` (conditional) | P3 | S | ADM-CH1a finding, CH1b + one release | ⬜ |
 
+## P7 — Admin phase 2
+_Integration branch `admin/p7`; it merges to main only together with AP1b and WA3 (an older calaos_server shows `internal` on an admin password change). Plan: phase 2 of [`docs/admin/PLAN.md`](https://github.com/calaos/calaos_base/blob/master/docs/admin/PLAN.md) (calaos_base)._
+
+| ID | Title | Prio | Size | Deps | Status |
+|----|-------|------|------|------|--------|
+| AP1a | Approver phones and push codes: enrolment, codes bound to session/action/params, `push_code`, bearer-only push payload, session killed after 5 wrong codes | P1 | M | ADM-CC1 | 🟣 |
+| CO1 | Web console pty, single-use ticket from a verified `console_open` code | P1 | M | AP1a | ⬜ |
+
 ---
 
 ## Done log

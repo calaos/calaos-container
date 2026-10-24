@@ -16,13 +16,14 @@ const (
 )
 
 // AuditEntry is one audited request. Session is the audit id, never the
-// session itself.
+// session itself. Fields are key=value pairs of daemon-validated values.
 type AuditEntry struct {
 	Client  string
 	Method  string
 	Path    string
 	Result  string
 	Session string
+	Fields  [][2]string
 }
 
 type auditLog struct {
@@ -51,9 +52,13 @@ func (e AuditEntry) line(now time.Time) string {
 	if len(path) > auditMaxPath {
 		path = path[:auditMaxPath]
 	}
-	return fmt.Sprintf("%s client=%s result=%s session=%s %s %s",
+	var extra strings.Builder
+	for _, f := range e.Fields {
+		extra.WriteString(" " + sanitize(f[0]) + "=" + sanitize(f[1]))
+	}
+	return fmt.Sprintf("%s client=%s result=%s session=%s%s %s %s",
 		now.UTC().Format(time.RFC3339), sanitize(e.Client), sanitize(e.Result), sanitize(sid),
-		sanitize(e.Method), strconv.QuoteToASCII(path))
+		extra.String(), sanitize(e.Method), strconv.QuoteToASCII(path))
 }
 
 // write appends line to audit.log, rotated at 1 MiB with one old file kept.

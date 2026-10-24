@@ -25,7 +25,7 @@ const (
 
 func cmdAdmin(cmd *cli.Cmd) {
 	cmd.Command("set", "set the admin password, read from stdin (asked twice on a terminal, first line otherwise)", cmdAdminSet)
-	cmd.Command("reset", "remove the admin password and close every admin session", cmdAdminReset)
+	cmd.Command("reset", "remove the admin password and the approver phones, close every admin session", cmdAdminReset)
 }
 
 // The password never comes from argv: RunCommand logs argv and ps shows it.
@@ -78,7 +78,7 @@ func cmdAdminReset(cmd *cli.Cmd) {
 			fmt.Printf("%s No admin password was set.\n", green(CharCheck))
 			return
 		}
-		fmt.Printf("%s Admin password removed, every admin session closed.\n", green(CharCheck))
+		fmt.Printf("%s Admin password and approver phones removed, every admin session closed.\n", green(CharCheck))
 		// Anyone who knows the household password can now bootstrap the admin.
 		fmt.Println(cyan(CharArrow), "Change the household password before setting a new admin password from the web app.")
 	}

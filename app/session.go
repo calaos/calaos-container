@@ -31,6 +31,18 @@ func (a *AppServer) sessionAllowed(c *fiber.Ctx) error {
 	if !a.sessions.Valid(s) {
 		return errBadSession()
 	}
+	c.Locals(localSessionLive, true)
+	return c.Next()
+}
+
+// sessionRequired guards the routes a push code is bound to: the bearer alone
+// has no session to bind it to.
+func (a *AppServer) sessionRequired(c *fiber.Ctx) error {
+	s, present := adminSession(c)
+	if !present || !a.sessions.Valid(s) {
+		return errBadSession()
+	}
+	c.Locals(localSessionLive, true)
 	return c.Next()
 }
 
