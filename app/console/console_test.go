@@ -249,6 +249,24 @@ func TestShellStartFailureAudits(t *testing.T) {
 	f.expectGone(info, ReasonExited)
 }
 
+// expectCloseFrame reads until the close frame; the shell's own output is
+// discarded.
+func expectCloseFrame(t *testing.T, conn *gws.Conn, code int, reason string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			continue
+		}
+		var ce *gws.CloseError
+		if !errors.As(err, &ce) || ce.Code != code || ce.Text != reason {
+			t.Fatalf("close frame %v, want %d %q", err, code, reason)
+		}
+		return
+	}
+}
+
 func TestAbsoluteLimit(t *testing.T) {
 	f := newFixture(t)
 	info := f.open("aaaaaaaa")
@@ -263,6 +281,7 @@ func TestAbsoluteLimit(t *testing.T) {
 	f.clk.Advance(4 * time.Minute)
 	f.m.Sweep()
 	f.expectShellGone(info, ReasonExpired)
+	expectCloseFrame(t, conn, gws.CloseGoingAway, ReasonExpired)
 }
 
 func TestIdleLimitCountsInputOnly(t *testing.T) {
@@ -285,6 +304,7 @@ func TestIdleLimitCountsInputOnly(t *testing.T) {
 	f.clk.Advance(time.Second)
 	f.m.Sweep()
 	f.expectShellGone(info, ReasonIdle)
+	expectCloseFrame(t, conn, gws.CloseGoingAway, ReasonIdle)
 }
 
 func TestEmptyInputDoesNotRearmIdle(t *testing.T) {
@@ -340,6 +360,17 @@ func TestSessionsEnded(t *testing.T) {
 	f.expectGone(b, "admin_reset")
 }
 
+func TestSessionsEndedCloseFrame(t *testing.T) {
+	f := newFixture(t)
+	info := f.open("aaaaaaaa")
+	conn := f.attach(info)
+	defer func() { _ = conn.Close() }()
+	consoletest.ReadPid(t, info.Socket+".child")
+	f.m.SessionsEnded("aaaaaaaa", "admin_set")
+	f.expectShellGone(info, "admin_set")
+	expectCloseFrame(t, conn, gws.CloseGoingAway, "admin_set")
+}
+
 func TestSessionEndedWhileStarting(t *testing.T) {
 	f := newFixture(t)
 	_, err := f.m.Open(Request{SessionHash: "aaaaaaaa", Term: "xterm"}, func() error {
@@ -384,8 +415,12 @@ func TestKillFallsBackToSigkill(t *testing.T) {
 func TestShutdownKillsEverything(t *testing.T) {
 	f := newFixture(t)
 	a := f.open("aaaaaaaa")
+	conn := f.attach(a)
+	defer func() { _ = conn.Close() }()
+	consoletest.ReadPid(t, a.Socket+".child")
 	f.m.Shutdown()
 	f.expectGone(a, ReasonShutdown)
+	expectCloseFrame(t, conn, gws.CloseGoingAway, ReasonShutdown)
 }
 
 func TestNewRemovesStaleSockets(t *testing.T) {

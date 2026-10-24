@@ -209,11 +209,14 @@ func (m *Manager) bridge(c *console, conn *websocket.Conn, term string) {
 		m.mu.Lock()
 		reason := c.reason
 		m.mu.Unlock()
+		if reason == "" {
+			reason = ReasonClosed
+		}
 		code := websocket.CloseGoingAway
 		if reason == ReasonClosed || reason == ReasonExited {
 			code = websocket.CloseNormalClosure
 		}
-		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, "console closed"), time.Now().Add(wsWriteWait))
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(wsWriteWait))
 	}
 
 	ticker := time.NewTicker(wsPingPeriod)
