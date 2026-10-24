@@ -292,6 +292,7 @@ func TestEmptyInputDoesNotRearmIdle(t *testing.T) {
 	info := f.open("aaaaaaaa")
 	conn := f.attach(info)
 	defer func() { _ = conn.Close() }()
+	consoletest.ReadPid(t, info.Socket+".pid")
 	f.clk.Advance(IdleTimeout - time.Second)
 	if err := conn.WriteMessage(gws.BinaryMessage, nil); err != nil {
 		t.Fatal(err)
