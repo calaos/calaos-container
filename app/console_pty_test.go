@@ -220,7 +220,7 @@ func TestConsoleShellExit(t *testing.T) {
 			break
 		}
 	}
-	if err, ok := closeErr.(*gws.CloseError); !ok || err.Code != gws.CloseNormalClosure {
+	if err, ok := closeErr.(*gws.CloseError); !ok || err.Code != gws.CloseNormalClosure || err.Text != console.ReasonExited {
 		t.Fatalf("shell exit close: %v", closeErr)
 	}
 	waitAudit(t, "action=console_close console="+d.ConsoleID+" reason=exited")

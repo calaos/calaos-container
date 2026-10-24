@@ -491,8 +491,20 @@ not call a console activity route or interpret terminal traffic. Host and Origin
   blocked for 10 s closes the console instead of growing daemon memory without bound.
 - One client per console: a second connection is refused, and when the client disconnects the
   console ends (`reason=closed`). A console is one WebSocket; it cannot be reattached.
-- The close frame carries reason text `console closed` and code `1000` for `closed` and `exited`,
-  or `1001` for every other reason. Final pty output is sent before the close frame.
+- Final pty output is sent before the close frame. The frame's reason text is the close reason
+  token, also written to the audit log as `reason=`:
+
+| Reason | Code | Cause |
+|---|---|---|
+| `closed` | `1000` | the client closed the WebSocket or stopped answering pings, or a write blocked |
+| `exited` | `1000` | the shell exited |
+| `expired` | `1001` | the 1 h absolute limit |
+| `idle` | `1001` | the idle limit |
+| `not_connected` | `1001` | no client within 30 s of the open |
+| `shutdown` | `1001` | the daemon stops |
+| `admin_set` | `1001` | the admin password was changed |
+| `admin_reset` | `1001` | the admin access was reset |
+| `bad_code` | `1001` | the session entered 5 wrong codes |
 
 **Limits**
 
