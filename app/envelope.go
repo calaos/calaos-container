@@ -39,6 +39,7 @@ const (
 	codeCodeRequired      = "code_required"
 	codeBadCode           = "bad_code"
 	codeCodeExpired       = "code_expired"
+	codeConsoleLimit      = "console_limit"
 )
 
 type okEnvelope struct {

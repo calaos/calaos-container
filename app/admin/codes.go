@@ -327,6 +327,7 @@ func (m *Manager) useCodeLocked(s *session, ref CodeRef, action string, p Params
 func (m *Manager) pushCodeFailedLocked(s *session) (int, error) {
 	s.PushFailures++
 	if s.PushFailures >= MaxPushCodeFailures {
+		m.ended(s.Hash, "bad_code")
 		m.codes.dropSession(s.Hash)
 		return 0, m.sessions.remove(s)
 	}
