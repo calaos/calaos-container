@@ -233,6 +233,8 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Post("/system/restart", s, a.v2SystemRestart)
 	v2.Get("/system/info", s, a.v2SystemInfo)
 	v2.Get("/system/fs_status", s, a.v2SystemFsStatus)
+	v2.Get("/system/services", s, a.v2Services)
+	v2.Post("/system/services/restart", s, a.v2ServiceRestart)
 	v2.Post("/system/rollback_snapshot", bearerOnly, a.v2SystemRollbackSnapshot)
 	v2.Get("/system/install/list_devices", bearerOnly, a.v2InstallListDevices)
 	v2.Post("/system/install/start", bearerOnly, a.v2InstallStart)
