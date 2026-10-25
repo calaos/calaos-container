@@ -17,6 +17,11 @@ void aptSetProgressCallback(AptProgressCb cb)
     AptProgressState::instance().callback = cb;
 }
 
+void aptResetProgress(void)
+{
+    AptProgressState::instance().resetTransaction();
+}
+
 void aptEmitProgress(const char *stage, const char *pkg,
                      int pkgPercent, int totalPercent, const char *msg)
 {

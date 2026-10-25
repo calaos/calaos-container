@@ -17,6 +17,8 @@ func captureProgress(t *testing.T) *[]Progress {
 
 	var events []Progress
 
+	resetProgressForTest()
+
 	progressMu.Lock()
 	progressCb = func(p Progress) { events = append(events, p) }
 	progressMu.Unlock()

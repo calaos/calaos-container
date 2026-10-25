@@ -288,3 +288,9 @@ func emitProgressForTest(stage, pkg string, pkgPercent, totalPercent int, msg st
 
 	C.aptEmitProgress(cStage, cPkg, C.int(pkgPercent), C.int(totalPercent), cMsg)
 }
+
+// resetProgressForTest clears the process-global monotonic guard so that
+// tests do not depend on events emitted by earlier tests or -count runs.
+func resetProgressForTest() {
+	C.aptResetProgress()
+}
