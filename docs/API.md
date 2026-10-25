@@ -686,10 +686,10 @@ Why some rows have fewer verbs:
 ### `GET /api/v2/system/services`
 
 ```json
-{"error": false, "msg": "ok", "data": {"services": [{"id": "zigbee2mqtt", "unit": "zigbee2mqtt.service", "kind": "service", "actions": ["restart", "start", "stop", "enable", "disable"], "restartable": true, "active_state": "inactive", "sub_state": "dead", "enabled": "disabled", "startup": "disabled", "boot_unit": "zigbee2mqtt.service", "since": null, "next_run": null}]}}
+{"error": false, "msg": "ok", "data": {"services": [{"id": "zigbee2mqtt", "unit": "zigbee2mqtt.service", "kind": "service", "actions": ["restart", "start", "stop", "enable", "disable"], "restartable": true, "active_state": "inactive", "sub_state": "dead", "enabled": "disabled", "startup": "disabled", "boot_unit": "zigbee2mqtt.service", "since": null}]}}
 ```
 
-- One entry per table row, in the order of the table above. `kind` is `"service"` or `"oneshot"`.
+- One entry per table row, in the order of the table above. `kind` is `"service"`.
 - `actions` is the row's static list of verbs, in the order `restart`, `start`, `stop`, `enable`,
   `disable`; `[]` for a status-only row. `restartable` is a boolean, true when `restart` is in
   `actions`.
@@ -711,7 +711,6 @@ Why some rows have fewer verbs:
 - `boot_unit` is the unit that `enable` and `disable` act on. It is `unit` for every row.
 - `since` is when the unit last entered the `active` state (`ActiveEnterTimestamp`), RFC 3339 UTC,
   or `null` when it never did.
-- `next_run` is `null` for every row.
 - `unit` is the resolved unit (for `ntp`, the installed candidate, or the first candidate when none
   is installed).
 - The state is read in one `systemctl show` call for all units and every `ntp` candidate, and
@@ -725,7 +724,7 @@ All five routes are `bearer, session allowed`, take the body `{"unit": "<id>"}` 
 
 | Route | `state` | Runs |
 |---|---|---|
-| `restart` | `restarting` | after the answer, about 500 ms later: `systemctl restart --no-block <unit>` (`reload-or-restart` for `ssh`, `start` for a `oneshot`) |
+| `restart` | `restarting` | after the answer, about 500 ms later: `systemctl restart --no-block <unit>` (`reload-or-restart` for `ssh`) |
 | `start` | `starting` | before the answer: `systemctl start --no-block <unit>` |
 | `stop` | `stopping` | before the answer: `systemctl stop --no-block <unit>` |
 | `enable` | `enabling` | before the answer: `systemctl enable --now --no-block <boot_unit>` |
@@ -735,7 +734,8 @@ All five routes are `bearer, session allowed`, take the body `{"unit": "<id>"}` 
   not the outcome. The answer says nothing about the outcome: a client reads it by polling
   `GET system/services`. A client that restarts `calaos-server`, `haproxy` or `calaos-container`
   loses its connection within seconds.
-- `restart` starts a stopped unit. A `reload` of `ssh` runs `sshd -t` first, so a broken
+- `restart` starts a stopped unit. For `ntp` it first resolves the unit (`systemctl show -p
+  LoadState`, cached for 1 min). A `reload` of `ssh` runs `sshd -t` first, so a broken
   `sshd_config` leaves the running daemon alone, and open sessions survive.
 - `enable` and `disable` act now and at boot (`--now`): "start now and at every boot", "stop now and
   at every boot". Enabling without starting, or disabling without stopping, is not offered.
@@ -767,7 +767,7 @@ Checks, in this order, on every one of the five routes:
 A restart of `calaos-container` is safe: sessions are on disk, a pending network change is
 re-armed at start, and the upgrade guard refuses it during a job.
 
-Each call writes one audit line with `unit=<id>` (see Audit). `POST /api/v2/system/restart` and the
+Each call that passes check 2 writes an audit line with `unit=<id>`; a refusal at check 1 or 2 has no `unit=` (see Audit). `POST /api/v2/system/restart` and the
 legacy `POST /api/system/restart` (restart of the `calaos-home` kiosk) are unchanged.
 
 ## Logs
