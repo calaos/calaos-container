@@ -288,3 +288,33 @@ func TestValidateNetApply(t *testing.T) {
 		})
 	}
 }
+
+func TestNetworkTrialKeptAndListed(t *testing.T) {
+	_, run, nc := useNetDirs(t)
+	if err := WriteNetworkTrial("eth0", staticConfig); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"00-calaos-trial-..network", "00-calaos-trial-apply.network", "other.network"} {
+		if err := os.WriteFile(filepath.Join(run, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := NetworkTrials(); err != nil || !reflect.DeepEqual(got, []string{"eth0"}) {
+		t.Fatalf("trials %v %v", got, err)
+	}
+
+	// A trial that cannot be removed: nothing else runs, the caller keeps the change.
+	trial := NetworkTrialPath("eth0")
+	if err := os.Remove(trial); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(trial, "x"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := RevertNetworkTrial("eth0"); !errors.Is(err, ErrTrialKept) {
+		t.Fatalf("revert of a stuck trial: %v", err)
+	}
+	if got := nc.take(); got != nil {
+		t.Fatalf("networkctl ran: %v", got)
+	}
+}

@@ -80,6 +80,16 @@ type netEnv struct {
 	nc       *fakeNetworkctl
 	timers   *fakeTimers
 	sub      *events.Subscriber
+
+	bootMu sync.Mutex
+	boot   time.Duration
+}
+
+// advanceBoot moves CLOCK_BOOTTIME only: the wall clock is e.clk.
+func (e *netEnv) advanceBoot(d time.Duration) {
+	e.bootMu.Lock()
+	e.boot += d
+	e.bootMu.Unlock()
 }
 
 // newNetEnv: an admin with an approver, networkd's directories in a temp
@@ -96,7 +106,13 @@ func newNetEnv(t *testing.T) *netEnv {
 		t.Fatal(err)
 	}
 	prevEtc, prevRun, prevCtl := models.NetworkEtcDir, models.NetworkRunDir, models.Networkctl
-	prevAfter, prevUpgrade := netAfterFunc, upgradeRunning
+	prevAfter, prevUpgrade, prevBoot := netAfterFunc, upgradeRunning, netBootClock
+	e.boot = time.Hour
+	netBootClock = func() (time.Duration, error) {
+		e.bootMu.Lock()
+		defer e.bootMu.Unlock()
+		return e.boot, nil
+	}
 	models.NetworkEtcDir, models.NetworkRunDir, models.Networkctl = e.etc, e.run, e.nc.run
 	netAfterFunc = func(d time.Duration, f func()) func() bool {
 		ft := &fakeTimer{d: d, f: f}
@@ -108,7 +124,7 @@ func newNetEnv(t *testing.T) *netEnv {
 	upgradeRunning = func() bool { return false }
 	t.Cleanup(func() {
 		models.NetworkEtcDir, models.NetworkRunDir, models.Networkctl = prevEtc, prevRun, prevCtl
-		netAfterFunc, upgradeRunning = prevAfter, prevUpgrade
+		netAfterFunc, upgradeRunning, netBootClock = prevAfter, prevUpgrade, prevBoot
 	})
 
 	// Restored by the stubBackend cleanup.
@@ -618,4 +634,215 @@ func TestNetworkRoutes(t *testing.T) {
 	}
 	e.etcOnly()
 	e.noTrial()
+}
+
+func (e *netEnv) hasAlert() bool {
+	for _, al := range e.c.a.admin.PendingAlerts() {
+		if al.Type == admin.EventNetworkRolledBack {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *netEnv) hasRecord() bool {
+	_, err := os.Stat(filepath.Join(adminRuntimeDir, netPendingFile))
+	return err == nil
+}
+
+// blockTrial turns the trial into a non-empty directory: even root cannot
+// remove it with unlink.
+func (e *netEnv) blockTrial() func() {
+	e.t.Helper()
+	trial := filepath.Join(e.run, "00-calaos-trial-eth0.network")
+	if err := os.Remove(trial); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(trial, "x"), 0o750); err != nil {
+		e.t.Fatal(err)
+	}
+	return func() {
+		if err := os.RemoveAll(trial); err != nil {
+			e.t.Fatal(err)
+		}
+	}
+}
+
+func TestNetworkApplyReloadFails(t *testing.T) {
+	e := newNetEnv(t)
+	e.nc.fail["reload"] = true
+	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 500, codeInternal)
+	e.noTrial()
+	e.etcOnly()
+	e.noRecord()
+	if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reload", "reconfigure eth0"}) {
+		t.Fatalf("networkctl %v", got)
+	}
+	if !e.timers.empty() || e.hasAlert() {
+		t.Fatal("a failed apply left a timer or an alert")
+	}
+}
+
+func TestNetworkRollbackNetworkctlFails(t *testing.T) {
+	e := newNetEnv(t)
+	p, _ := e.apply(e.c, e.s, nil)
+	e.nc.fail["reconfigure eth0"] = true
+	e.clk.Advance(netConfirmWindow)
+	e.timers.last(t).f()
+	// The trial is gone, so the change is over even if networkd lags.
+	e.noTrial()
+	e.noRecord()
+	if !e.hasAlert() {
+		t.Fatal("no rollback alert")
+	}
+	want := `result=internal session=` + admin.SessionAuditID(e.s) + ` action=network_rollback intf=eth0 change_id=` + p.ChangeID + ` reason=timeout - "-"`
+	if audit := readAudit(t); !strings.Contains(audit, want) {
+		t.Fatalf("audit lacks %q:\n%s", want, audit)
+	}
+}
+
+func TestNetworkRollbackTrialKept(t *testing.T) {
+	e := newNetEnv(t)
+	p, _ := e.apply(e.c, e.s, nil)
+	unblock := e.blockTrial()
+	e.nc.take()
+	e.clk.Advance(netConfirmWindow)
+	e.timers.last(t).f()
+	if !e.hasRecord() || e.hasAlert() {
+		t.Fatal("a rollback that kept the trial cleared the record or raised the alert")
+	}
+	if got := e.nc.take(); got != nil {
+		t.Fatalf("networkctl ran: %v", got)
+	}
+	if tm := e.timers.last(t); tm.d != netRetryDelay || tm.stopped {
+		t.Fatalf("retry timer %+v", tm)
+	}
+	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 409, codeNetworkPending)
+
+	unblock()
+	e.timers.last(t).f()
+	e.noRecord()
+	if !e.hasAlert() {
+		t.Fatal("no alert once the trial is gone")
+	}
+	want := `action=network_rollback intf=eth0 change_id=` + p.ChangeID + ` reason=timeout`
+	if audit := readAudit(t); strings.Count(audit, want) != 1 {
+		t.Fatalf("audit has not one %q:\n%s", want, audit)
+	}
+}
+
+func TestNetworkRevertTrialKept(t *testing.T) {
+	e := newNetEnv(t)
+	p, _ := e.apply(e.c, e.s, nil)
+	unblock := e.blockTrial()
+	e.c.expect("POST", "/api/v2/network/revert", changeBody(p.ChangeID), session(e.s), 500, codeInternal)
+	if !e.hasRecord() || e.timers.last(t).stopped {
+		t.Fatal("a revert that kept the trial ended the change")
+	}
+	unblock()
+	e.c.expect("POST", "/api/v2/network/revert", changeBody(p.ChangeID), session(e.s), 200, "")
+	e.noRecord()
+	if e.hasAlert() {
+		t.Fatal("explicit revert raised the alert")
+	}
+}
+
+func TestNetworkConfirmWriteFails(t *testing.T) {
+	e := newNetEnv(t)
+	p, _ := e.apply(e.c, e.s, nil)
+	// A directory in the way makes the rename into /etc fail, even as root.
+	if err := os.MkdirAll(filepath.Join(e.etc, "calaos_eth0.network", "x"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	e.c.expect("POST", "/api/v2/network/confirm", changeBody(p.ChangeID), session(e.s), 500, codeInternal)
+	if !e.hasRecord() || e.timers.last(t).stopped {
+		t.Fatal("a failed confirm ended the change")
+	}
+	if got := e.files(e.run); !reflect.DeepEqual(got, []string{"00-calaos-trial-eth0.network"}) {
+		t.Fatalf("/run holds %v", got)
+	}
+	e.noEvent(evNetworkApplied)
+	e.clk.Advance(netConfirmWindow)
+	e.timers.last(t).f()
+	e.noTrial()
+	e.noRecord()
+	if !e.hasAlert() {
+		t.Fatal("no rollback alert")
+	}
+}
+
+// A trial whose record is unreadable or a symlink has no deadline left: the
+// restarted daemon reverts it.
+func TestNetworkRestartWithoutValidRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		breakRecord func(path string) error
+	}{
+		{"corrupt", func(path string) error { return os.WriteFile(path, []byte(`{"change_id":"zz"`), 0o600) }},
+		{"symlink", func(path string) error {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			return os.Symlink("/etc/hostname", path)
+		}},
+		{"missing", os.Remove},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newNetEnv(t)
+			e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 200, "")
+			e.nc.take()
+			if err := tc.breakRecord(filepath.Join(adminRuntimeDir, netPendingFile)); err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := NewApp()
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.useHub(restarted)
+			restarted.resumeNetChange()
+			e.noRecord()
+			e.noTrial()
+			e.etcOnly()
+			if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
+				t.Fatalf("networkctl %v", got)
+			}
+			if ev := e.event(admin.EventNetworkRolledBack); ev["intf"] != "eth0" {
+				t.Fatalf("network_rolled_back %v", ev)
+			}
+			want := `client=- result=ok session=- action=network_rollback intf=eth0 change_id=- reason=restart - "-"`
+			if audit := readAudit(t); !strings.Contains(audit, want) {
+				t.Fatalf("audit lacks %q:\n%s", want, audit)
+			}
+		})
+	}
+}
+
+// Stepping the box time back between restarts does not extend the window:
+// the boot clock deadline wins.
+func TestNetworkRestartClockSteppedBack(t *testing.T) {
+	e := newNetEnv(t)
+	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 200, "")
+	restart := func() {
+		e.clk.Advance(100 * time.Second)
+		e.advanceBoot(100 * time.Second)
+		e.clk.Advance(-100 * time.Second)
+		restarted, err := NewApp()
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.useHub(restarted)
+		restarted.resumeNetChange()
+	}
+	restart()
+	if tm := e.timers.last(t); tm.d != 20*time.Second {
+		t.Fatalf("re-armed for %v", tm.d)
+	}
+	n := len(e.timers.list)
+	restart()
+	if len(e.timers.list) != n {
+		t.Fatal("re-armed past the boot deadline")
+	}
+	e.noTrial()
+	e.noRecord()
+	e.event(admin.EventNetworkRolledBack)
 }

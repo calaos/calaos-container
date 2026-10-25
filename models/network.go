@@ -2,6 +2,7 @@ package models
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,10 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 	"unicode"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/calaos/calaos-container/models/structs"
 )
@@ -66,7 +70,10 @@ type RawDNSConfig struct {
 }
 
 func GetAllNetInterfaces() (nets []*structs.NetInterface, err error) {
-	cmd := exec.Command("/usr/bin/networkctl", "list", "--json=short")
+	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/networkctl", "list", "--json=short")
+	cmd.WaitDelay = time.Second
 	output, err := cmd.Output()
 	if err != nil {
 		logging.Errorf("failed to get network interfaces: %v", err)
@@ -539,6 +546,10 @@ type ConfNetworkSection struct {
 	Domains     string `toml:"Domains"`
 }
 
+// networkctlTimeout bounds a hung networkctl (networkd stuck, D-Bus
+// activation): the network routes and the rollback timer wait for it.
+const networkctlTimeout = 30 * time.Second
+
 // Directories systemd-networkd reads units from, and the networkctl runner.
 // Variables so tests use temporary directories and a fake networkctl.
 var (
@@ -546,7 +557,11 @@ var (
 	NetworkRunDir = "/run/systemd/network"
 
 	Networkctl = func(args ...string) error {
-		out, err := exec.Command("/usr/bin/networkctl", args...).CombinedOutput()
+		ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "/usr/bin/networkctl", args...)
+		cmd.WaitDelay = time.Second
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("networkctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
@@ -696,13 +711,17 @@ func ConfirmNetworkTrial(intf string) error {
 	return nil
 }
 
+// ErrTrialKept: the trial could not be removed and still wins, so the change
+// is not reverted.
+var ErrTrialKept = errors.New("network trial still in place")
+
 // RevertNetworkTrial removes the trial and gives intf back the unit it had
-// before. Every step runs even when an earlier one fails.
+// before. Once the trial is gone, every step runs even when one fails.
 func RevertNetworkTrial(intf string) error {
-	var errs []error
 	if err := os.Remove(NetworkTrialPath(intf)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		errs = append(errs, err)
+		return fmt.Errorf("%w: %v", ErrTrialKept, err)
 	}
+	var errs []error
 	if err := Networkctl("reload"); err != nil {
 		errs = append(errs, err)
 	}
@@ -710,4 +729,32 @@ func RevertNetworkTrial(intf string) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// NetworkTrials lists the interfaces that have a trial unit.
+func NetworkTrials() ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(NetworkRunDir, "00-calaos-trial-*.network"))
+	if err != nil {
+		return nil, err
+	}
+	var intfs []string
+	for _, p := range paths {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "00-calaos-trial-"), ".network")
+		if ValidateInterfaceName(name) != nil {
+			logging.Warnf("ignoring the network trial %s: not an interface name", p)
+			continue
+		}
+		intfs = append(intfs, name)
+	}
+	return intfs, nil
+}
+
+// BootClock is CLOCK_BOOTTIME: it counts suspend, never steps, and restarts
+// at 0 with /run, so a deadline on it survives a daemon restart.
+var BootClock = func() (time.Duration, error) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
+		return 0, err
+	}
+	return time.Duration(ts.Nano()), nil
 }

@@ -26,6 +26,7 @@ import (
 
 const (
 	netConfirmWindow = 120 * time.Second
+	netRetryDelay    = 10 * time.Second
 	netPendingFile   = "network-pending.json"
 
 	evNetworkPending = "network_pending"
@@ -40,6 +41,7 @@ var (
 		return time.AfterFunc(d, f).Stop
 	}
 	upgradeRunning = func() bool { return runningJobID() != "" }
+	netBootClock   = models.BootClock
 )
 
 // netPending is the change waiting for its confirmation, as recorded in
@@ -51,6 +53,8 @@ type netPending struct {
 	Deadline     time.Time `json:"deadline"`
 	SessionAudit string    `json:"session_audit"`
 	Client       string    `json:"client"`
+	// CLOCK_BOOTTIME deadline, in ns: unlike Deadline, no clock step moves it.
+	BootDeadline time.Duration `json:"boot_deadline,omitempty"`
 }
 
 // netChanges holds at most one pending change. deadline comes from a.now(),
@@ -201,26 +205,50 @@ func (a *AppServer) netExpired(id string) {
 	}
 }
 
-// netRollbackLocked reverts the pending change nobody confirmed.
+// netRollbackLocked reverts the pending change nobody confirmed. A trial
+// that cannot be removed still wins: the change stays pending and the
+// rollback is retried.
 func (a *AppServer) netRollbackLocked(reason string) {
 	p := *a.net.cur
-	result := "ok"
-	if err := models.RevertNetworkTrial(p.Intf); err != nil {
+	err := models.RevertNetworkTrial(p.Intf)
+	if errors.Is(err, models.ErrTrialKept) {
 		logging.Errorf("rolling back the network change on %s: %v", p.Intf, err)
-		result = codeInternal
+		a.netRetryLocked()
+		return
 	}
 	a.netClearLocked()
-	a.admin.RaiseNetworkRolledBack(p.Intf)
+	a.netRolledBack(p.Intf, p.ChangeID, p.Client, p.SessionAudit, reason, err)
+}
+
+// netRetryLocked keeps a change whose rollback failed: its deadline has
+// passed, so the timer and every network route try again.
+func (a *AppServer) netRetryLocked() {
+	n := a.net
+	if n.stop != nil {
+		n.stop()
+	}
+	n.deadline = a.now()
+	id := n.cur.ChangeID
+	n.stop = netAfterFunc(netRetryDelay, func() { a.netExpired(id) })
+}
+
+func (a *AppServer) netRolledBack(intf, changeID, client, session, reason string, err error) {
+	result := "ok"
+	if err != nil {
+		logging.Errorf("rolling back the network change on %s: %v", intf, err)
+		result = codeInternal
+	}
+	a.admin.RaiseNetworkRolledBack(intf)
 	a.admin.Audit(admin.AuditEntry{
-		Client:  p.Client,
+		Client:  client,
 		Method:  "-",
 		Path:    "-",
 		Result:  result,
-		Session: p.SessionAudit,
+		Session: session,
 		Fields: [][2]string{
 			{"action", "network_rollback"},
-			{"intf", p.Intf},
-			{"change_id", p.ChangeID},
+			{"intf", intf},
+			{"change_id", changeID},
 			{"reason", reason},
 		},
 	})
@@ -243,7 +271,8 @@ func (a *AppServer) errNetPendingLocked(p *netPending) *apiError {
 }
 
 // resumeNetChange re-arms the timer of a change recorded before a daemon
-// restart, or rolls it back when its deadline has passed.
+// restart, or rolls it back when its deadline has passed. A trial without a
+// valid record has no deadline left to keep: it is reverted.
 func (a *AppServer) resumeNetChange() {
 	n := a.net
 	n.mu.Lock()
@@ -252,22 +281,42 @@ func (a *AppServer) resumeNetChange() {
 	if err != nil {
 		logging.Errorf("reading the pending network change: %v", err)
 		_ = os.Remove(n.path)
-		return
 	}
 	if p == nil {
+		a.netSweepLocked()
 		return
 	}
-	// Capped: a clock stepped backwards never lengthens the window.
+	// The earlier of the wall and boot deadlines, capped: stepping the box
+	// time back between restarts never lengthens the window.
 	left := p.Deadline.Sub(a.now())
+	if now, err := netBootClock(); err == nil && p.BootDeadline > 0 && p.BootDeadline-now < left {
+		left = p.BootDeadline - now
+	}
 	if left > netConfirmWindow {
 		left = netConfirmWindow
 	}
+	n.cur = p
 	if left <= 0 {
-		n.cur = p
 		a.netRollbackLocked("restart")
 		return
 	}
 	a.netArmLocked(p, left)
+}
+
+func (a *AppServer) netSweepLocked() {
+	intfs, err := models.NetworkTrials()
+	if err != nil {
+		logging.Errorf("listing the network trials: %v", err)
+		return
+	}
+	for _, intf := range intfs {
+		err := models.RevertNetworkTrial(intf)
+		if errors.Is(err, models.ErrTrialKept) {
+			logging.Errorf("reverting the network trial of %s: %v", intf, err)
+			continue
+		}
+		a.netRolledBack(intf, "-", "-", "-", "restart", err)
+	}
 }
 
 func (a *AppServer) netNotPending(c *fiber.Ctx) error {
@@ -436,6 +485,9 @@ func (a *AppServer) netApplyLocked(r models.NetApply, sessionAudit, client strin
 		SessionAudit: sessionAudit,
 		Client:       client,
 	}
+	if boot, err := netBootClock(); err == nil {
+		p.BootDeadline = boot + netConfirmWindow
+	}
 	if err := a.net.save(*p); err != nil {
 		return nil, err
 	}
@@ -444,10 +496,16 @@ func (a *AppServer) netApplyLocked(r models.NetApply, sessionAudit, client strin
 		return nil, err
 	}
 	if err := models.ApplyNetworkTrial(r.Intf); err != nil {
-		if rerr := models.RevertNetworkTrial(r.Intf); rerr != nil {
+		rerr := models.RevertNetworkTrial(r.Intf)
+		if rerr != nil {
 			logging.Errorf("reverting the failed network change on %s: %v", r.Intf, rerr)
 		}
-		a.netClearLocked()
+		if errors.Is(rerr, models.ErrTrialKept) {
+			a.net.cur = p
+			a.netRetryLocked()
+		} else {
+			a.netClearLocked()
+		}
 		return nil, err
 	}
 	a.netArmLocked(p, netConfirmWindow)
@@ -503,7 +561,10 @@ func (a *AppServer) v2NetRevert(c *fiber.Ctx) error {
 	auditField(c, "intf", done.Intf)
 	auditField(c, "reason", "revert")
 	rerr := models.RevertNetworkTrial(done.Intf)
-	a.netClearLocked()
+	// A trial still in place keeps the change pending: the timer retries.
+	if !errors.Is(rerr, models.ErrTrialKept) {
+		a.netClearLocked()
+	}
 	if rerr != nil {
 		return errInternal(rerr)
 	}

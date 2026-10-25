@@ -869,13 +869,19 @@ it from the new address: otherwise it reverts by itself, and a reboot reverts it
 **Pending change**
 
 - One change at a time. It is recorded in `/run/calaos-container/network-pending.json`
-  (`change_id`, `intf`, `applied_at`, `deadline`, `session_audit`, `client`), mounted in no
+  (`change_id`, `intf`, `applied_at`, `deadline`, `boot_deadline`, `session_audit`, `client`),
+  mounted in no
   container. `session_audit` is the audit id of the applying session (`-` for the CLI) and `client`
   the `X-Calaos-Client-IP` of the apply (`local` for the CLI).
 - The window is 120 s from `applied_at` (`confirm_within`). A daemon that restarts re-arms the timer
   with the remaining time and publishes `network_pending` once more, with the original `applied_at`
   and `confirm_within` set to the seconds left; one that finds the deadline passed rolls back at
-  once.
+  once. The remaining time is the earlier of the wall-clock `deadline` and `boot_deadline`
+  (`CLOCK_BOOTTIME`), capped at 120 s, so stepping the box time back does not extend the window.
+- A restarted daemon that finds a trial without a valid record reverts it, with the same alert and
+  a `network_rollback` audit line with `client=-`, `session=-` and `change_id=-`.
+- A rollback that cannot remove the trial keeps the change pending and retries every 10 s; no alert
+  is raised until the trial is gone. `networkctl` calls time out after 30 s.
 - At the end of the window, and when a restarted daemon finds the deadline already passed, the
   daemon reverts, deletes the record and raises the persisted alert
   `network_rolled_back {id, ts, intf}` (see Alerts).
@@ -1234,6 +1240,8 @@ apply at once and have no confirmation or rollback.
 The words `apply`, `confirm`, `revert`, `state`, `list` and `trial` are refused as interface names
 by the validator the legacy route shares: it still answers `400`, with the raw error text of the
 validator as `msg` for those six words.
+A failed write or `networkctl` call still answers `500`; its `msg` is the raw error text, which now
+reads `failed to write network config file: ...` or carries the `networkctl` output.
 
 Unknown legacy paths answer fiber's plain-text `404 Cannot GET ...` and `405 Method Not Allowed`.
 A bearer failure answers `401 {"error":true,"msg":"wrong token"}`, or `"unauthorized"` when no
