@@ -349,6 +349,7 @@ it to an approver, the user types it back in the webapp.
 | `admin_password` | `POST admin/set`, change mode | `{"password": "<new password>"}` |
 | `approver_enroll` | `POST admin/approvers/enroll` while an approver exists | `{}` |
 | `approver_remove` | `POST admin/approvers/remove` | `{"approver_id": "<id>"}` |
+| `approver_confirm` | `POST admin/approvers/confirm` | `{}`; issued by `admin/approvers/enroll` to the new phone, not requestable through `admin/codes` |
 | `network_config` | `POST network/apply` | the six strings `intf`, `dhcp`, `ipv4`, `gateway`, `dns_servers`, `search_domains`, see Network configuration |
 
 Updates, reboot, restart, services, logs, box time and every other admin action need the admin
@@ -617,12 +618,15 @@ The other routes add these fields before the method, and never a value that coul
 | `POST logs/query` | `sources=<ids joined by +>`, `lines=`, `dir=`, `text=yes` or `text=no`; never the text |
 | `POST system/time` | `tz=`, `ntp=`, `time=set`; never the time |
 | `POST network/apply`, `POST network/trial` | `intf=`, `change_id=`; `code_id=` on `apply` |
-| `POST network/confirm`, `POST network/revert` | `change_id=` |
+| `POST network/confirm` | `change_id=` |
+| `POST network/revert` | `change_id=`, `intf=`, `reason=revert` |
 
-A rollback of a pending network change (timeout, revert, daemon restart past the deadline) writes
-one more line, in the form of the `console_close` line:
-`action=network_rollback intf=<intf> change_id=<id> reason=<reason>`, `reason` one of `timeout`,
-`revert`, `restart`.
+A rollback of a pending network change by the timeout or by a daemon restart past the deadline
+writes one more line, in the form of the `console_close` line, with the `client` and the session
+audit id kept in the pending record:
+`<time> client=<client> result=ok session=<audit id> action=network_rollback intf=<intf> change_id=<id> reason=<reason> - "-"`,
+`reason` being `timeout` or `restart`. An explicit `POST network/revert` is its own audit line,
+with `reason=revert`.
 
 A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
 second: anything on the host can send the first, calaos_server relays a household client's guessed
@@ -663,8 +667,13 @@ the admin session, and `systemd-networkd` is reloaded by the network routes unde
 {"error": false, "msg": "ok", "data": {"services": [{"id": "mosquitto", "unit": "mosquitto.service", "kind": "service", "restartable": true, "active_state": "active", "sub_state": "running", "enabled": "enabled", "since": "2026-10-25T07:41:12Z"}]}}
 ```
 
-- One entry per table row. `active_state` and `sub_state` are systemd's `ActiveState` and
-  `SubState`; a unit that is not installed has `active_state: "not-found"`.
+- One entry per table row, in the order of the table above. `restartable` is a boolean, `kind`
+  `"service"` or `"oneshot"`.
+- `active_state` is systemd's `ActiveState` (`active`, `inactive`, `failed`, `activating`,
+  `deactivating`, `reloading`), or `"not-found"` when the unit is not installed (`LoadState` is
+  `not-found`). `sub_state` is systemd's `SubState`, `""` for `not-found`.
+- `enabled` is systemd's `UnitFileState` string (`enabled`, `disabled`, `static`, `indirect`, ...),
+  `""` when empty or `not-found`.
 - `since` is when the unit entered its current active state, RFC 3339 UTC, or `null`.
 - The state is read in one `systemctl show` call for all units, and cached for 1 s.
 
@@ -690,7 +699,30 @@ filtered, redacted entries. It never streams. The journal is only read.
 
 ### `GET /api/v2/logs/sources`
 
-`{"sources": [{"id", "label"}]}`, the ids below.
+`{"sources": [{"id", "label"}]}`, in the order of the table below. `label` is a fixed English text,
+for a client that has no translation of the `id`:
+
+| `id` | `label` |
+|---|---|
+| `calaos-server` | Calaos server |
+| `calaos-home` | Calaos Home (kiosk) |
+| `haproxy` | haproxy |
+| `mosquitto` | Mosquitto |
+| `zigbee2mqtt` | Zigbee2MQTT |
+| `influxdb` | InfluxDB |
+| `grafana` | Grafana |
+| `hue2mqtt` | hue2mqtt |
+| `envoy` | Envoy |
+| `calaos-container` | calaos-container |
+| `olad` | OLA (olad) |
+| `timesyncd` | Time sync (timesyncd) |
+| `calaos-ddns` | Calaos DDNS |
+| `networkd` | Network (networkd) |
+| `ssh` | SSH |
+| `kernel` | Kernel |
+| `system` | Whole system |
+
+Entries are matched as follows.
 
 | `id` | Journal entries |
 |---|---|
@@ -714,8 +746,8 @@ Every field is optional.
 | Field | Rule |
 |---|---|
 | `sources` | 1 to 8 ids of the list above; default `["system"]`; unknown id: `invalid_request` |
-| `priority` | the maximum level shown: `emerg`, `alert`, `crit`, `err`, `warning`, `notice`, `info`, `debug`, or `0` to `7` |
-| `since`, `until` | RFC 3339 times. The daemon parses them and passes its own formatting to `journalctl` |
+| `priority` | the maximum level shown: a name (`emerg`, `alert`, `crit`, `err`, `warning`, `notice`, `info`, `debug`) or a JSON number `0` to `7`; a numeric string such as `"3"` is refused |
+| `since`, `until` | RFC 3339 times; `since` at or after `until` is `invalid_request`. The daemon parses them and passes its own formatting to `journalctl` |
 | `text` | at most 256 characters, matched as a case-insensitive substring by the daemon: never a regular expression, never on a command line |
 | `lines` | 1 to 1000; default 200 |
 | `cursor` | a journal cursor from an earlier answer, at most 512 printable ASCII characters, passed as a single argument |
@@ -729,23 +761,33 @@ Every field is optional.
 Answer:
 
 ```json
-{"error": false, "msg": "ok", "data": {"entries": [{"cursor": "s=...", "ts": "2026-10-25T08:12:03.412Z", "source": "calaos-server", "unit": "calaos-server.service", "priority": 4, "pid": 812, "message": "..."}], "truncated": false, "complete": true}}
+{"error": false, "msg": "ok", "data": {"entries": [{"cursor": "s=...", "ts": "2026-10-25T08:12:03.412Z", "source": "calaos-server", "unit": "calaos-server.service", "priority": 4, "pid": 812, "message": "..."}], "truncated": false, "complete": true, "next_cursor": "s=..."}}
 ```
 
 - `entries` are oldest first, in both directions. `ts` is RFC 3339 UTC with milliseconds,
   `priority` an integer 0 to 7, `source` the id the entry matched, `unit` the systemd unit or
   `kernel`, `pid` is present when the journal has one.
-- `message` is cut at 2048 bytes, and redacted (below).
-- The answer is at most 1 MiB: `truncated: true` when that budget cut it.
-- The daemon scans at most 5000 entries or 5 s for one query: `complete: false` when the scan ended
-  before `lines` entries matched. The client continues from the last `cursor` it received.
-- To follow the journal, a client repeats a `forward` query with the last `cursor` it has.
+- `message` is cut at 2048 bytes, and then the entry carries `"cut": true`. It is redacted
+  (below).
+- `priority` in the answer is always a number.
+- The answer is at most 1 MiB: `truncated: true` when that budget cut it. The cut drops the entries
+  farthest from the start point (the newest for `forward`, the oldest for `backward`).
+- Every query scans at most 5000 journal entries or 5 s. `complete: false` when the scan ended
+  before `lines` entries matched; the answer is still `200` with the entries read so far, never
+  `internal`.
+- `next_cursor` is the cursor of the last journal entry scanned in the direction of the query
+  (the newest for `forward`, the oldest for `backward`), matching or not, so that a client always
+  makes progress; `null` when nothing was scanned. When `truncated` is true it is the cursor of the
+  last entry kept. A client continues with `cursor: next_cursor` and the same `direction`.
+- To follow the journal, a client repeats a `forward` query with the `next_cursor` it received.
 
 **Limits**
 
-- 2 queries per second per session, and 4 `journalctl` processes at a time for the whole daemon:
-  beyond, `429 rate_limited` with `retry_after: 1`.
-- A query that outlives 5 s is stopped, with its whole process group.
+- 2 queries per second per session, one more bucket of 2 per second shared by every call without a
+  session (the CLI), and 4 `journalctl` processes at a time for the whole daemon: beyond,
+  `429 rate_limited` with `retry_after: 1`.
+- A query that outlives 5 s is stopped, with its whole process group, and answers as above
+  (`complete: false`).
 - A `journalctl` failure is `500 internal`; its stderr goes to the daemon log only.
 
 **Redaction**
@@ -781,14 +823,20 @@ clock is synchronized, `rtc` is the hardware clock or `null`.
 `{"timezones": [...]}`, the output of `timedatectl list-timezones` (cached).
 
 `POST /api/v2/system/time`, body `{"timezone": "Europe/Paris", "ntp": false, "time": "2026-10-25T09:12:03Z"}`,
-each field optional. Answer: the new `<BoxTime>`.
+each field optional, at least one (an empty body is `400 invalid_request`, "no field to set").
+Answer: the new `<BoxTime>` plus `"restart_required": <bool>`, true when `timezone` changed.
 
 - The changes apply in this order: `timezone` (it must be in the list of `timezones`), then `ntp`
   (`timedatectl set-ntp`, which starts or stops `systemd-timesyncd`), then `time`.
 - `time` is RFC 3339 with a year from 2020 to 2100. It is refused with `invalid_request`
   ("ntp is active") when NTP is still on after the `ntp` step.
-- Each `timedatectl` command has 10 s; a failure is `500 internal`.
-- Audit fields `tz=`, `ntp=`, `time=set`.
+- Each `timedatectl` command has 10 s. The first step that fails stops the sequence and answers
+  `500 internal` with `data: {"applied": ["timezone"], "failed": "ntp"}`; the steps before it stay
+  applied, and `GET system/time` shows the real state.
+- The daemon does not write `/etc/timezone` and sets no `TZ`: the processes of the box read the
+  zone from `/etc/localtime`, and a container sees the change when it is recreated, hence
+  `restart_required`.
+- Audit fields `tz=`, `ntp=`, `time=set`, for the applied steps only.
 
 Sessions, push codes, consoles and the pending network change measure their deadlines on the
 monotonic clock: stepping the box time does not stretch or shorten them.
@@ -817,17 +865,24 @@ it from the new address: otherwise it reverts by itself, and a reboot reverts it
 **Pending change**
 
 - One change at a time. It is recorded in `/run/calaos-container/network-pending.json`
-  (`change_id`, `intf`, `applied_at`, `deadline`, `session_hash`), mounted in no container.
+  (`change_id`, `intf`, `applied_at`, `deadline`, `session_audit`, `client`), mounted in no
+  container. `session_audit` is the audit id of the applying session (`-` for the CLI) and `client`
+  the `X-Calaos-Client-IP` of the apply (`local` for the CLI).
 - The window is 120 s from `applied_at` (`confirm_within`). A daemon that restarts re-arms the timer
-  with the remaining time; one that finds the deadline passed reverts at once.
+  with the remaining time and publishes `network_pending` once more, with the original `applied_at`
+  and `confirm_within` set to the seconds left; one that finds the deadline passed reverts at once.
 - At the end of the window the daemon reverts, deletes the record and raises the persisted alert
   `network_rolled_back {id, ts, intf}` (see Alerts).
+- While a change is pending, `POST /api/v2/network/{intf}` and `POST network/trial` answer
+  `409 network_pending`. The legacy `POST /api/network/{intf}` is not refused: it writes
+  `/etc`, and the trial keeps winning until the confirmation or the rollback.
 
 **Interface names**
 
-`apply`, `confirm`, `revert`, `state` and `list` are not valid interface names (nor `.`, `..`):
-`POST network/{intf}` answers `400 invalid_request` for them, and the static routes below are
-registered before it, so that `POST network/apply` with a session reaches `apply`.
+`apply`, `confirm`, `revert`, `state`, `list` and `trial` are not valid interface names (nor `.`,
+`..`): `POST network/{intf}` answers `400 invalid_request` for them, and the five static `POST`
+routes below are registered before it, so that `POST network/apply` with a session reaches
+`apply`.
 
 ### `GET /api/v2/network/state`
 
@@ -852,9 +907,11 @@ Answer `{"change_id": "<16 hex>", "intf": "eth0", "applied_at": "<RFC 3339 UTC>"
 Checks run in this order:
 
 1. the body (`invalid_request`): the validators of `network/{intf}`, plus: `intf` exists and is not
-   the loopback; `ipv4` is a strict IPv4 address (no leading zero); at most 4 `dns_servers` and at
-   most 4 `search_domains`; `gateway` is required when `dhcp` is false, unless the address is
-   link-local;
+   the loopback; IPv4 only, with no leading zero in any octet: `ipv4` is a CIDR with an explicit
+   prefix (`a.b.c.d/n`; a bare address is refused here, unlike `network/{intf}`), `gateway` and
+   each `dns_servers` entry an IPv4 address; at most 4 `dns_servers` and at most 4
+   `search_domains`; `gateway` is optional (no `Gateway=` line is written when it is empty); with
+   `dhcp: true`, `ipv4`, `gateway`, `dns_servers` and `search_domains` must be absent or empty;
 2. the session (`bad_session`);
 3. no other pending change: `409 network_pending` with `{change_id, expires_in}`. The code stays
    usable;
@@ -872,7 +929,7 @@ The code is bound to the **verbatim validated strings** of the body, six keys, a
 | `dns_servers` | the list joined by `,` |
 | `search_domains` | the list joined by `,` |
 
-Applying: the trial is written and recorded, `networkctl reload` and `reconfigure <intf>` run, the
+`ipv4` is required when `dhcp` is false. Applying: the trial is written and recorded, `networkctl reload` and `reconfigure <intf>` run, the
 timer starts from `applied_at`, and `network_pending {change_id, intf, applied_at, confirm_within}`
 is published. If `reload` or `reconfigure` fails the daemon reverts at once and answers
 `500 internal`. The box may switch address before the answer reaches the client.
@@ -1113,7 +1170,8 @@ never forwarded. Every other type is dropped.
 | `404` on `GET /api/v2/admin/status` (any body), or any `/api/v2/` `404` whose body is not an envelope with a `code` | `daemon_too_old` |
 | `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired`, `console_limit`, `network_pending` | same code |
 | `invalid_request`, `package_not_found`, `package_held` | same code, with the daemon `msg` (safe to display) |
-| `internal`, `not_found`, `method_not_allowed`, any unknown code | `internal` |
+| `not_found` on a relay-table route (the path is fixed by the table, so the route does not exist in a daemon that predates it) | `daemon_too_old`, for that action only |
+| `internal`, `not_found` on any other call (`admin/push/{code_id}`, ...), `method_not_allowed`, any unknown code | `internal` |
 
 `rate_limited` copies `retry_after`; `upgrade_in_progress` copies `job_id`; `bad_code` copies
 `attempts_left`; `approver_limit` and `console_limit` copy `max`; `network_pending` copies
@@ -1168,6 +1226,9 @@ changed, with unchanged bodies and statuses: it is now an atomic write of
 `/etc/systemd/network/calaos_<intf>.network` for that interface, where it used to rewrite the file
 named by `networkctl status` as `NetworkFile`, which on a stock box is the `en*` file shared by every
 interface. These two routes stay bearer only, apply at once and have no confirmation or rollback.
+The words `apply`, `confirm`, `revert`, `state`, `list` and `trial` are refused as interface names
+by the validator the legacy route shares: it still answers `400`, with the raw error text of the
+validator as `msg` for those six words.
 
 Unknown legacy paths answer fiber's plain-text `404 Cannot GET ...` and `405 Method Not Allowed`.
 A bearer failure answers `401 {"error":true,"msg":"wrong token"}`, or `"unauthorized"` when no
