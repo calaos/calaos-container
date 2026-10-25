@@ -95,7 +95,7 @@ ignored.
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
-| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, service restart, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
+| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
 | `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes), log query limits (see Logs) | `{"retry_after": <seconds>}` |
 | `approver_required` | 409 | the action needs a push code and no approver is enrolled | none |
@@ -107,7 +107,8 @@ ignored.
 | `bad_code` | 403 | wrong push code, or a code requested for another action or other parameters | `{"attempts_left": <int>}` |
 | `code_expired` | 410 | the push code is unknown to this session, expired, used, replaced or dropped | none |
 | `console_limit` | 409 | a console is opened while 2 are open or opening | `{"max": 2}` |
-| `network_pending` | 409 | a network change is already waiting for its confirmation (see Network configuration) | `{"change_id": "<16 hex>", "expires_in": <seconds>}` |
+| `network_pending` | 409 | a network change is already waiting for its confirmation, or `calaos-container` is restarted while one waits (see Network configuration, Services) | `{"change_id": "<16 hex>", "expires_in": <seconds>}` |
+| `service_unavailable` | 409 | the unit of a service action is not installed or is masked (see Services) | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -146,6 +147,10 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
 | POST | `/api/v2/system/services/restart` | bearer, session allowed | 200 | `{"id", "state": "restarting"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/start` | bearer, session allowed | 200 | `{"id", "state": "starting"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/stop` | bearer, session allowed | 200 | `{"id", "state": "stopping"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/enable` | bearer, session allowed | 200 | `{"id", "state": "enabling"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/disable` | bearer, session allowed | 200 | `{"id", "state": "disabling"}`; body `{"unit": "<id>"}` |
 | GET | `/api/v2/system/time` | bearer, session allowed | 200 | `<BoxTime>` (see Box time) |
 | POST | `/api/v2/system/time` | bearer, session allowed | 200 | `<BoxTime>` plus `restart_required`; body `{"timezone", "ntp", "time"}`, each optional, at least one |
 | GET | `/api/v2/system/timezones` | bearer, session allowed | 200 | `{"timezones": ["Africa/Abidjan", ...]}` |
@@ -615,7 +620,7 @@ The other routes add these fields before the method, and never a value that coul
 
 | Route | Fields |
 |---|---|
-| `POST system/services/restart` | `unit=<id>` |
+| `POST system/services/{restart,start,stop,enable,disable}` | `unit=<id>`, set once the `unit` is an `id` of the table and the verb is allowed for it |
 | `POST logs/query` | `sources=<ids joined by +>`, `lines=`, `dir=`, `text=yes` or `text=no`; never the text. Not written for a follow poll (`forward` with a `cursor`) |
 | `POST system/time` | `tz=`, `ntp=`, `time=set`; never the time |
 | `POST network/apply`, `POST network/trial` | `intf=`, `change_id=`; `code_id=` on `apply` |
@@ -645,61 +650,125 @@ that changes something stays audited. `audit.log` is rotated at 1 MiB, one old f
 
 ## Services
 
-The daemon reports the state of a closed list of Calaos OS units and restarts some of them. The
+The daemon reports the state of a closed list of Calaos OS units and acts on some of them. The
 list is a static table in the daemon: a client names an `id`, never a unit.
 
-| `id` | Unit | `kind` | `restartable` |
+| `id` | Unit | `kind` | `actions` |
 |---|---|---|---|
-| `calaos-server` | `calaos-server.service` | `service` | yes |
-| `calaos-home` | `calaos-home.service` | `service` | yes |
-| `mosquitto` | `mosquitto.service` | `service` | yes |
-| `zigbee2mqtt` | `zigbee2mqtt.service` | `service` | yes |
-| `influxdb` | `influxdb.service` | `service` | yes |
-| `grafana` | `grafana.service` | `service` | yes |
-| `hue2mqtt` | `hue2mqtt.service` | `service` | yes |
-| `envoy` | `envoy.service` | `service` | yes |
-| `olad` | `olad.service` | `service` | yes |
-| `timesyncd` | `systemd-timesyncd.service` | `service` | yes |
-| `calaos-ddns` | `calaos-ddns.service` (run by `calaos-ddns.timer`) | `oneshot` | yes (starts it) |
-| `calaos-container` | `calaos-container.service` | `service` | no |
-| `haproxy` | `haproxy.service` | `service` | no |
-| `networkd` | `systemd-networkd.service` | `service` | no |
-| `ssh` | `ssh.service` | `service` | no |
+| `calaos-server` | `calaos-server.service` | `service` | `restart` |
+| `calaos-home` | `calaos-home.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `mosquitto` | `mosquitto.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `zigbee2mqtt` | `zigbee2mqtt.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `influxdb` | `influxdb.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `grafana` | `grafana.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `hue2mqtt` | `hue2mqtt.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `envoy` | `envoy.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `olad` | `olad.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `ntp` | `chrony.service`, else `systemd-timesyncd.service` | `service` | `restart` |
+| `calaos-container` | `calaos-container.service` | `service` | `restart` |
+| `haproxy` | `haproxy.service` | `service` | `restart` |
+| `networkd` | `systemd-networkd.service` | `service` | none (status only) |
+| `ssh` | `ssh.service` | `service` | `restart` (`reload-or-restart`) |
 
-The units that are not restartable are status only: the daemon may be running apt, haproxy carries
-the admin session, and `systemd-networkd` is reloaded by the network routes under their own guard.
+`ntp` is the NTP client: Calaos OS runs chrony (the `calaos` package depends on it, which removes
+`systemd-timesyncd`). The daemon uses the first candidate whose `LoadState` is not `not-found`, or
+`chrony.service` when none is installed. The candidates are constants: no unit name comes from a
+client. The NTP client is switched on and off by `ntp` in `POST system/time` (see Box time), which
+is why it has no `start`, `stop`, `enable` or `disable`.
+
+Why some rows have fewer verbs:
+
+- `calaos-server`, `haproxy`, `calaos-container` and `ssh` are the way back in. A `stop` or a
+  `disable` of any of them leaves a box that no client can repair, so they only restart.
+- `networkd` has no `KeepConfiguration=`: a restart drops the DHCP lease and the static addresses,
+  with no rollback. The network routes are the guarded path.
 
 ### `GET /api/v2/system/services`
 
 ```json
-{"error": false, "msg": "ok", "data": {"services": [{"id": "mosquitto", "unit": "mosquitto.service", "kind": "service", "restartable": true, "active_state": "active", "sub_state": "running", "enabled": "enabled", "since": "2026-10-25T07:41:12Z"}]}}
+{"error": false, "msg": "ok", "data": {"services": [{"id": "zigbee2mqtt", "unit": "zigbee2mqtt.service", "kind": "service", "actions": ["restart", "start", "stop", "enable", "disable"], "restartable": true, "active_state": "inactive", "sub_state": "dead", "enabled": "disabled", "startup": "disabled", "boot_unit": "zigbee2mqtt.service", "since": null, "next_run": null}]}}
 ```
 
-- One entry per table row, in the order of the table above. `restartable` is a boolean, `kind`
-  `"service"` or `"oneshot"`.
+- One entry per table row, in the order of the table above. `kind` is `"service"` or `"oneshot"`.
+- `actions` is the row's static list of verbs, in the order `restart`, `start`, `stop`, `enable`,
+  `disable`; `[]` for a status-only row. `restartable` is a boolean, true when `restart` is in
+  `actions`.
 - `active_state` is systemd's `ActiveState` (`active`, `inactive`, `failed`, `activating`,
   `deactivating`, `reloading`), or `"not-found"` when the unit is not installed (`LoadState` is
   `not-found`). `sub_state` is systemd's `SubState`, `""` for `not-found`.
-- `enabled` is systemd's `UnitFileState` string (`enabled`, `disabled`, `static`, `indirect`, ...),
-  `""` when empty or `not-found`.
+- `enabled` is systemd's `UnitFileState` string (`enabled`, `disabled`, `static`, `indirect`,
+  `generated`, ...), `""` when empty or `not-found`.
+- `startup` tells whether `boot_unit` starts at boot, as one of four words:
+  - `enabled`: `UnitFileState` is `enabled`, `enabled-runtime`, `linked`, `linked-runtime` or
+    `alias`;
+  - `disabled`;
+  - `masked`: `masked` or `masked-runtime`;
+  - `static`: any other value.
+
+  It is `""` for `not-found`. For a unit whose `UnitFileState` is `generated` (`olad`, which has a
+  SysV script only), `startup` is the first word of `systemctl is-enabled <unit>`, read in the
+  same 1 s cache.
+- `boot_unit` is the unit that `enable` and `disable` act on. It is `unit` for every row.
 - `since` is when the unit last entered the `active` state (`ActiveEnterTimestamp`), RFC 3339 UTC,
   or `null` when it never did.
-- The state is read in one `systemctl show` call for all units, and cached for 1 s.
+- `next_run` is `null` for every row.
+- `unit` is the resolved unit (for `ntp`, the installed candidate, or the first candidate when none
+  is installed).
+- The state is read in one `systemctl show` call for all units and every `ntp` candidate, and
+  cached for 1 s. The daemon keeps no state of its own: systemd is the source of truth, read at
+  each call.
 
-### `POST /api/v2/system/services/restart`
+### Actions: `POST /api/v2/system/services/{restart,start,stop,enable,disable}`
 
-Body `{"unit": "<id>"}`. Answer `{"id": "<id>", "state": "restarting"}`.
+All five routes are `bearer, session allowed`, take the body `{"unit": "<id>"}` and answer
+`{"id": "<id>", "state": "<state>"}`.
 
-- `unit` is an `id` of the table with `restartable: true`; anything else, including a unit name or a
-  status-only id, is `400 invalid_request` ("unknown or non-restartable service").
-- `409 upgrade_in_progress` while an upgrade run is in progress, for every unit (the same guard as
-  `system/reboot`).
-- The daemon answers first, then restarts the unit about 500 ms later (`systemctl restart
-  --no-block`, `start` for a `oneshot`), with a 10 s limit on the command. The answer says nothing
-  about the outcome: a client reads it by polling `GET system/services`. A client that restarts
-  `calaos-server` loses its connection within seconds.
-- Audit field `unit=<id>`. `POST /api/v2/system/restart` and the legacy `POST /api/system/restart`
-  (restart of the `calaos-home` kiosk) are unchanged.
+| Route | `state` | Runs |
+|---|---|---|
+| `restart` | `restarting` | after the answer, about 500 ms later: `systemctl restart --no-block <unit>` (`reload-or-restart` for `ssh`, `start` for a `oneshot`) |
+| `start` | `starting` | before the answer: `systemctl start --no-block <unit>` |
+| `stop` | `stopping` | before the answer: `systemctl stop --no-block <unit>` |
+| `enable` | `enabling` | before the answer: `systemctl enable --now --no-block <boot_unit>` |
+| `disable` | `disabling` | before the answer: `systemctl disable --now --no-block <boot_unit>` |
+
+- Every command has a 10 s limit. `--no-block` queues the job, so the limit covers the queuing and
+  not the outcome. The answer says nothing about the outcome: a client reads it by polling
+  `GET system/services`. A client that restarts `calaos-server`, `haproxy` or `calaos-container`
+  loses its connection within seconds.
+- `restart` starts a stopped unit. A `reload` of `ssh` runs `sshd -t` first, so a broken
+  `sshd_config` leaves the running daemon alone, and open sessions survive.
+- `enable` and `disable` act now and at boot (`--now`): "start now and at every boot", "stop now and
+  at every boot". Enabling without starting, or disabling without stopping, is not offered.
+- A `stop` lasts until the next reboot, or the next update of the package when the unit is
+  enabled. A unit that is not enabled is not started by an update, nor by a reboot: `start` and
+  `restart` do not change that, `enable` does. An update keeps a disabled unit disabled.
+- A unit whose `startup` is `masked`, or that is not installed, refuses every verb (below).
+
+Checks, in this order, on every one of the five routes:
+
+1. The body: valid JSON, with `unit` a string.
+2. `unit` is an `id` of the table and the route's verb is in its `actions`; anything else,
+   including a unit name or a status-only id, is `400 invalid_request` ("action not allowed for
+   this service"; for `restart`, "unknown or non-restartable service"). No `systemctl` command
+   runs.
+3. The audit field `unit=<id>` is set. The path names the verb.
+4. `409 upgrade_in_progress` while an upgrade run is in progress, for every unit and every verb
+   (the same guard as `system/reboot`).
+5. `409 service_unavailable` when the unit is not installed (`active_state` is `not-found`, `msg`
+   "the unit is not installed") or masked (`startup` is `masked`, `msg` "the unit is masked"). The
+   state is read by a fresh `systemctl show`, not from the 1 s cache. Masking stays a decision made
+   over SSH.
+6. `restart` of `calaos-container` while a network change waits for its confirmation: `409
+   network_pending`, with the usual `data`.
+7. For `start`, `stop`, `enable` and `disable`, a command that exits non-zero is `500 internal`.
+   The detail (stderr) goes to the daemon log, not to the client. The 1 s state cache is reset
+   after each command.
+
+A restart of `calaos-container` is safe: sessions are on disk, a pending network change is
+re-armed at start, and the upgrade guard refuses it during a job.
+
+Each call writes one audit line with `unit=<id>` (see Audit). `POST /api/v2/system/restart` and the
+legacy `POST /api/system/restart` (restart of the `calaos-home` kiosk) are unchanged.
 
 ## Logs
 
