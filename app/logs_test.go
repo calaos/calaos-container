@@ -20,6 +20,11 @@ import (
 // journalctl would (newest first with -r).
 const fakeJournalctl = `#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a"; done > "$FAKE_JOURNAL_ARGS"
+case " $* " in
+*" --since="*" --after-cursor="*|*" --after-cursor="*" --since="*|*" --since="*" --cursor="*|*" --cursor="*" --since="*)
+	echo "Please specify only one of --since=, --cursor=, and --after-cursor=." >&2
+	exit 1 ;;
+esac
 if [ "$FAKE_JOURNAL_MODE" = hang ]; then
 	sleep 30 &
 	echo $! > "$FAKE_JOURNAL_PIDS"
@@ -106,10 +111,13 @@ func alive(pid int) bool {
 	return !strings.HasPrefix(rest, "Z")
 }
 
+// jbase is 2026-10-26T07:41:12Z; entry i is i ms later.
+const jbase = 1793000472000000
+
 func jentry(i int, unit, msg string) string {
 	b, _ := json.Marshal(map[string]any{
 		"__CURSOR":             fmt.Sprintf("s=%d", i),
-		"__REALTIME_TIMESTAMP": strconv.FormatInt(1793000472000000+int64(i)*1000, 10),
+		"__REALTIME_TIMESTAMP": strconv.FormatInt(jbase+int64(i)*1000, 10),
 		"PRIORITY":             "4",
 		"_SYSTEMD_UNIT":        unit,
 		"_PID":                 "812",
@@ -143,6 +151,14 @@ func cursors(es []logEntry) string {
 		c = append(c, e.Cursor)
 	}
 	return strings.Join(c, ",")
+}
+
+// useLogClock puts the daemon clock an hour after the fake entries, so the
+// 7-day default window holds them whatever the date of the run.
+func useLogClock(t *testing.T) *testClock {
+	clk := useAdminClock(t)
+	clk.t = time.UnixMicro(jbase).Add(time.Hour)
+	return clk
 }
 
 func useScanTime(t *testing.T, d time.Duration) {
@@ -196,6 +212,7 @@ func TestLogsQueryDefaults(t *testing.T) {
 }
 
 func TestLogsQueryBackward(t *testing.T) {
+	useLogClock(t)
 	f := useFakeJournalctl(t)
 	f.write(jentry(5, "calaos-server.service", "five"), jentry(4, "calaos-server.service", "four"),
 		jentry(3, "calaos-server.service", "three"), jentry(2, "calaos-server.service", "two"))
@@ -212,7 +229,7 @@ func TestLogsQueryBackward(t *testing.T) {
 		t.Fatalf("entry %+v", e)
 	}
 	argv := strings.Join(f.argv(), "|")
-	if !strings.Contains(argv, "|-r|--after-cursor=s=6|--since=") || !strings.Contains(argv, "|--priority=4|") {
+	if !strings.Contains(argv, "|-r|--after-cursor=s=6|--priority=4|") || strings.Contains(argv, "--since") {
 		t.Fatalf("argv %s", argv)
 	}
 
@@ -220,6 +237,57 @@ func TestLogsQueryBackward(t *testing.T) {
 	_, _, d = logsQuery(t, a, `{"sources":["calaos-server"],"priority":3}`, nil)
 	if cursors(d.Entries) != "s=2,s=3,s=4,s=5" || !d.Complete || *d.NextCursor != "s=2" {
 		t.Fatalf("%+v", d)
+	}
+}
+
+// journalctl refuses --since with a cursor: the daemon applies it.
+func TestLogsQuerySinceWithCursor(t *testing.T) {
+	clk := useLogClock(t)
+	f := useFakeJournalctl(t)
+	var lines []string
+	for i := 8; i >= 1; i-- {
+		lines = append(lines, jentry(i, "ssh.service", "m"))
+	}
+	f.write(lines...)
+	f.mode("hang")
+	(&stubBackend{}).install(t)
+	a := newHandlerTestApp(t)
+
+	// Backward: the first entry older than since ends the page.
+	since := time.UnixMicro(jbase + 3500).UTC().Format(time.RFC3339Nano)
+	start := time.Now()
+	status, _, d := logsQuery(t, a, `{"cursor":"s=9","since":"`+since+`","lines":10}`, nil)
+	if status != 200 || cursors(d.Entries) != "s=4,s=5,s=6,s=7,s=8" || !d.Complete || *d.NextCursor != "s=4" {
+		t.Fatalf("%d %+v", status, d)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatal("the scan did not stop at since")
+	}
+	f.assertKilled()
+	if argv := strings.Join(f.argv(), "|"); strings.Contains(argv, "--since") {
+		t.Fatalf("argv %s", argv)
+	}
+
+	// Backward from a cursor without since: the 7-day default, in the daemon too.
+	f.mode("")
+	clk.Advance(time.Second)
+	if status, _, d = logsQuery(t, a, `{"cursor":"s=9","lines":3}`, nil); status != 200 || cursors(d.Entries) != "s=6,s=7,s=8" {
+		t.Fatalf("%d %+v", status, d)
+	}
+
+	// Forward: older entries are skipped, until ends the page.
+	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+		lines[i], lines[j] = lines[j], lines[i]
+	}
+	f.write(lines...)
+	until := time.UnixMicro(jbase + 6500).UTC().Format(time.RFC3339Nano)
+	clk.Advance(time.Second)
+	status, _, d = logsQuery(t, a, `{"direction":"forward","cursor":"s=0","since":"`+since+`","until":"`+until+`"}`, nil)
+	if status != 200 || cursors(d.Entries) != "s=4,s=5,s=6" || !d.Complete || *d.NextCursor != "s=6" {
+		t.Fatalf("%d %+v", status, d)
+	}
+	if argv := strings.Join(f.argv(), "|"); strings.Contains(argv, "--since") || !strings.Contains(argv, "--until=") {
+		t.Fatalf("argv %s", argv)
 	}
 }
 
@@ -295,6 +363,7 @@ func TestLogsQueryTextOnRedacted(t *testing.T) {
 }
 
 func TestLogsQueryCutAndTruncated(t *testing.T) {
+	clk := useLogClock(t)
 	f := useFakeJournalctl(t)
 	big := strings.Repeat("x", 3000)
 	lines := []string{jentry(1, "ssh.service", big)}
@@ -322,6 +391,7 @@ func TestLogsQueryCutAndTruncated(t *testing.T) {
 		lines[i], lines[j] = lines[j], lines[i]
 	}
 	f.write(lines[:1000]...)
+	clk.Advance(time.Second)
 	_, _, d = logsQuery(t, a, `{"lines":1000}`, nil)
 	if !d.Truncated || d.Entries[len(d.Entries)-1].Cursor != "s=1000" || *d.NextCursor != d.Entries[0].Cursor {
 		t.Fatalf("backward truncation: n=%d next=%s", len(d.Entries), *d.NextCursor)
@@ -329,6 +399,7 @@ func TestLogsQueryCutAndTruncated(t *testing.T) {
 
 	// An overlong line is skipped, not buffered.
 	f.write(lines[len(lines)-1], jentry(7, "ssh.service", "ok"))
+	clk.Advance(time.Second)
 	_, _, d = logsQuery(t, a, `{"direction":"forward","cursor":"s=0"}`, nil)
 	if cursors(d.Entries) != "s=7" {
 		t.Fatalf("%+v", cursors(d.Entries))
@@ -364,6 +435,9 @@ func TestLogsQueryInvalid(t *testing.T) {
 		`{"since":"2026-10-25T10:00:00Z","until":"2026-10-25T09:00:00Z"}`,
 		`{"since":"yesterday"}`,
 		`{"until":"2026-10-25 09:00:00"}`,
+		`{"since":"0001-01-01T00:00:00Z"}`,
+		`{"until":"9999-12-31T00:00:00Z"}`,
+		`{"direction":"forward","since":"1969-12-31T23:59:59Z"}`,
 		`{"text":"` + strings.Repeat("é", logsMaxText+1) + `"}`,
 		`{"lines":0}`,
 		`{"lines":1001}`,
@@ -424,18 +498,17 @@ func TestLogsQueryRateLimit(t *testing.T) {
 		t.Fatal("refill")
 	}
 
-	// 4 journalctl processes at most.
+	// 4 journalctl processes at most; a refusal for that costs no token.
 	for i := 0; i < logsMaxProcs; i++ {
 		c.a.logs.procs <- struct{}{}
 	}
 	clk.Advance(time.Second)
-	if q(nil) != 429 {
+	if got := []int{q(nil), q(nil), q(nil)}; got[0] != 429 || got[1] != 429 || got[2] != 429 {
 		t.Fatal("fifth process allowed")
 	}
 	<-c.a.logs.procs
-	clk.Advance(time.Second)
-	if q(nil) != 200 {
-		t.Fatal("slot not reusable")
+	if got := []int{q(nil), q(nil), q(nil)}; got[0] != 200 || got[1] != 200 || got[2] != 429 {
+		t.Fatalf("after the slot came back: %v", got)
 	}
 }
 

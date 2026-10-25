@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -173,6 +174,10 @@ func parseLogTime(v *string, name string) (*time.Time, error) {
 	if err != nil {
 		return nil, errInvalid("invalid " + name + ": RFC 3339 time expected")
 	}
+	// journalctl fails on years it cannot represent: refused here, not 500.
+	if y := t.UTC().Year(); y < 1970 || y > 2100 {
+		return nil, errInvalid("invalid " + name + ": year 1970 to 2100")
+	}
 	return &t, nil
 }
 
@@ -284,14 +289,39 @@ func (a *AppServer) v2LogsQuery(c *fiber.Ctx) error {
 		return err
 	}
 
+	// Follow polls (forward from a cursor, every 2 s) are not audited; a
+	// search or a page of history is.
+	if req.q.Forward && req.q.Cursor != "" {
+		c.Locals(localAuditSkip, true)
+	} else {
+		ids := make([]string, len(req.q.Sources))
+		for i, s := range req.q.Sources {
+			ids[i] = s.ID
+		}
+		dir, text := "backward", "no"
+		if req.q.Forward {
+			dir = "forward"
+		}
+		if req.text != "" {
+			text = "yes"
+		}
+		auditField(c, "sources", strings.Join(ids, "+"))
+		auditField(c, "lines", strconv.Itoa(req.lines))
+		auditField(c, "dir", dir)
+		auditField(c, "text", text)
+	}
+
 	key := logsLocalBucket
 	if s, ok := adminSession(c); ok {
 		key = "s:" + admin.SessionAuditID(s)
 	}
-	if !a.logs.allow(key, now) || !a.logs.tryProc() {
+	if !a.logs.tryProc() {
 		return errLogsRateLimited()
 	}
 	defer a.logs.releaseProc()
+	if !a.logs.allow(key, now) {
+		return errLogsRateLimited()
+	}
 
 	res, err := readJournal(req)
 	if err != nil {
@@ -428,22 +458,30 @@ func readJournal(req logsRequest) (logsResult, error) {
 		size     = logsEnvelope
 		last     string
 		finished bool
+		past     bool
 	)
 	br := bufio.NewReaderSize(pr, 64<<10)
+scan:
 	for {
 		line, long, rerr := readLine(br)
 		if len(line) > 0 || long {
 			scanned++
 			if rec, perr := parseLine(line, long); perr == nil {
-				if req.text == "" || strings.Contains(strings.ToLower(rec.Message), req.text) {
-					e := toLogEntry(req.q, rec)
-					b, _ := json.Marshal(e)
-					if size+len(b)+1 > logsMaxBytes {
-						res.Truncated = true
-						break
+				switch req.q.Window(rec) {
+				case models.PastWindow:
+					finished, past = true, true
+					break scan
+				case models.InWindow:
+					if req.text == "" || strings.Contains(strings.ToLower(rec.Message), req.text) {
+						e := toLogEntry(req.q, rec)
+						b, _ := json.Marshal(e)
+						if size+len(b)+1 > logsMaxBytes {
+							res.Truncated = true
+							break scan
+						}
+						size += len(b) + 1
+						res.Entries = append(res.Entries, e)
 					}
-					size += len(b) + 1
-					res.Entries = append(res.Entries, e)
 				}
 				last = rec.Cursor
 			}
@@ -462,7 +500,7 @@ func readJournal(req logsRequest) (logsResult, error) {
 	}
 
 	timedOut := ctx.Err() != nil
-	stopped := !timedOut && (len(res.Entries) >= req.lines || res.Truncated || scanned >= logsScanEntries)
+	stopped := !timedOut && (past || len(res.Entries) >= req.lines || res.Truncated || scanned >= logsScanEntries)
 	// A journalctl that reached its end is reaped before the cancel, so its
 	// own exit status is what Wait reports.
 	if stopped {

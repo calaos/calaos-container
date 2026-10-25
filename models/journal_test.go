@@ -48,8 +48,7 @@ func TestJournalArgs(t *testing.T) {
 	})
 	want := []string{"-o", "json", "--no-pager", "-q",
 		"--output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER,CONTAINER_NAME,_PID,_TRANSPORT,__CURSOR,__REALTIME_TIMESTAMP",
-		"-r", "--after-cursor=-s=abc;i=1",
-		"--since=2026-10-25 07:00:00.123000 UTC", "--until=2026-10-25 09:00:00.000000 UTC",
+		"-r", "--after-cursor=-s=abc;i=1", "--until=2026-10-25 09:00:00.000000 UTC",
 		"--priority=4",
 		"_SYSTEMD_UNIT=calaos-server.service", "+", "CONTAINER_NAME=calaos-server", "+",
 		"_SYSTEMD_UNIT=ssh.service", "+", "_TRANSPORT=kernel"}
@@ -57,10 +56,41 @@ func TestJournalArgs(t *testing.T) {
 		t.Fatalf("args\n got %q\nwant %q", got, want)
 	}
 
+	// journalctl refuses --since next to a cursor.
+	got = JournalArgs(JournalQuery{Sources: src(t, "ssh"), Since: &since, Forward: true})
+	if strings.Join(got[5:], " ") != "--since=2026-10-25 07:00:00.123000 UTC _SYSTEMD_UNIT=ssh.service" {
+		t.Fatalf("since args %q", got)
+	}
+
 	got = JournalArgs(JournalQuery{Sources: src(t, "mosquitto", "system"), Forward: true, Cursor: "c"})
 	want = []string{"-o", "json", "--no-pager", "-q", want[4], "--after-cursor=c"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("system args\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestJournalWindow(t *testing.T) {
+	base := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	since, until := base, base.Add(time.Hour)
+	at := func(d time.Duration) JournalRecord { return JournalRecord{Realtime: base.Add(d)} }
+	back := JournalQuery{Since: &since, Until: &until}
+	fwd := JournalQuery{Since: &since, Until: &until, Forward: true}
+	for _, tc := range []struct {
+		q    JournalQuery
+		rec  JournalRecord
+		want Window
+	}{
+		{back, at(time.Minute), InWindow},
+		{back, at(-time.Second), PastWindow},
+		{back, at(2 * time.Hour), SkipEntry},
+		{fwd, at(-time.Second), SkipEntry},
+		{fwd, at(2 * time.Hour), PastWindow},
+		{fwd, JournalRecord{}, InWindow},
+		{JournalQuery{}, at(-time.Hour), InWindow},
+	} {
+		if got := tc.q.Window(tc.rec); got != tc.want {
+			t.Errorf("forward=%v %v: %d, want %d", tc.q.Forward, tc.rec.Realtime, got, tc.want)
+		}
 	}
 }
 

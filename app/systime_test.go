@@ -1,13 +1,16 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/calaos/calaos-container/app/admin"
+	logger "github.com/calaos/calaos-container/log"
 )
 
 // The fake keeps the zone and the NTP switch in files, as timedated would.
@@ -48,7 +51,8 @@ func useFakeTimedatectl(t *testing.T) *fakeTimedate {
 	t.Setenv("FAKE_TD_DIR", f.dir)
 	t.Setenv("FAKE_TD_FAIL", "")
 	resetTimezonesCache()
-	t.Cleanup(resetTimezonesCache)
+	resetBoxTimeCache()
+	t.Cleanup(func() { resetTimezonesCache(); resetBoxTimeCache() })
 	return f
 }
 
@@ -97,7 +101,13 @@ func TestSystemTimeGet(t *testing.T) {
 		}
 	}
 
+	// Cached for 1 s: a poll does not run timedatectl each time.
 	f.set("rtc", "")
+	c.expect("GET", "/api/v2/system/time", "", nil, 200, "")
+	if n := f.count("show"); n != 1 {
+		t.Fatalf("%d show calls", n)
+	}
+	resetBoxTimeCache()
 	if r = c.expect("GET", "/api/v2/system/time", "", nil, 200, ""); !strings.Contains(string(r.Data), `"rtc":null`) {
 		t.Fatalf("%s", r.Data)
 	}
@@ -109,6 +119,7 @@ func TestSystemTimeGet(t *testing.T) {
 	}
 
 	t.Setenv("FAKE_TD_FAIL", "show")
+	resetBoxTimeCache()
 	c.expect("GET", "/api/v2/system/time", "", nil, 500, codeInternal)
 }
 
@@ -195,31 +206,54 @@ func TestSystemTimeSetPartialFailure(t *testing.T) {
 // The webapp polls these: a line each would flood audit.log. Changes and
 // refused sessions are still recorded.
 func TestPolledReadsNotAudited(t *testing.T) {
+	var logs bytes.Buffer
+	logger.Logger.SetOutput(&logs)
+	t.Cleanup(func() { logger.Logger.SetOutput(os.Stdout) })
 	useFakeTimedatectl(t)
 	f := useFakeJournalctl(t)
 	f.write()
+	clk := useAdminClock(t)
 	c := newAdminApp(t)
 	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
 	s := c.verify(adminPw)
 	before := readAudit(t)
 
 	for _, r := range [][2]string{
-		{"GET", "/api/v2/logs/sources"}, {"POST", "/api/v2/logs/query"}, {"GET", "/api/v2/system/services"},
+		{"GET", "/api/v2/logs/sources"}, {"GET", "/api/v2/system/services"},
 		{"GET", "/api/v2/system/time"}, {"GET", "/api/v2/system/timezones"}, {"GET", "/api/v2/network/state"},
 		{"GET", "/api/v2/System/Time/"},
 	} {
 		c.do(r[0], r[1], "", session(s))
 	}
+	// Log follow: forward from a cursor.
+	c.expect("POST", "/api/v2/logs/query", `{"direction":"forward","cursor":"s=1"}`, session(s), 200, "")
 	if after := readAudit(t); after != before {
 		t.Fatalf("polled reads audited:\n%s", strings.TrimPrefix(after, before))
 	}
 
 	c.expect("POST", "/api/v2/logs/query", "", session(strings.Repeat("0", 64)), 401, codeBadSession)
+	if !strings.Contains(logs.String(), `refused admin call: `) || !strings.Contains(logs.String(), `result=bad_session session=`) {
+		t.Fatalf("refused call not in the daemon log:\n%s", logs.String())
+	}
 	c.expect("POST", "/api/v2/system/time", `{"ntp":true}`, session(s), 200, "")
 	c.expect("GET", "/api/v2/update/status", "", session(s), 200, "")
+	// A search or a page of history is recorded, never the text.
+	clk.Advance(time.Second)
+	c.expect("POST", "/api/v2/logs/query", `{"sources":["ssh","kernel"],"text":"wago","lines":50}`, session(s), 200, "")
+	c.expect("POST", "/api/v2/logs/query", `{"direction":"forward","since":"2026-10-25T00:00:00Z"}`, session(s), 200, "")
 	added := strings.TrimPrefix(readAudit(t), before)
-	if strings.Count(added, "\n") != 2 || !strings.Contains(added, `ntp=true POST "/api/v2/system/time"`) ||
-		!strings.Contains(added, `GET "/api/v2/update/status"`) {
+	sid := admin.SessionAuditID(s)
+	for _, want := range []string{
+		`ntp=true POST "/api/v2/system/time"`,
+		`GET "/api/v2/update/status"`,
+		`result=ok session=` + sid + ` sources=ssh+kernel lines=50 dir=backward text=yes POST "/api/v2/logs/query"`,
+		`result=ok session=` + sid + ` sources=system lines=200 dir=forward text=no POST "/api/v2/logs/query"`,
+	} {
+		if !strings.Contains(added, want) {
+			t.Fatalf("audit lacks %q:\n%s", want, added)
+		}
+	}
+	if strings.Count(added, "\n") != 4 || strings.Contains(added, "wago") {
 		t.Fatalf("audit:\n%s", added)
 	}
 }

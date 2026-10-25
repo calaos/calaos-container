@@ -92,7 +92,8 @@ func journalTime(t time.Time) string {
 // JournalArgs is the journalctl argv. Every client value is one argv of the
 // --name=value form, so a cursor starting with "-" cannot become an option.
 // journalctl has no --before-cursor: backward paging is -r with
-// --after-cursor, which then means "older than the cursor".
+// --after-cursor, which then means "older than the cursor". journalctl
+// refuses --since with a cursor: the reader applies it then (Window).
 func JournalArgs(q JournalQuery) []string {
 	args := []string{"-o", "json", "--no-pager", "-q", "--output-fields=" + journalFields}
 	if !q.Forward {
@@ -100,8 +101,7 @@ func JournalArgs(q JournalQuery) []string {
 	}
 	if q.Cursor != "" {
 		args = append(args, "--after-cursor="+q.Cursor)
-	}
-	if q.Since != nil {
+	} else if q.Since != nil {
 		args = append(args, "--since="+journalTime(*q.Since))
 	}
 	if q.Until != nil {
@@ -137,6 +137,32 @@ func journalMatches(sources []LogSource) []string {
 		}
 	}
 	return m
+}
+
+// Window says where an entry stands against since and until. Entries are
+// read away from the start point, so one past the far bound ends the scan
+// and one past the near bound is skipped.
+type Window int
+
+const (
+	InWindow Window = iota
+	SkipEntry
+	PastWindow
+)
+
+func (q JournalQuery) Window(r JournalRecord) Window {
+	if r.Realtime.IsZero() {
+		return InWindow
+	}
+	older := q.Since != nil && r.Realtime.Before(*q.Since)
+	newer := q.Until != nil && r.Realtime.After(*q.Until)
+	switch {
+	case q.Forward && newer, !q.Forward && older:
+		return PastWindow
+	case older, newer:
+		return SkipEntry
+	}
+	return InWindow
 }
 
 // JournalRecord is one parsed `journalctl -o json` line.

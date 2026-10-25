@@ -23,6 +23,7 @@ const (
 	localIssuedSession = "calaos.issued_session"
 	localAuditFields   = "calaos.audit_fields"
 	localSessionLive   = "calaos.session_live"
+	localAuditSkip     = "calaos.audit_skip"
 )
 
 // Overridden by tests so they never touch the box directories.
@@ -248,10 +249,10 @@ func isAdminStatusPath(p string) bool {
 }
 
 // The webapp polls these reads every few seconds: a line per poll would
-// rotate the real entries out of audit.log.
+// rotate the real entries out of audit.log. Log follow polls are skipped by
+// their handler (localAuditSkip).
 var unauditedReads = map[string]bool{
 	"GET " + apiV2Prefix + "/logs/sources":     true,
-	"POST " + apiV2Prefix + "/logs/query":      true,
 	"GET " + apiV2Prefix + "/system/services":  true,
 	"GET " + apiV2Prefix + "/system/time":      true,
 	"GET " + apiV2Prefix + "/system/timezones": true,
@@ -300,7 +301,7 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	switch {
 	case refused:
 		a.admin.AuditRefused(e)
-	case isUnauditedRead(e.Method, path):
+	case isUnauditedRead(e.Method, path), c.Locals(localAuditSkip) != nil:
 	default:
 		a.admin.Audit(e)
 	}

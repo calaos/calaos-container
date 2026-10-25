@@ -616,6 +616,7 @@ The other routes add these fields before the method, and never a value that coul
 | Route | Fields |
 |---|---|
 | `POST system/services/restart` | `unit=<id>` |
+| `POST logs/query` | `sources=<ids joined by +>`, `lines=`, `dir=`, `text=yes` or `text=no`; never the text. Not written for a follow poll (`forward` with a `cursor`) |
 | `POST system/time` | `tz=`, `ntp=`, `time=set`; never the time |
 | `POST network/apply`, `POST network/trial` | `intf=`, `change_id=`; `code_id=` on `apply` |
 | `POST network/confirm` | `change_id=` |
@@ -636,8 +637,9 @@ session on `update_status`, and in `audit.log` they would rotate the real entrie
 
 `GET admin/status` without a session is not audited (calaos_server polls it). Nor are the
 read-only routes the webapp polls, with or without a session: `GET logs/sources`,
-`POST logs/query`, `GET system/services`, `GET system/time`, `GET system/timezones` and
-`GET network/state` (a line every 2 s of log follow would rotate the real entries away). A refused
+`GET system/services`, `GET system/time`, `GET system/timezones`, `GET network/state`, and the
+follow polls of `POST logs/query` (`forward` with a `cursor`, every 2 s): a line each would rotate
+the real entries away. Any other `logs/query` (a search, a page of history) is audited. A refused
 `bad_bearer` or `bad_session` call to them still goes to the daemon log as above, and every route
 that changes something stays audited. `audit.log` is rotated at 1 MiB, one old file kept.
 
@@ -757,14 +759,17 @@ Every field is optional.
 |---|---|
 | `sources` | 1 to 8 ids of the list above; default `["system"]`; unknown id: `invalid_request` |
 | `priority` | the maximum level shown: a name (`emerg`, `alert`, `crit`, `err`, `warning`, `notice`, `info`, `debug`) or a JSON number `0` to `7`; a numeric string such as `"3"` is refused |
-| `since`, `until` | RFC 3339 times; `since` at or after `until` is `invalid_request`. The daemon parses them and passes its own formatting to `journalctl` |
+| `since`, `until` | RFC 3339 times, years 1970 to 2100; `since` at or after `until` is `invalid_request`. The daemon parses them and passes its own formatting to `journalctl`; with a `cursor`, `journalctl` refuses `--since`, so the daemon applies `since` itself (and `until` too): going away from the start point, the first entry past the far bound ends the page (`complete: true`), and the entries past the near bound are skipped |
 | `text` | at most 256 characters, matched as a case-insensitive substring by the daemon: never a regular expression, never on a command line |
 | `lines` | 1 to 1000; default 200 |
 | `cursor` | a journal cursor from an earlier answer, at most 512 printable ASCII characters, passed to `journalctl` as the single argument `--after-cursor=<value>` (with `-r` for `backward`, where it means "older than the cursor": `journalctl` has no `--before-cursor`) |
 | `direction` | `backward` (default): the newest `lines` entries before `until` or `cursor`; `forward`: the oldest `lines` entries after `cursor` |
 
-- A `backward` query without `since` covers the last 7 days. A `forward` query without `cursor` and
-  without `since` is `invalid_request`.
+- A `backward` query without `since` covers the last 7 days, with or without a `cursor`. A `forward`
+  query without `cursor` and without `since` is `invalid_request`.
+- A cursor only continues the query it came from: after a change of `sources` or `priority`, start
+  again without a cursor (`journalctl` skips one entry when the cursor entry does not match the new
+  filter). `text`, `since` and `until` may change.
 - An unknown source, a bad `priority`, `cursor`, `lines` or time, a `text` that is too long: all
   `400 invalid_request`.
 
@@ -798,7 +803,8 @@ Answer:
 
 - 2 queries per second per session, one more bucket of 2 per second shared by every call without a
   session (the CLI), and 4 `journalctl` processes at a time for the whole daemon: beyond,
-  `429 rate_limited` with `retry_after: 1`.
+  `429 rate_limited` with `retry_after: 1`. A refusal for the process cap costs no query of the
+  bucket.
 - A query that outlives 5 s is stopped, with its whole process group, and answers as above
   (`complete: false`).
 - A `journalctl` failure is `500 internal`; its stderr goes to the daemon log only.
@@ -806,18 +812,26 @@ Answer:
 **Redaction**
 
 The daemon masks `message` before anything leaves. It is best effort: it catches the credentials a
-driver prints in a URL or a `key=value` pair, not every secret. In this order, case-insensitive:
+driver prints in a URL, a header or a `key=value` pair, not every secret (an SMTP `AUTH` payload, a
+key in a URL path or a value with a blank are missed). In this order, case-insensitive unless said:
 
-1. userinfo in a URL, `://user:pass@` becomes `://***@`;
+1. userinfo in a URL, `://user:pass@` becomes `://***@`; the password runs to the last `@` of the
+   word, so a `/` or an `@` in it is masked too;
 2. a query parameter whose name contains `pass`, `pwd`, `token`, `key`, `secret`, `session`, `auth`
    or `user`: the value becomes `***`;
 3. a key followed by `=` or `:` (a JSON `"key": "value"` included), the value becoming `***`, for
    `cn_pass`, `cn_user`, `calaos_password`, `calaos_user`, `password`, `passwd`, `pass`, `pwd`,
    `secret`, `token`, `api_key`, `apikey`, `auth_token`, `mcp_token`, `mcp_service_token`,
    `smtp_password`, `influxdb_token`, `admin_pass`, `new_pass`, `admin_session`,
-   `x-calaos-admin-session`, `session`, `psk`, `private_key`, `push_key` and `code`;
-4. `Authorization: Bearer <value>` becomes `authorization: bearer ***`;
-5. `Calaos admin code NNNNNN` becomes `Calaos admin code ******`.
+   `x-calaos-admin-session`, `session`, `psk`, `private_key`, `push_key`, each also with a prefix
+   ending in `_` or `-` (`mqtt_password`, `device_token`, `wifi-psk`), plus `key` with such a prefix
+   only (`network_key`) and `code` alone;
+4. the same for camelCase keys (case-sensitive): a lowercase word ending in `Password`, `Passwd`,
+   `Pass`, `Pwd`, `Secret`, `Token`, `Key`, `Session` or `Psk` (`adminPassword`, `"apiToken":`);
+5. `Authorization:` or `Proxy-Authorization:` with `Bearer`, `Basic` or `Digest`: the rest of the
+   line becomes `***`;
+6. `Cookie:` and `Set-Cookie:`: the rest of the line becomes `***`;
+7. `Calaos admin code NNNNNN` becomes `Calaos admin code ******`.
 
 The query `text` is matched against the redacted message and is never logged.
 
@@ -832,7 +846,8 @@ The query `text` is matched against the redacted message and is never logged.
 `ntp` tells whether the NTP client (`systemd-timesyncd`) is enabled, `synchronized` whether the
 clock is synchronized, `rtc` is the hardware clock or `null`.
 
-`GET /api/v2/system/time` answers a `<BoxTime>`. `GET /api/v2/system/timezones` answers
+`GET /api/v2/system/time` answers a `<BoxTime>` (`timedatectl show` cached for 1 s; `now` is read
+at each call). `GET /api/v2/system/timezones` answers
 `{"timezones": [...]}`, the output of `timedatectl list-timezones` (cached).
 
 `POST /api/v2/system/time`, body `{"timezone": "Europe/Paris", "ntp": false, "time": "2026-10-25T09:12:03Z"}`,
