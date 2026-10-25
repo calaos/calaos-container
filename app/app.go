@@ -54,6 +54,7 @@ type AppServer struct {
 	sessions sessionValidator
 
 	admin *admin.Manager
+	net   *netChanges
 
 	now         func() time.Time
 	consoles    *console.Manager
@@ -238,8 +239,7 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Post("/system/install/start", bearerOnly, a.v2InstallStart)
 	v2.Get("/system/install/status", bearerOnly, a.v2InstallStatus)
 
-	v2.Get("/network/list", bearerOnly, a.v2NetList)
-	v2.Post("/network/:intf", bearerOnly, a.v2NetConfigure)
+	a.registerNetwork(v2)
 
 	a.registerAdmin(v2)
 
@@ -278,6 +278,8 @@ func (a *AppServer) Start() <-chan error {
 	logging.Infoln("\u21D2 Server listening on", addr)
 
 	a.wgDone.Add(1)
+
+	a.resumeNetChange()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.stopConsole = cancel

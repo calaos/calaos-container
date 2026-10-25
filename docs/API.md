@@ -628,6 +628,8 @@ audit id kept in the pending record:
 `<time> client=<client> result=ok session=<audit id> action=network_rollback intf=<intf> change_id=<id> reason=<reason> - "-"`,
 `reason` being `timeout` or `restart`. An explicit `POST network/revert` is its own audit line,
 with `reason=revert`.
+`POST network/trial`, `network/confirm` and `network/revert` are audited with the bearer alone
+too (the CLI), as `client=local session=-` unless `X-Calaos-Client-IP` is set.
 
 A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
 second: anything on the host can send the first, calaos_server relays a household client's guessed

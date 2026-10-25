@@ -347,6 +347,8 @@ func legacyCases(t *testing.T) []httpCase {
 		{name: "network_list_ok", method: "GET", path: "/api/network/list", backend: stubBackend{nets: nets}},
 		{name: "network_list_err", method: "GET", path: "/api/network/list", backend: stubBackend{netsErr: boom}},
 		{name: "network_configure_bad_name", method: "POST", path: "/api/network/eth0;rm", ctype: "application/json", body: staticConf},
+		// The one accepted change: the route words of /api/v2/network/ are refused by the shared validator.
+		{name: "network_configure_route_word", method: "POST", path: "/api/network/apply", ctype: "application/json", body: staticConf},
 		{name: "network_configure_bad_body", method: "POST", path: "/api/network/eth0", ctype: "application/json", body: `{"ipv4":`},
 		{name: "network_configure_invalid", method: "POST", path: "/api/network/eth0", ctype: "application/json", body: `{"ipv4":"999.1.1.1/24","dhcp":false}`},
 		{name: "network_configure_exists_err", method: "POST", path: "/api/network/eth0", ctype: "application/json", body: staticConf,
