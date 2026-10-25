@@ -177,7 +177,7 @@ func TestLogSources(t *testing.T) {
 	var d struct{ Sources []logSourceInfo }
 	_ = json.Unmarshal(r.Data, &d)
 	if len(d.Sources) != len(models.LogSources) || d.Sources[0] != (logSourceInfo{"calaos-server", "Calaos server"}) ||
-		d.Sources[16] != (logSourceInfo{"system", "Whole system"}) || d.Sources[11] != (logSourceInfo{"timesyncd", "Time sync (timesyncd)"}) {
+		d.Sources[16] != (logSourceInfo{"system", "Whole system"}) || d.Sources[11] != (logSourceInfo{"ntp", "Time sync (NTP)"}) {
 		t.Fatalf("sources %s", r.Data)
 	}
 }
@@ -207,6 +207,48 @@ func TestLogsQueryDefaults(t *testing.T) {
 	argv = f.argv()
 	if len(argv) != 9 || argv[6] != "--since=2026-01-03 00:00:00.000000 UTC" || argv[7] != "--until=2026-01-10 00:00:00.000000 UTC" ||
 		argv[8] != "_SYSTEMD_UNIT=ssh.service" {
+		t.Fatalf("argv %q", argv)
+	}
+}
+
+// The ntp source follows the installed client; the resolution is cached.
+func TestLogsQueryNTPUnit(t *testing.T) {
+	clk := useLogClock(t)
+	j := useFakeJournalctl(t)
+	j.write()
+	f := useFakeSystemctl(t)
+	(&stubBackend{}).install(t)
+	a := newHandlerTestApp(t)
+
+	for _, tc := range []struct{ show, unit string }{
+		{"not-found\nloaded\n", "systemd-timesyncd.service"},
+		{"loaded\nnot-found\n", "chrony.service"},
+	} {
+		resetServicesCache()
+		if err := os.WriteFile(f.show, []byte(tc.show), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			clk.Advance(time.Second)
+			if status, _, _ := logsQuery(t, a, `{"sources":["ntp","ssh"]}`, nil); status != 200 {
+				t.Fatalf("%d", status)
+			}
+			argv := j.argv()
+			if m := strings.Join(argv[len(argv)-3:], " "); m != "_SYSTEMD_UNIT="+tc.unit+" + _SYSTEMD_UNIT=ssh.service" {
+				t.Fatalf("matches %q", m)
+			}
+		}
+	}
+	if c := f.calls(t); len(c) != 2 {
+		t.Fatalf("calls %q", c)
+	}
+
+	// systemctl failing leaves the first candidate.
+	resetServicesCache()
+	t.Setenv("FAKE_SYSTEMCTL_RC", "1")
+	clk.Advance(time.Second)
+	logsQuery(t, a, `{"sources":["ntp"]}`, nil)
+	if argv := j.argv(); argv[len(argv)-1] != "_SYSTEMD_UNIT=chrony.service" {
 		t.Fatalf("argv %q", argv)
 	}
 }

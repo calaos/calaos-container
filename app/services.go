@@ -14,6 +14,9 @@ import (
 const (
 	servicesCacheTTL = time.Second
 	serviceCmdLimit  = 10 * time.Second
+	// Log follow polls come every 2 s; a unit is only swapped by a package
+	// install.
+	unitCacheTTL = time.Minute
 )
 
 var (
@@ -30,10 +33,49 @@ var servicesCache struct {
 	states []models.ServiceState
 }
 
+var unitCache struct {
+	mu    sync.Mutex
+	units map[string]unitCacheEntry
+}
+
+type unitCacheEntry struct {
+	unit string
+	at   time.Time
+}
+
 func resetServicesCache() {
 	servicesCache.mu.Lock()
 	servicesCache.states = nil
 	servicesCache.mu.Unlock()
+	unitCache.mu.Lock()
+	unitCache.units = nil
+	unitCache.mu.Unlock()
+}
+
+// resolveUnit returns the installed candidate of a table unit. A failed
+// read is not cached and falls back to the unit itself.
+func resolveUnit(unit string, run func(context.Context, string, ...string) (string, error)) string {
+	if !models.HasUnitFallbacks(unit) {
+		return unit
+	}
+	unitCache.mu.Lock()
+	defer unitCache.mu.Unlock()
+	if e, ok := unitCache.units[unit]; ok && time.Since(e.at) < unitCacheTTL {
+		return e.unit
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCmdLimit)
+	defer cancel()
+	out, err := run(ctx, "systemctl", models.ResolveUnitArgs(unit)...)
+	if err != nil {
+		logging.Warnf("systemctl show %s: %v", unit, err)
+		return unit
+	}
+	if unitCache.units == nil {
+		unitCache.units = map[string]unitCacheEntry{}
+	}
+	resolved := models.ParseResolvedUnit(unit, out)
+	unitCache.units[unit] = unitCacheEntry{resolved, time.Now()}
+	return resolved
 }
 
 func serviceStates() ([]models.ServiceState, error) {
@@ -96,6 +138,7 @@ func restartService(svc models.Service, release func(), delay time.Duration,
 	defer release()
 	time.Sleep(delay)
 
+	svc.Unit = resolveUnit(svc.Unit, run)
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCmdLimit)
 	defer cancel()
 	args := svc.RestartArgs()

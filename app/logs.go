@@ -322,6 +322,9 @@ func (a *AppServer) v2LogsQuery(c *fiber.Ctx) error {
 	if !a.logs.allow(key, now) {
 		return errLogsRateLimited()
 	}
+	for i := range req.q.Sources {
+		req.q.Sources[i].Unit = resolveUnit(req.q.Sources[i].Unit, runServiceCommand)
+	}
 
 	res, err := readJournal(req)
 	if err != nil {
