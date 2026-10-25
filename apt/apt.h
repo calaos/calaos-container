@@ -65,6 +65,9 @@ void aptCacheArrayFree(void *arr);
 typedef void (*AptProgressCb)(const char *stage, const char *pkg,
                               int pkg_percent, int total_percent, const char *msg);
 
+/* Reset the monotonic total_percent guard. Exposed for tests. */
+void aptResetProgress(void);
+
 /* Register the progress callback (global pointer). NULL = no-op.
  * Registration is done by function pointer so that libcalaos-apt.so has no
  * unresolved (Go) symbol and remains linkable on its own. */
