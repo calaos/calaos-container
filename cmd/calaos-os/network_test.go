@@ -29,7 +29,7 @@ func TestNetErrExit(t *testing.T) {
 		{"other", errors.New("boom"), "", ExitServer, "boom"},
 	}
 	for _, c := range cases {
-		err, code := netErrExit(c.err, c.verb)
+		code, err := netErrExit(c.err, c.verb)
 		if code != c.wantCode || !strings.Contains(err.Error(), c.wantIn) {
 			t.Errorf("%s: %d %q", c.name, code, err)
 		}

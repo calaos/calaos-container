@@ -151,26 +151,26 @@ func joinOrDash(s []string) string {
 }
 
 func exitNetErr(err error)                 { exitNetErrFor(err, "") }
-func exitNetErrFor(err error, verb string) { msg, code := netErrExit(err, verb); exit(msg, code) }
+func exitNetErrFor(err error, verb string) { code, msg := netErrExit(err, verb); exit(msg, code) }
 
 // netErrExit maps a daemon error to a message and an exit code. verb is
 // "confirm" or "revert" for the calls that name an existing change, where
 // invalid_request means the change is gone rather than a bad flag.
-func netErrExit(err error, verb string) (error, int) {
+func netErrExit(err error, verb string) (int, error) {
 	var ae *api.APIError
 	switch {
 	case errors.Is(err, api.ErrNoAdmin):
-		return err, ExitServer
+		return ExitServer, err
 	case errors.As(err, &ae) && ae.Code == "network_pending":
 		p, _ := api.NetworkPendingInfo(err)
-		return fmt.Errorf("another network change (%s) is waiting for its confirmation, %d s left: run `calaos-os network confirm %s` or `calaos-os network revert %s` first",
-			p.ChangeID, p.ExpiresIn, p.ChangeID, p.ChangeID), ExitServer
+		return ExitServer, fmt.Errorf("another network change (%s) is waiting for its confirmation, %d s left: run `calaos-os network confirm %s` or `calaos-os network revert %s` first",
+			p.ChangeID, p.ExpiresIn, p.ChangeID, p.ChangeID)
 	case errors.As(err, &ae) && ae.Code == "upgrade_in_progress":
-		return errors.New("an upgrade is running, retry when it is done"), ExitServer
+		return ExitServer, errors.New("an upgrade is running, retry when it is done")
 	case errors.As(err, &ae) && ae.Code == "invalid_request" && verb != "":
-		return fmt.Errorf("%w (%s)", errNoPendingChange, ae.Msg), ExitExpired
+		return ExitExpired, fmt.Errorf("%w (%s)", errNoPendingChange, ae.Msg)
 	case errors.As(err, &ae) && ae.Code == "invalid_request":
-		return err, ExitUsage
+		return ExitUsage, err
 	}
-	return err, classifyAPIErr(err)
+	return classifyAPIErr(err), err
 }
