@@ -147,10 +147,10 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
 | POST | `/api/v2/system/services/restart` | bearer, session allowed | 200 | `{"id", "state": "restarting"}`; body `{"unit": "<id>"}` |
 | GET | `/api/v2/system/time` | bearer, session allowed | 200 | `<BoxTime>` (see Box time) |
-| POST | `/api/v2/system/time` | bearer, session allowed | 200 | `<BoxTime>`; body `{"timezone", "ntp", "time"}`, each optional |
+| POST | `/api/v2/system/time` | bearer, session allowed | 200 | `<BoxTime>` plus `restart_required`; body `{"timezone", "ntp", "time"}`, each optional, at least one |
 | GET | `/api/v2/system/timezones` | bearer, session allowed | 200 | `{"timezones": ["Africa/Abidjan", ...]}` |
 | GET | `/api/v2/logs/sources` | bearer, session allowed | 200 | `{"sources": [{"id", "label"}]}` (see Logs) |
-| POST | `/api/v2/logs/query` | bearer, session allowed | 200 | `{"entries", "truncated", "complete"}`; body in Logs |
+| POST | `/api/v2/logs/query` | bearer, session allowed | 200 | `{"entries", "truncated", "complete", "next_cursor"}`; body in Logs |
 | POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, then reboots); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/install/list_devices` | bearer only | 200 | `lsblk --json --output-all` output |
 | POST | `/api/v2/system/install/start` | bearer only | 200 | `text/plain` log stream; body `{"device": "/dev/...", "confirm": true}` |
@@ -412,13 +412,14 @@ offers `approver_candidates`, its `push_tokens` entries as `{token_id, device_na
    | `network_config` | `change the network configuration` |
 
    One fetch per code: a second one, an unknown or an expired code answers `404 not_found`.
-3. calaos_server pushes one of two forms to that one token, never forwards `push_code` to a client,
-   and builds the text itself from `action`, never from `message`:
-   - a token registered with a push key: the notice
-     `Calaos admin code to <purpose>. Open the Calaos app to read it.`, `<purpose>` taken from the
-     table above, plus the code encrypted with that key as push `data` (format and test vectors in
-     `08_http_api.md`). The code is not in the text;
-   - a token without a push key: `message` as received, which carries the code in clear.
+3. calaos_server pushes one of two forms to that one token and never forwards `push_code` to a
+   client:
+   - a token registered with a push key gets the notice
+     `Calaos admin code to <purpose>. Open the Calaos app to read it.`, built by calaos_server from
+     `action` only (`<purpose>` taken from the table above, never from `message`), plus the code
+     encrypted with that key as push `data` (format and test vectors in `08_http_api.md`). The code
+     is not in the text;
+   - a token without a push key gets `message` as received, which carries the code in clear.
 
    In both forms calaos_server refuses a `message` that does not have the code message shape, so a
    process squatting on the daemon's port cannot word a push.
@@ -674,7 +675,8 @@ the admin session, and `systemd-networkd` is reloaded by the network routes unde
   `not-found`). `sub_state` is systemd's `SubState`, `""` for `not-found`.
 - `enabled` is systemd's `UnitFileState` string (`enabled`, `disabled`, `static`, `indirect`, ...),
   `""` when empty or `not-found`.
-- `since` is when the unit entered its current active state, RFC 3339 UTC, or `null`.
+- `since` is when the unit last entered the `active` state (`ActiveEnterTimestamp`), RFC 3339 UTC,
+  or `null` when it never did.
 - The state is read in one `systemctl show` call for all units, and cached for 1 s.
 
 ### `POST /api/v2/system/services/restart`
@@ -750,7 +752,7 @@ Every field is optional.
 | `since`, `until` | RFC 3339 times; `since` at or after `until` is `invalid_request`. The daemon parses them and passes its own formatting to `journalctl` |
 | `text` | at most 256 characters, matched as a case-insensitive substring by the daemon: never a regular expression, never on a command line |
 | `lines` | 1 to 1000; default 200 |
-| `cursor` | a journal cursor from an earlier answer, at most 512 printable ASCII characters, passed as a single argument |
+| `cursor` | a journal cursor from an earlier answer, at most 512 printable ASCII characters, passed to `journalctl` as the single argument `--after-cursor=<value>` or `--before-cursor=<value>` |
 | `direction` | `backward` (default): the newest `lines` entries before `until` or `cursor`; `forward`: the oldest `lines` entries after `cursor` |
 
 - A `backward` query without `since` covers the last 7 days. A `forward` query without `cursor` and
@@ -870,8 +872,10 @@ it from the new address: otherwise it reverts by itself, and a reboot reverts it
   the `X-Calaos-Client-IP` of the apply (`local` for the CLI).
 - The window is 120 s from `applied_at` (`confirm_within`). A daemon that restarts re-arms the timer
   with the remaining time and publishes `network_pending` once more, with the original `applied_at`
-  and `confirm_within` set to the seconds left; one that finds the deadline passed reverts at once.
-- At the end of the window the daemon reverts, deletes the record and raises the persisted alert
+  and `confirm_within` set to the seconds left; one that finds the deadline passed rolls back at
+  once.
+- At the end of the window, and when a restarted daemon finds the deadline already passed, the
+  daemon reverts, deletes the record and raises the persisted alert
   `network_rolled_back {id, ts, intf}` (see Alerts).
 - While a change is pending, `POST /api/v2/network/{intf}` and `POST network/trial` answer
   `409 network_pending`. The legacy `POST /api/network/{intf}` is not refused: it writes
@@ -880,9 +884,9 @@ it from the new address: otherwise it reverts by itself, and a reboot reverts it
 **Interface names**
 
 `apply`, `confirm`, `revert`, `state`, `list` and `trial` are not valid interface names (nor `.`,
-`..`): `POST network/{intf}` answers `400 invalid_request` for them, and the five static `POST`
-routes below are registered before it, so that `POST network/apply` with a session reaches
-`apply`.
+`..`): `POST network/{intf}` answers `400 invalid_request` for them, and the five static routes
+below (`GET state`; `POST apply`, `confirm`, `revert` and `trial`) are registered before it, so that
+`POST network/apply` with a session reaches `apply`.
 
 ### `GET /api/v2/network/state`
 
@@ -910,7 +914,7 @@ Checks run in this order:
    the loopback; IPv4 only, with no leading zero in any octet: `ipv4` is a CIDR with an explicit
    prefix (`a.b.c.d/n`; a bare address is refused here, unlike `network/{intf}`), `gateway` and
    each `dns_servers` entry an IPv4 address; at most 4 `dns_servers` and at most 4
-   `search_domains`; `gateway` is optional (no `Gateway=` line is written when it is empty); with
+   `search_domains`; `ipv4` is required when `dhcp` is false; `gateway` is optional (no `Gateway=` line is written when it is empty); with
    `dhcp: true`, `ipv4`, `gateway`, `dns_servers` and `search_domains` must be absent or empty;
 2. the session (`bad_session`);
 3. no other pending change: `409 network_pending` with `{change_id, expires_in}`. The code stays
@@ -929,7 +933,7 @@ The code is bound to the **verbatim validated strings** of the body, six keys, a
 | `dns_servers` | the list joined by `,` |
 | `search_domains` | the list joined by `,` |
 
-`ipv4` is required when `dhcp` is false. Applying: the trial is written and recorded, `networkctl reload` and `reconfigure <intf>` run, the
+Applying: the trial is written and recorded, `networkctl reload` and `reconfigure <intf>` run, the
 timer starts from `applied_at`, and `network_pending {change_id, intf, applied_at, confirm_within}`
 is published. If `reload` or `reconfigure` fails the daemon reverts at once and answers
 `500 internal`. The box may switch address before the answer reaches the client.
@@ -1147,8 +1151,8 @@ the fields above and drops anything else the client sent.
 calaos_server forwards to household clients, as `admin_event {type, ts, data}`, only:
 
 - `upgrade_progress`, `data` = `<Status>`;
-- `network_pending`, with `ts`, `intf`, `change_id` and `applied_at`; `network_applied`, with `ts`,
-  `intf` and `change_id`;
+- `network_pending`, with `ts`, `intf`, `change_id`, `applied_at` and `confirm_within`;
+  `network_applied`, with `ts`, `intf` and `change_id`;
 - `network_rolled_back`, with `ts` and `intf`, acknowledged like the other alerts and stored as the
   `EventPushNotification` shown at login for the banner; no phone push;
 - `admin_set`, `admin_reset`, `approver_set`, `approver_removed` and `console_opened`, with `ts`
@@ -1221,11 +1225,10 @@ Go error text.
 | GET | `/api/update/status` | 200 raw `<Status>` | none |
 | GET (WS) | `/api/events` | 101, frames as in Events | 426 `Upgrade Required` (text) on a plain `GET` |
 
-The configuration written by `POST /api/network/{intf}` (and by `POST /api/v2/network/{intf}`)
-changed, with unchanged bodies and statuses: it is now an atomic write of
-`/etc/systemd/network/calaos_<intf>.network` for that interface, where it used to rewrite the file
-named by `networkctl status` as `NetworkFile`, which on a stock box is the `en*` file shared by every
-interface. These two routes stay bearer only, apply at once and have no confirmation or rollback.
+`POST /api/network/{intf}` and `POST /api/v2/network/{intf}` write
+`/etc/systemd/network/calaos_<intf>.network` for that interface, atomically, and never the file
+shared by every interface (`en*`). Their bodies and statuses are unchanged. They stay bearer only,
+apply at once and have no confirmation or rollback.
 The words `apply`, `confirm`, `revert`, `state`, `list` and `trial` are refused as interface names
 by the validator the legacy route shares: it still answers `400`, with the raw error text of the
 validator as `msg` for those six words.
