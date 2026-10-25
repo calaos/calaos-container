@@ -48,9 +48,9 @@ const redactValue = `["']?\s*[=:]\s*("[^"]*"|'[^']*'|\S+)`
 // daemon (docs/API.md, Logs). Best effort: they catch credentials printed in
 // a URL, a header or a key/value pair, not every secret.
 var redactions = []redaction{
-	// The password runs to the last "@" of the token, so a "/" or an "@"
-	// in it is masked too.
-	{needUserinfo, regexp.MustCompile(`(?i)://[^/\s]+:\S+@`), `://***@`},
+	// Split as calaos_server's urlForLog does: a raw "/" cannot be in the
+	// userinfo, so a host:port URL followed by an "@" elsewhere is left alone.
+	{needUserinfo, regexp.MustCompile(`(?i)://[^/\s]*:[^/\s]*@`), `://***@`},
 	{needQuery, regexp.MustCompile(`(?i)([?&])(\w*(?:pass|pwd|token|key|secret|session|auth|user)\w*)=[^&\s"']*`), `${1}${2}=***`},
 	// A listed key may carry a prefix (mqtt_password, wifi-psk); a bare
 	// "key" or "code" only as listed, being common words.

@@ -815,8 +815,8 @@ The daemon masks `message` before anything leaves. It is best effort: it catches
 driver prints in a URL, a header or a `key=value` pair, not every secret (an SMTP `AUTH` payload, a
 key in a URL path or a value with a blank are missed). In this order, case-insensitive unless said:
 
-1. userinfo in a URL, `://user:pass@` becomes `://***@`; the password runs to the last `@` of the
-   word, so a `/` or an `@` in it is masked too;
+1. userinfo in a URL, `://user:pass@` becomes `://***@`; neither part may hold a raw `/` (as in
+   calaos_server's own masking), an `@` in them is masked too;
 2. a query parameter whose name contains `pass`, `pwd`, `token`, `key`, `secret`, `session`, `auth`
    or `user`: the value becomes `***`;
 3. a key followed by `=` or `:` (a JSON `"key": "value"` included), the value becoming `***`, for
