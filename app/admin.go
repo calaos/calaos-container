@@ -247,6 +247,24 @@ func isAdminStatusPath(p string) bool {
 	return strings.TrimRight(strings.ToLower(p), "/") == apiV2Prefix+"/admin/status"
 }
 
+// The webapp polls these reads every few seconds: a line per poll would
+// rotate the real entries out of audit.log.
+var unauditedReads = map[string]bool{
+	"GET " + apiV2Prefix + "/logs/sources":     true,
+	"POST " + apiV2Prefix + "/logs/query":      true,
+	"GET " + apiV2Prefix + "/system/services":  true,
+	"GET " + apiV2Prefix + "/system/time":      true,
+	"GET " + apiV2Prefix + "/system/timezones": true,
+	"GET " + apiV2Prefix + "/network/state":    true,
+}
+
+func isUnauditedRead(method, p string) bool {
+	if method == fiber.MethodHead {
+		method = fiber.MethodGet
+	}
+	return unauditedReads[method+" "+strings.TrimRight(strings.ToLower(p), "/")]
+}
+
 // auditMiddleware runs before the bearer check, so refused calls reach the
 // daemon log too. calaos_server polls admin/status without a session: not
 // audited.
@@ -278,9 +296,12 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	// the real entries away. A session live at entry (one that ended while
 	// its console started) keeps its line. Not e.Fields: admin/set sets them
 	// before it checks the session.
-	if (e.Result == codeBadBearer || e.Result == codeBadSession) && c.Locals(localSessionLive) == nil {
+	refused := (e.Result == codeBadBearer || e.Result == codeBadSession) && c.Locals(localSessionLive) == nil
+	switch {
+	case refused:
 		a.admin.AuditRefused(e)
-	} else {
+	case isUnauditedRead(e.Method, path):
+	default:
 		a.admin.Audit(e)
 	}
 	return err

@@ -616,7 +616,6 @@ The other routes add these fields before the method, and never a value that coul
 | Route | Fields |
 |---|---|
 | `POST system/services/restart` | `unit=<id>` |
-| `POST logs/query` | `sources=<ids joined by +>`, `lines=`, `dir=`, `text=yes` or `text=no`; never the text |
 | `POST system/time` | `tz=`, `ntp=`, `time=set`; never the time |
 | `POST network/apply`, `POST network/trial` | `intf=`, `change_id=`; `code_id=` on `apply` |
 | `POST network/confirm` | `change_id=` |
@@ -635,8 +634,12 @@ A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, a
 second: anything on the host can send the first, calaos_server relays a household client's guessed
 session on `update_status`, and in `audit.log` they would rotate the real entries away.
 
-`GET admin/status` without a session is not audited (calaos_server polls it). `audit.log` is
-rotated at 1 MiB, one old file kept.
+`GET admin/status` without a session is not audited (calaos_server polls it). Nor are the
+read-only routes the webapp polls, with or without a session: `GET logs/sources`,
+`POST logs/query`, `GET system/services`, `GET system/time`, `GET system/timezones` and
+`GET network/state` (a line every 2 s of log follow would rotate the real entries away). A refused
+`bad_bearer` or `bad_session` call to them still goes to the daemon log as above, and every route
+that changes something stays audited. `audit.log` is rotated at 1 MiB, one old file kept.
 
 ## Services
 
@@ -732,8 +735,11 @@ Entries are matched as follows.
 |---|---|
 | `calaos-server`, `calaos-home`, `haproxy`, `mosquitto`, `zigbee2mqtt`, `influxdb`, `grafana`, `hue2mqtt`, `envoy` | the unit of the same name, and the container of the same name |
 | `calaos-container`, `olad`, `timesyncd`, `calaos-ddns`, `networkd`, `ssh` | the unit of the Services table |
-| `kernel` | kernel messages |
+| `kernel` | kernel messages (`_TRANSPORT=kernel`, every boot) |
 | `system` | no unit filter |
+
+The daemon passes the matches as `_SYSTEMD_UNIT=<unit>`, plus `CONTAINER_NAME=<id>` for the
+container sources, joined by `+` (OR) across every requested source; `system` drops them all.
 
 The haproxy process logs to a UDP port with no listener on the box: only the lines of its container
 runtime appear under `haproxy`.
@@ -754,7 +760,7 @@ Every field is optional.
 | `since`, `until` | RFC 3339 times; `since` at or after `until` is `invalid_request`. The daemon parses them and passes its own formatting to `journalctl` |
 | `text` | at most 256 characters, matched as a case-insensitive substring by the daemon: never a regular expression, never on a command line |
 | `lines` | 1 to 1000; default 200 |
-| `cursor` | a journal cursor from an earlier answer, at most 512 printable ASCII characters, passed to `journalctl` as the single argument `--after-cursor=<value>` or `--before-cursor=<value>` |
+| `cursor` | a journal cursor from an earlier answer, at most 512 printable ASCII characters, passed to `journalctl` as the single argument `--after-cursor=<value>` (with `-r` for `backward`, where it means "older than the cursor": `journalctl` has no `--before-cursor`) |
 | `direction` | `backward` (default): the newest `lines` entries before `until` or `cursor`; `forward`: the oldest `lines` entries after `cursor` |
 
 - A `backward` query without `since` covers the last 7 days. A `forward` query without `cursor` and
@@ -783,6 +789,9 @@ Answer:
   (the newest for `forward`, the oldest for `backward`), matching or not, so that a client always
   makes progress; `null` when nothing was scanned. When `truncated` is true it is the cursor of the
   last entry kept. A client continues with `cursor: next_cursor` and the same `direction`.
+- `complete` only reports the scan window: a `truncated` answer is `complete: true`.
+- A journal line over 256 KiB is skipped (it still counts as scanned). A `MESSAGE` that
+  `journalctl` prints as `null` (over 4096 bytes) gives `"message": ""` with `"cut": true`.
 - To follow the journal, a client repeats a `forward` query with the `next_cursor` it received.
 
 **Limits**
@@ -836,7 +845,9 @@ Answer: the new `<BoxTime>` plus `"restart_required": <bool>`, true when `timezo
   ("ntp is active") when NTP is still on after the `ntp` step.
 - Each `timedatectl` command has 10 s. The first step that fails stops the sequence and answers
   `500 internal` with `data: {"applied": ["timezone"], "failed": "ntp"}`; the steps before it stay
-  applied, and `GET system/time` shows the real state.
+  applied, and `GET system/time` shows the real state. If every step applied but reading the new
+  state fails, the answer is `500 internal` with `data: {"applied": [...]}` and no `failed`; a
+  client derives `restart_required` from `applied` holding `timezone`.
 - The daemon does not write `/etc/timezone` and sets no `TZ`: the processes of the box read the
   zone from `/etc/localtime`, and a container sees the change when it is recreated, hence
   `restart_required`.
