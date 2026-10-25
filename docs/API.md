@@ -965,6 +965,12 @@ on the box: no code. Body as `apply` without `code_id` and `code`; same checks, 
 events, rollback and answer as `apply`. The CLI then calls `state`, `confirm` and `revert` with the
 bearer alone.
 
+CLI: `calaos-os network state`, `apply --intf I (--dhcp | --ipv4 CIDR [--gateway IP] [--dns IP]...
+[--search DOMAIN]...)`, `confirm [CHANGE_ID]` and `revert [CHANGE_ID]` (the pending change when the
+id is omitted). Exit codes: 1 invalid arguments (`invalid_request` on `apply`), 2 token unreadable,
+3 daemon unreachable, 4 other daemon failures (`network_pending`, `upgrade_in_progress`), 5 the
+change to confirm or revert is gone (rolled back after its deadline, or already finished).
+
 ## Upgrade jobs
 
 On `/api/v2/`, `POST update/upgrade-all` and `POST update/upgrade` start a job and answer at once:
