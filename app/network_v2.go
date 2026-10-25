@@ -65,6 +65,8 @@ type netChanges struct {
 	cur      *netPending
 	deadline time.Time
 	stop     func() bool
+	// retryReason is the reason of a rollback that kept the trial.
+	retryReason string
 }
 
 type netPendingEvent struct {
@@ -177,6 +179,7 @@ func (a *AppServer) netClearLocked() {
 		n.stop = nil
 	}
 	n.cur = nil
+	n.retryReason = ""
 	if err := os.Remove(n.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		logging.Errorf("removing the pending network change: %v", err)
 	}
@@ -201,7 +204,7 @@ func (a *AppServer) netExpired(id string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.cur != nil && n.cur.ChangeID == id {
-		a.netRollbackLocked("timeout")
+		a.netRollbackLocked(n.rollbackReason())
 	}
 }
 
@@ -213,11 +216,19 @@ func (a *AppServer) netRollbackLocked(reason string) {
 	err := models.RevertNetworkTrial(p.Intf)
 	if errors.Is(err, models.ErrTrialKept) {
 		logging.Errorf("rolling back the network change on %s: %v", p.Intf, err)
+		a.net.retryReason = reason
 		a.netRetryLocked()
 		return
 	}
 	a.netClearLocked()
 	a.netRolledBack(p.Intf, p.ChangeID, p.Client, p.SessionAudit, reason, err)
+}
+
+func (n *netChanges) rollbackReason() string {
+	if n.retryReason != "" {
+		return n.retryReason
+	}
+	return "timeout"
 }
 
 // netRetryLocked keeps a change whose rollback failed: its deadline has
@@ -259,7 +270,7 @@ func (a *AppServer) netRolledBack(intf, changeID, client, session, reason string
 func (a *AppServer) netLiveLocked() *netPending {
 	n := a.net
 	if n.cur != nil && !a.now().Before(n.deadline) {
-		a.netRollbackLocked("timeout")
+		a.netRollbackLocked(n.rollbackReason())
 	}
 	return n.cur
 }
@@ -312,7 +323,7 @@ func (a *AppServer) netSweepLocked() {
 	for _, intf := range intfs {
 		err := models.RevertNetworkTrial(intf)
 		if errors.Is(err, models.ErrTrialKept) {
-			logging.Errorf("reverting the network trial of %s: %v", intf, err)
+			logging.Errorf("giving up on the network trial of %s until the next reboot: %v", intf, err)
 			continue
 		}
 		a.netRolledBack(intf, "-", "-", "-", "restart", err)
@@ -538,6 +549,12 @@ func (a *AppServer) v2NetConfirm(c *fiber.Ctx) error {
 	p, err := a.netFindLocked(c)
 	if err != nil {
 		return err
+	}
+	// Past the deadline only a rollback that kept its trial is left. The
+	// deadline is monotonic and, after a restart, already the earlier of
+	// the wall and boot deadlines.
+	if !a.now().Before(n.deadline) {
+		return errInvalid("unknown or finished change_id")
 	}
 	// A failed copy keeps the change pending: the timer still reverts it.
 	if err := models.ConfirmNetworkTrial(p.Intf); err != nil {

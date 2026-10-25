@@ -846,3 +846,79 @@ func TestNetworkRestartClockSteppedBack(t *testing.T) {
 	e.noRecord()
 	e.event(admin.EventNetworkRolledBack)
 }
+
+func TestNetworkRetryState(t *testing.T) {
+	e := newNetEnv(t)
+	p, _ := e.apply(e.c, e.s, nil)
+	e.nc.take()
+	unblock := e.blockTrial()
+	e.clk.Advance(netConfirmWindow)
+	n := len(e.timers.list)
+	e.timers.last(t).f()
+	if len(e.timers.list) != n+1 || e.timers.last(t).d != netRetryDelay {
+		t.Fatalf("no 10 s retry armed: %d timers, last %v", len(e.timers.list), e.timers.last(t).d)
+	}
+	if !e.timers.list[n-1].stopped {
+		t.Error("expired timer not stopped")
+	}
+	if got := e.nc.take(); got != nil {
+		t.Fatalf("networkctl ran with the trial still in place: %v", got)
+	}
+	e.noEvent(admin.EventNetworkRolledBack)
+	r := e.c.expect("GET", "/api/v2/network/state", "", session(e.s), 200, "")
+	if !strings.Contains(string(r.Data), `"change_id":"`+p.ChangeID+`"`) || !strings.Contains(string(r.Data), `"expires_in":1`) {
+		t.Fatalf("state %s", r.Data)
+	}
+	// Each route call retries and replaces the retry timer.
+	before := e.timers.last(t)
+	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 409, codeNetworkPending)
+	if !before.stopped || e.timers.last(t) == before || e.timers.last(t).d != netRetryDelay {
+		t.Fatal("route call did not replace the retry timer")
+	}
+	// Too late to confirm; revert keeps the change while the trial stays.
+	e.c.expect("POST", "/api/v2/network/confirm", changeBody(p.ChangeID), session(e.s), 400, codeInvalidRequest)
+	e.etcOnly()
+	e.c.expect("POST", "/api/v2/network/revert", changeBody(p.ChangeID), session(e.s), 500, codeInternal)
+	if !e.hasRecord() {
+		t.Fatal("record dropped while the trial is still in place")
+	}
+	unblock()
+	e.timers.last(t).f()
+	e.noRecord()
+	e.event(admin.EventNetworkRolledBack)
+	if got := e.nc.take(); len(got) != 2 {
+		t.Fatalf("networkctl %v", got)
+	}
+	if audit := readAudit(t); !strings.Contains(audit, "action=network_rollback intf=eth0 change_id="+p.ChangeID+" reason=timeout") {
+		t.Fatalf("audit:\n%s", audit)
+	}
+	// A stale retry timer fired late is a no-op.
+	e.timers.list[len(e.timers.list)-1].f()
+	e.noEvent(admin.EventNetworkRolledBack)
+}
+
+// A rollback that a restart started keeps reason=restart through its retries.
+func TestNetworkRestartRetryReason(t *testing.T) {
+	e := newNetEnv(t)
+	r := e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 200, "")
+	var p applied
+	_ = json.Unmarshal(r.Data, &p)
+	unblock := e.blockTrial()
+	e.clk.Advance(netConfirmWindow + time.Second)
+	restarted, err := NewApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.useHub(restarted)
+	restarted.resumeNetChange()
+	if !e.hasRecord() || e.timers.last(t).d != netRetryDelay {
+		t.Fatal("no retry after a restart that kept the trial")
+	}
+	unblock()
+	e.timers.last(t).f()
+	e.noRecord()
+	want := `action=network_rollback intf=eth0 change_id=` + p.ChangeID + ` reason=restart`
+	if audit := readAudit(t); !strings.Contains(audit, want) || strings.Contains(audit, "reason=timeout") {
+		t.Fatalf("audit lacks %q:\n%s", want, audit)
+	}
+}
