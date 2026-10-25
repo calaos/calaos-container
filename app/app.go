@@ -55,6 +55,7 @@ type AppServer struct {
 
 	admin *admin.Manager
 	net   *netChanges
+	logs  *logLimits
 
 	now         func() time.Time
 	consoles    *console.Manager
@@ -117,6 +118,7 @@ func NewApp() (a *AppServer, err error) {
 		},
 	})
 	a.sessions = a.admin
+	a.logs = newLogLimits()
 	a.now = adminNow
 	if a.now == nil {
 		a.now = time.Now
@@ -236,6 +238,11 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Get("/system/fs_status", s, a.v2SystemFsStatus)
 	v2.Get("/system/services", s, a.v2Services)
 	v2.Post("/system/services/restart", s, a.v2ServiceRestart)
+	v2.Get("/system/time", s, a.v2SystemTime)
+	v2.Post("/system/time", s, a.v2SystemTimeSet)
+	v2.Get("/system/timezones", s, a.v2SystemTimezones)
+	v2.Get("/logs/sources", s, a.v2LogSources)
+	v2.Post("/logs/query", s, a.v2LogsQuery)
 	v2.Post("/system/rollback_snapshot", bearerOnly, a.v2SystemRollbackSnapshot)
 	v2.Get("/system/install/list_devices", bearerOnly, a.v2InstallListDevices)
 	v2.Post("/system/install/start", bearerOnly, a.v2InstallStart)
