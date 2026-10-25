@@ -26,11 +26,12 @@ const (
 	MinPasswordLength = 10   // Unicode code points
 	MaxPasswordBytes  = 1024 // UTF-8 bytes
 
-	EventAdminSet        = "admin_set"
-	EventAdminReset      = "admin_reset"
-	EventApproverSet     = "approver_set"
-	EventApproverRemoved = "approver_removed"
-	EventConsoleOpened   = "console_opened"
+	EventAdminSet          = "admin_set"
+	EventAdminReset        = "admin_reset"
+	EventApproverSet       = "approver_set"
+	EventApproverRemoved   = "approver_removed"
+	EventConsoleOpened     = "console_opened"
+	EventNetworkRolledBack = "network_rolled_back"
 
 	hashFileName    = "password.hash"
 	alertsFileName  = "alerts.json"
@@ -524,6 +525,17 @@ func (m *Manager) RaiseConsoleOpened(sessionAuditID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.raiseAlertLocked(Alert{Type: EventConsoleOpened, SessionAuditID: sessionAuditID})
+}
+
+// RaiseNetworkRolledBack tells that a network change on intf was reverted
+// because nobody confirmed it.
+func (m *Manager) RaiseNetworkRolledBack(intf string) {
+	if m.initErr != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.raiseAlertLocked(Alert{Type: EventNetworkRolledBack, Intf: intf})
 }
 
 // raiseLocked never fails the request: the password change has already

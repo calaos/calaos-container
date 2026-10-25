@@ -1,17 +1,25 @@
 package models
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 	"unicode"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/calaos/calaos-container/models/structs"
 )
@@ -62,7 +70,10 @@ type RawDNSConfig struct {
 }
 
 func GetAllNetInterfaces() (nets []*structs.NetInterface, err error) {
-	cmd := exec.Command("/usr/bin/networkctl", "list", "--json=short")
+	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/networkctl", "list", "--json=short")
+	cmd.WaitDelay = time.Second
 	output, err := cmd.Output()
 	if err != nil {
 		logging.Errorf("failed to get network interfaces: %v", err)
@@ -207,8 +218,9 @@ func ValidateInterfaceName(name string) error {
 	if !interfaceNameRe.MatchString(name) {
 		return invalidField(field, "%q must match %s", name, interfaceNameRe.String())
 	}
-	// "." and ".." match the charset above but are path components.
-	if name == "." || name == ".." {
+	// "." and ".." match the charset above but are path components. The
+	// route words are the static v2 routes next to network/:intf.
+	if name == "." || name == ".." || isRouteWord(name) {
 		return invalidField(field, "%q is not a valid interface name", name)
 	}
 	// A leading '-' would be parsed as an option by networkctl ("--all").
@@ -217,6 +229,16 @@ func ValidateInterfaceName(name string) error {
 	}
 
 	return nil
+}
+
+// fiber matches routes case-insensitively, so "Apply" is a route word too.
+func isRouteWord(name string) bool {
+	for _, w := range []string{"apply", "confirm", "revert", "state", "list", "trial"} {
+		if strings.EqualFold(name, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // InterfaceExists reports whether name is one of the network interfaces
@@ -397,6 +419,94 @@ func ValidateNetInterfaceConfig(config structs.NetInterface) error {
 	return nil
 }
 
+// MaxNetApplyEntries bounds dns_servers and search_domains of a v2 change.
+const MaxNetApplyEntries = 4
+
+// NetApply is a network/apply or network/trial request.
+type NetApply struct {
+	Intf          string
+	DHCP          bool
+	IPv4          string
+	Gateway       string
+	DNSServers    []string
+	SearchDomains []string
+}
+
+func (r NetApply) Config() structs.NetInterface {
+	return structs.NetInterface{
+		Name:          r.Intf,
+		IPv4:          r.IPv4,
+		Gateway:       r.Gateway,
+		DHCP:          r.DHCP,
+		DNSServers:    r.DNSServers,
+		SearchDomains: r.SearchDomains,
+	}
+}
+
+// strictIPv4 also refuses what netip would accept in another form (IPv6,
+// 4-in-6): the code is bound to the string as sent, so there is one spelling.
+func strictIPv4(field, value string) error {
+	addr, err := netip.ParseAddr(value)
+	if err != nil || !addr.Is4() || addr.String() != value {
+		return invalidField(field, "%q is not an IPv4 address (a.b.c.d, no leading zero)", value)
+	}
+	return nil
+}
+
+func strictIPv4CIDR(field, value string) error {
+	addr, bits, ok := strings.Cut(value, "/")
+	if !ok {
+		return invalidField(field, "%q needs a prefix length (a.b.c.d/n)", value)
+	}
+	if err := strictIPv4(field, addr); err != nil {
+		return err
+	}
+	n, err := strconv.Atoi(bits)
+	if err != nil || n < 0 || n > 32 || strconv.Itoa(n) != bits {
+		return invalidField(field, "%q has an invalid prefix length", value)
+	}
+	return nil
+}
+
+// ValidateNetApply is the v2 validation: IPv4 only, an explicit prefix, no
+// leading zero, at most MaxNetApplyEntries DNS servers and search domains,
+// and no static field with DHCP.
+func ValidateNetApply(r NetApply) error {
+	if err := ValidateInterfaceName(r.Intf); err != nil {
+		return err
+	}
+	if len(r.DNSServers) > MaxNetApplyEntries {
+		return invalidField("dns_servers", "at most %d entries", MaxNetApplyEntries)
+	}
+	if len(r.SearchDomains) > MaxNetApplyEntries {
+		return invalidField("search_domains", "at most %d entries", MaxNetApplyEntries)
+	}
+	if r.DHCP {
+		if r.IPv4 != "" || r.Gateway != "" || len(r.DNSServers) > 0 || len(r.SearchDomains) > 0 {
+			return invalidField("dhcp", "ipv4, gateway, dns_servers and search_domains must be empty with dhcp")
+		}
+		return nil
+	}
+	if r.IPv4 == "" {
+		return invalidField("ipv4", "is required when dhcp is disabled")
+	}
+	if err := strictIPv4CIDR("ipv4", r.IPv4); err != nil {
+		return err
+	}
+	if r.Gateway != "" {
+		if err := strictIPv4("gateway", r.Gateway); err != nil {
+			return err
+		}
+	}
+	for i, dns := range r.DNSServers {
+		if err := strictIPv4(fmt.Sprintf("dns_servers[%d]", i), dns); err != nil {
+			return err
+		}
+	}
+	// The rest (search domains, directive characters) is the shared check.
+	return ValidateNetInterfaceConfig(r.Config())
+}
+
 // sdNetConfDhcpTemplate is rendered with text/template on purpose: this is an
 // INI unit file, not HTML. html/template would corrupt legitimate values (a '&'
 // in a search domain becomes "&amp;") while providing no protection at all
@@ -410,8 +520,11 @@ Name={{ .Name }}
 {{- if .DHCP }}
 DHCP=yes
 {{- else }}
+DHCP=no
 Address={{ .IPv4 }}
+{{- if .Gateway }}
 Gateway={{ .Gateway }}
+{{- end }}
 {{- range .DNSServers }}
 DNS={{ . }}
 {{- end }}
@@ -433,82 +546,215 @@ type ConfNetworkSection struct {
 	Domains     string `toml:"Domains"`
 }
 
-// ConfigureNetInterface writes the systemd-networkd unit for intf and applies
-// it. Both intf and config are validated up front: nothing is executed and no
-// file is touched unless every value is well-formed. Callers wanting to reject
-// unknown interfaces (rather than creating a unit for a name that is merely
-// syntactically valid) must additionally check InterfaceExists.
-//
-// Note: if the unit file is written but "networkctl reload"/"reconfigure"
-// fails, the new file is kept on disk (no rollback) and the error is returned
-// to the caller.
-func ConfigureNetInterface(intf string, config structs.NetInterface) error {
-	if err := ValidateInterfaceName(intf); err != nil {
-		logging.Errorf("%v", err)
-		return err
-	}
+// networkctlTimeout bounds a hung networkctl (networkd stuck, D-Bus
+// activation): the network routes and the rollback timer wait for it.
+const networkctlTimeout = 30 * time.Second
 
+// Directories systemd-networkd reads units from, and the networkctl runner.
+// Variables so tests use temporary directories and a fake networkctl.
+var (
+	NetworkEtcDir = "/etc/systemd/network"
+	NetworkRunDir = "/run/systemd/network"
+
+	Networkctl = func(args ...string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "/usr/bin/networkctl", args...)
+		cmd.WaitDelay = time.Second
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("networkctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+)
+
+// NetworkUnitPath is the only file of /etc the daemon writes for intf. It
+// sorts before the image's shared config.network, so it wins for intf.
+func NetworkUnitPath(intf string) string {
+	return filepath.Join(NetworkEtcDir, "calaos_"+intf+".network")
+}
+
+// NetworkTrialPath sorts before every unit of /etc, and /run is empty after a
+// reboot: a reboot reverts the trial.
+func NetworkTrialPath(intf string) string {
+	return filepath.Join(NetworkRunDir, "00-calaos-trial-"+intf+".network")
+}
+
+// RenderNetworkUnit validates intf and config, then renders the unit.
+func RenderNetworkUnit(intf string, config structs.NetInterface) ([]byte, error) {
+	if err := ValidateInterfaceName(intf); err != nil {
+		return nil, err
+	}
 	if err := ValidateNetInterfaceConfig(config); err != nil {
-		logging.Errorf("%v", err)
-		return err
+		return nil, err
 	}
 
 	tmpl, err := template.New("networkConfig").Parse(sdNetConfDhcpTemplate)
 	if err != nil {
-		err = fmt.Errorf("failed to parse network config template: %v", err)
-		logging.Errorf("%v", err)
-		return err
+		return nil, fmt.Errorf("failed to parse network config template: %v", err)
 	}
 
 	config.Name = intf
+	var b bytes.Buffer
+	if err := tmpl.Execute(&b, config); err != nil {
+		return nil, fmt.Errorf("failed to execute network config template: %v", err)
+	}
+	return b.Bytes(), nil
+}
 
-	//get network config file if already set for the interface
-	cmd := exec.Command("/usr/bin/networkctl", "status", intf, "--json=pretty")
-	output, err := cmd.Output()
+// WriteFileAtomic replaces path with data: a temporary file in the same
+// directory, synced, then renamed, so networkd never reads a partial unit.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
 	if err != nil {
 		return err
 	}
-
-	var rawIntf RawNetInterface
-	if err := json.Unmarshal(output, &rawIntf); err != nil {
-		return err
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	if werr == nil {
+		werr = f.Chmod(perm)
 	}
-
-	confFile := rawIntf.NetworkFile
-	if confFile == "" {
-		confFile = fmt.Sprintf("/etc/systemd/network/calaos_%s.network", intf)
+	if werr == nil {
+		werr = f.Sync()
 	}
-
-	file, err := os.Create(confFile)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, path)
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return werr
+	}
+	d, err := os.Open(dir)
 	if err != nil {
-		err = fmt.Errorf("failed to create network config file: %v", err)
-		logging.Errorf("%v", err)
 		return err
 	}
-	defer file.Close()
-
-	err = tmpl.Execute(file, config)
-	if err != nil {
-		err = fmt.Errorf("failed to execute network config template: %v", err)
-		logging.Errorf("%v", err)
-		return err
+	serr := d.Sync()
+	if cerr := d.Close(); serr == nil {
+		serr = cerr
 	}
+	return serr
+}
 
-	//reload *.network file
-	cmd = exec.Command("/usr/bin/networkctl", "reload")
-	if err := cmd.Run(); err != nil {
-		err = fmt.Errorf("failed to reload networkd: %v", err)
-		logging.Errorf("%v", err)
-		return err
+func reloadAndReconfigure(intf string) error {
+	if err := Networkctl("reload"); err != nil {
+		return fmt.Errorf("failed to reload networkd: %w", err)
 	}
-
-	//reconfigure interface
-	cmd = exec.Command("/usr/bin/networkctl", "reconfigure", intf)
-	if err := cmd.Run(); err != nil {
-		err = fmt.Errorf("failed to reconfigure interface: %v", err)
-		logging.Errorf("%v", err)
-		return err
+	if err := Networkctl("reconfigure", intf); err != nil {
+		return fmt.Errorf("failed to reconfigure interface: %w", err)
 	}
-
 	return nil
+}
+
+// ConfigureNetInterface writes calaos_<intf>.network and applies it at once.
+// Nothing is executed and no file is touched unless every value is
+// well-formed; callers wanting to reject unknown interfaces must additionally
+// check InterfaceExists. A failed reload keeps the new file (no rollback).
+func ConfigureNetInterface(intf string, config structs.NetInterface) error {
+	unit, err := RenderNetworkUnit(intf, config)
+	if err != nil {
+		logging.Errorf("%v", err)
+		return err
+	}
+
+	if err := WriteFileAtomic(NetworkUnitPath(intf), unit, 0o644); err != nil {
+		err = fmt.Errorf("failed to write network config file: %v", err)
+		logging.Errorf("%v", err)
+		return err
+	}
+
+	if err := reloadAndReconfigure(intf); err != nil {
+		logging.Errorf("%v", err)
+		return err
+	}
+	return nil
+}
+
+// WriteNetworkTrial writes the trial unit of intf; ApplyNetworkTrial makes
+// networkd use it.
+func WriteNetworkTrial(intf string, config structs.NetInterface) error {
+	unit, err := RenderNetworkUnit(intf, config)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(NetworkRunDir, 0o755); err != nil { //nolint:gosec // networkd reads it as root
+		return err
+	}
+	return WriteFileAtomic(NetworkTrialPath(intf), unit, 0o644)
+}
+
+func ApplyNetworkTrial(intf string) error {
+	return reloadAndReconfigure(intf)
+}
+
+// ConfirmNetworkTrial copies the trial into /etc. Once that write is done the
+// change is permanent: removing the trial and reloading only log their
+// failure, since both files carry the same content.
+func ConfirmNetworkTrial(intf string) error {
+	unit, err := os.ReadFile(NetworkTrialPath(intf))
+	if err != nil {
+		return err
+	}
+	if err := WriteFileAtomic(NetworkUnitPath(intf), unit, 0o644); err != nil {
+		return err
+	}
+	if err := os.Remove(NetworkTrialPath(intf)); err != nil {
+		logging.Warnf("removing the network trial of %s: %v", intf, err)
+	}
+	if err := Networkctl("reload"); err != nil {
+		logging.Warnf("reloading networkd after the confirmation: %v", err)
+	}
+	return nil
+}
+
+// ErrTrialKept: the trial could not be removed and still wins, so the change
+// is not reverted.
+var ErrTrialKept = errors.New("network trial still in place")
+
+// RevertNetworkTrial removes the trial and gives intf back the unit it had
+// before. Once the trial is gone, every step runs even when one fails.
+func RevertNetworkTrial(intf string) error {
+	if err := os.Remove(NetworkTrialPath(intf)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %v", ErrTrialKept, err)
+	}
+	var errs []error
+	if err := Networkctl("reload"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := Networkctl("reconfigure", intf); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// NetworkTrials lists the interfaces that have a trial unit.
+func NetworkTrials() ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(NetworkRunDir, "00-calaos-trial-*.network"))
+	if err != nil {
+		return nil, err
+	}
+	var intfs []string
+	for _, p := range paths {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "00-calaos-trial-"), ".network")
+		if ValidateInterfaceName(name) != nil {
+			logging.Warnf("ignoring the network trial %s: not an interface name", p)
+			continue
+		}
+		intfs = append(intfs, name)
+	}
+	return intfs, nil
+}
+
+// BootClock is CLOCK_BOOTTIME: it counts suspend, never steps, and restarts
+// at 0 with /run, so a deadline on it survives a daemon restart.
+var BootClock = func() (time.Duration, error) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
+		return 0, err
+	}
+	return time.Duration(ts.Nano()), nil
 }

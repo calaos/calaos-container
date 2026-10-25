@@ -18,8 +18,7 @@ const (
 	ActionAdminPassword  = "admin_password"
 	ActionApproverEnroll = "approver_enroll"
 	ActionApproverRemove = "approver_remove"
-	// ActionNetworkConfig is reserved: no route consumes it yet.
-	ActionNetworkConfig = "network_config"
+	ActionNetworkConfig  = "network_config"
 
 	actionApproverConfirm = "approver_confirm"
 
@@ -77,6 +76,7 @@ var actionParams = map[string][]string{
 	ActionAdminPassword:  {"password"},
 	ActionApproverEnroll: nil,
 	ActionApproverRemove: {"approver_id"},
+	ActionNetworkConfig:  {"intf", "dhcp", "ipv4", "gateway", "dns_servers", "search_domains"},
 }
 
 // Grant actions are consumed outside a REST body (the console WebSocket), so
@@ -230,9 +230,6 @@ func ValidCode(s string) bool {
 }
 
 func checkActionParams(action string, p Params) error {
-	if action == ActionNetworkConfig {
-		return &InvalidError{Msg: "action not available yet: " + action}
-	}
 	keys, ok := actionParams[action]
 	if !ok {
 		return &InvalidError{Msg: "unknown action"}
@@ -429,6 +426,24 @@ func (m *Manager) RequestCode(session, action string, p Params, approverID strin
 		return CodeInfo{}, err
 	}
 	return CodeInfo{CodeID: c.id, ApproverID: dest.ID, ExpiresIn: int(CodeTTL / time.Second)}, nil
+}
+
+// UseCode consumes a code of action bound to p, for a route outside this
+// package (network/apply).
+func (m *Manager) UseCode(session, action string, p Params, ref CodeRef) error {
+	if err := m.requireApprover(); err != nil {
+		return err
+	}
+	if ref.ID == "" {
+		return ErrCodeRequired
+	}
+	s, err := m.lockSession(session)
+	if err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	_, err = m.useCodeLocked(s, ref, action, p, useConsume)
+	return err
 }
 
 // VerifyCode turns a grant action's code into a grant for TakeGrant.

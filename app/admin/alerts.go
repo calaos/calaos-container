@@ -12,6 +12,7 @@ const maxAlerts = 32
 // Alert is an admin notification kept until calaos_server acknowledges it.
 // It carries no secret: the approver alerts name the phone by device name
 // and token_id, never by token, and console_opened the session by audit id.
+// network_rolled_back names the interface only.
 type Alert struct {
 	Type           string `json:"type"`
 	ID             string `json:"id"`
@@ -19,6 +20,7 @@ type Alert struct {
 	DeviceName     string `json:"device_name,omitempty"`
 	TokenID        string `json:"token_id,omitempty"`
 	SessionAuditID string `json:"session_audit_id,omitempty"`
+	Intf           string `json:"intf,omitempty"`
 }
 
 // AlertData is the data of the event published for an alert.
@@ -28,10 +30,11 @@ type AlertData struct {
 	DeviceName     string `json:"device_name,omitempty"`
 	TokenID        string `json:"token_id,omitempty"`
 	SessionAuditID string `json:"session_audit_id,omitempty"`
+	Intf           string `json:"intf,omitempty"`
 }
 
 func (a Alert) Data() AlertData {
-	return AlertData{ID: a.ID, TS: a.TS, DeviceName: a.DeviceName, TokenID: a.TokenID, SessionAuditID: a.SessionAuditID}
+	return AlertData{ID: a.ID, TS: a.TS, DeviceName: a.DeviceName, TokenID: a.TokenID, SessionAuditID: a.SessionAuditID, Intf: a.Intf}
 }
 
 type alertFile struct {

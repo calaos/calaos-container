@@ -443,21 +443,58 @@ func TestPushPayloadExpiresIn(t *testing.T) {
 	}
 }
 
-// No route requests network_config codes yet, so the code is issued directly.
+func netParams(gw string) Params {
+	return Params{"intf": "eth0", "dhcp": "false", "ipv4": "192.168.1.10/24", "gateway": gw,
+		"dns_servers": "192.168.1.1", "search_domains": ""}
+}
+
 func TestPushPayloadNetworkConfig(t *testing.T) {
 	e, m, s := adminWithSession(t)
 	enrol(t, e, m, s, "tok-a")
-	a := m.approvers.list[0]
-	m.mu.Lock()
-	c, err := m.issueLocked(sessionHash(s), ActionNetworkConfig, nil, a, nil)
-	m.mu.Unlock()
+	e.clk.Advance(codeInterval)
+	info, err := m.RequestCode(s, ActionNetworkConfig, netParams("192.168.1.1"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := m.PushPayload(c.id)
+	p, err := m.PushPayload(info.CodeID)
 	if err != nil || p.Action != ActionNetworkConfig || p.Token != "tok-a" ||
 		p.Message != "Calaos admin code "+p.Code+": change the network configuration. Valid 60 s, never share it." {
 		t.Fatalf("payload %+v %v", p, err)
+	}
+}
+
+func TestUseCodeNetworkBinding(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	if err := m.UseCode(s, ActionNetworkConfig, netParams(""), CodeRef{}); !errors.Is(err, ErrApproverRequired) {
+		t.Fatalf("without an approver: %v", err)
+	}
+	enrol(t, e, m, s, "tok-a")
+	if err := m.UseCode(s, ActionNetworkConfig, netParams(""), CodeRef{}); !errors.Is(err, ErrCodeRequired) {
+		t.Fatalf("without a code: %v", err)
+	}
+
+	// Six keys exactly, strings only.
+	var inv *InvalidError
+	short := netParams("")
+	delete(short, "search_domains")
+	if _, err := m.RequestCode(s, ActionNetworkConfig, short, ""); !errors.As(err, &inv) {
+		t.Fatalf("five keys: %v", err)
+	}
+
+	e.clk.Advance(codeInterval)
+	ref := requestCode(t, e, m, s, ActionNetworkConfig, netParams("192.168.1.1"))
+	var bc *BadCodeError
+	if err := m.UseCode(s, ActionNetworkConfig, netParams("192.168.1.254"), ref); !errors.As(err, &bc) || bc.AttemptsLeft != 4 {
+		t.Fatalf("other gateway: %v", err)
+	}
+	if err := m.UseCode(s, ActionConsoleOpen, nil, ref); !errors.As(err, &bc) {
+		t.Fatalf("other action: %v", err)
+	}
+	if err := m.UseCode(s, ActionNetworkConfig, netParams("192.168.1.1"), ref); err != nil {
+		t.Fatalf("matching params: %v", err)
+	}
+	if err := m.UseCode(s, ActionNetworkConfig, netParams("192.168.1.1"), ref); !errors.Is(err, ErrCodeExpired) {
+		t.Fatalf("used twice: %v", err)
 	}
 }
 
@@ -525,6 +562,7 @@ func TestCodeRequestValidation(t *testing.T) {
 		p      Params
 	}{
 		{ActionNetworkConfig, nil},
+		{ActionNetworkConfig, Params{"intf": "eth0"}},
 		{"shell", nil},
 		{"", nil},
 		{"approver_confirm", nil},
