@@ -129,3 +129,42 @@ func TestRedactCorpus(t *testing.T) {
 		}
 	}
 }
+
+// redactSample is a journal-like mix: mostly plain lines, a few URLs,
+// key/value pairs, JSON and headers.
+func redactSample() []string {
+	shapes := []string{
+		"wago: connected to 192.168.1.50:502",
+		"Started Session 42 of User root.",
+		"io: input_12 changed to true",
+		"rules: action light_kitchen executed in 3 ms",
+		"mosquitto: New client connected from 127.0.0.1:41234 as calaos (p2, c1, k60).",
+		`zigbee2mqtt: MQTT publish: topic 'zigbee2mqtt/sensor', payload '{"battery":97,"temperature":21.4,"linkquality":120}'`,
+		"GET http://cam.local:8080/snap.jpg?res=1 200",
+		"kernel: usb 1-1.3: new full-speed USB device number 5 using xhci_hcd",
+		"influxdb: [httpd] 127.0.0.1 - - POST /write?db=calaos HTTP/1.1 204",
+		"login cn_user=admin cn_pass=topsecret ok",
+		"GET rtsp://admin:pw@cam/stream",
+		"Authorization: Bearer eyJhbGci.x.y",
+	}
+	out := make([]string, 5000)
+	for i := range out {
+		// Plain lines dominate, as in a real journal.
+		if i%10 < 7 {
+			out[i] = shapes[i%9]
+		} else {
+			out[i] = shapes[9+i%3]
+		}
+	}
+	return out
+}
+
+func BenchmarkRedact5000(b *testing.B) {
+	lines := redactSample()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, l := range lines {
+			Redact(l)
+		}
+	}
+}
