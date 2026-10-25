@@ -82,6 +82,10 @@ func main() {
 	a.Command("admin", "admin password commands", cmdAdmin)
 	a.Command("network", "network related commands", func(cmd *cli.Cmd) {
 		cmd.Command("list", "list network interfaces", cmdNetList)
+		cmd.Command("state", "show the interfaces and the pending change, if any", cmdNetState)
+		cmd.Command("apply", "apply a change as a trial that reverts after 120 s unless confirmed", cmdNetApply)
+		cmd.Command("confirm", "make the pending change permanent", cmdNetConfirm)
+		cmd.Command("revert", "undo the pending change now", cmdNetRevert)
 		cmd.Command("configure", "configure network interface", func(cmd *cli.Cmd) {
 			cmd.Command("static", "configure network interface with static IP", cmdNetConfigureStatic)
 			cmd.Command("dhcp", "configure network interface with DHCP", cmdNetConfigureDHCP)
