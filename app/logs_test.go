@@ -330,6 +330,8 @@ func TestLogsQueryTimeoutKillsGroup(t *testing.T) {
 }
 
 func TestLogsQueryScanWindow(t *testing.T) {
+	// Large outputs: a slow builder must not hit the 5 s scan limit.
+	useScanTime(t, time.Minute)
 	f := useFakeJournalctl(t)
 	lines := make([]string, logsScanEntries+10)
 	for i := range lines {
@@ -363,6 +365,8 @@ func TestLogsQueryTextOnRedacted(t *testing.T) {
 }
 
 func TestLogsQueryCutAndTruncated(t *testing.T) {
+	// Large outputs: a slow builder must not hit the 5 s scan limit.
+	useScanTime(t, time.Minute)
 	clk := useLogClock(t)
 	f := useFakeJournalctl(t)
 	big := strings.Repeat("x", 3000)
