@@ -89,6 +89,7 @@ var codePurpose = map[string]string{
 	ActionApproverEnroll:  "add an approver phone",
 	ActionApproverRemove:  "remove an approver phone",
 	actionApproverConfirm: "enroll this phone as the admin approver",
+	ActionNetworkConfig:   "change the network configuration",
 }
 
 type pushCode struct {
@@ -600,11 +601,20 @@ func (m *Manager) RemoveApprover(session, approverID string, ref CodeRef) error 
 	return nil
 }
 
-// PushPayload hands the token and the message of a code to calaos_server,
-// once.
-func (m *Manager) PushPayload(codeID string) (token, message string, err error) {
+// PushPayload is what calaos_server needs to push a code. Code is in clear so
+// it can encrypt it for phones registered with a push key.
+type PushPayload struct {
+	Token     string `json:"token"`
+	Message   string `json:"message"`
+	Action    string `json:"action"`
+	Code      string `json:"code"`
+	ExpiresIn int    `json:"expires_in"`
+}
+
+// PushPayload hands a code to calaos_server, once.
+func (m *Manager) PushPayload(codeID string) (PushPayload, error) {
 	if m.initErr != nil {
-		return "", "", m.initErr
+		return PushPayload{}, m.initErr
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -612,8 +622,14 @@ func (m *Manager) PushPayload(codeID string) (token, message string, err error) 
 	m.codes.prune(now)
 	c := m.codes.byID[codeID]
 	if c == nil || c.fetched || !c.grantUntil.IsZero() || !m.sessions.liveHash(now, c.session) {
-		return "", "", ErrNotFound
+		return PushPayload{}, ErrNotFound
 	}
 	c.fetched = true
-	return c.token, c.message, nil
+	return PushPayload{
+		Token:     c.token,
+		Message:   c.message,
+		Action:    c.action,
+		Code:      c.digits,
+		ExpiresIn: ceilSeconds(c.expires.Sub(now)),
+	}, nil
 }

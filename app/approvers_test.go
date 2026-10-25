@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/calaos/calaos-container/app/admin"
 	"github.com/calaos/calaos-container/events"
+	logger "github.com/calaos/calaos-container/log"
 )
 
 type testClock struct {
@@ -376,6 +378,36 @@ func TestApproverAudit(t *testing.T) {
 	for _, secret := range []string{ref.code, pw.code, "tok-a", "Phone tok-a", adminPwNew, s} {
 		if strings.Contains(log, secret) {
 			t.Fatalf("audit log leaks %q", secret)
+		}
+	}
+}
+
+func TestPushPayloadOverHTTP(t *testing.T) {
+	var logs bytes.Buffer
+	logger.Logger.SetOutput(&logs)
+	t.Cleanup(func() { logger.Logger.SetOutput(os.Stdout) })
+
+	c, clk, s, _ := adminWithApprover(t)
+	r := c.expect("POST", "/api/v2/admin/codes", `{"action":"admin_password","params":{"password":"`+adminPwNew+`"}}`, session(s), 200, "")
+	var info admin.CodeInfo
+	_ = json.Unmarshal(r.Data, &info)
+	clk.Advance(12 * time.Second)
+	r = c.expect("GET", "/api/v2/admin/push/"+info.CodeID, "", nil, 200, "")
+	var p map[string]any
+	if err := json.Unmarshal(r.Data, &p); err != nil || len(p) != 5 {
+		t.Fatalf("push payload %s", r.Data)
+	}
+	code, _ := p["code"].(string)
+	if p["token"] != "tok-a" || p["action"] != "admin_password" || p["expires_in"] != float64(48) || !admin.ValidCode(code) ||
+		p["message"] != "Calaos admin code "+code+": change the admin password. Valid 60 s, never share it." {
+		t.Fatalf("push payload %s", r.Data)
+	}
+	c.expect("GET", "/api/v2/admin/push/"+info.CodeID, "", nil, 404, codeNotFound)
+	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPwNew+`","code_id":"`+info.CodeID+`","code":"`+code+`"}`, session(s), 200, "")
+
+	for name, out := range map[string]string{"audit": readAudit(t), "log": logs.String()} {
+		if strings.Contains(out, code) {
+			t.Fatalf("%s leaks the code:\n%s", name, out)
 		}
 	}
 }

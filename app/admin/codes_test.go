@@ -17,15 +17,15 @@ var digitsRe = regexp.MustCompile(`\b(\d{6})\b`)
 // digitsOf reads the code the way calaos_server does: through the payload.
 func digitsOf(t *testing.T, m *Manager, codeID string) string {
 	t.Helper()
-	_, msg, err := m.PushPayload(codeID)
+	p, err := m.PushPayload(codeID)
 	if err != nil {
 		t.Fatalf("PushPayload(%s): %v", codeID, err)
 	}
-	d := digitsRe.FindStringSubmatch(msg)
-	if d == nil {
-		t.Fatalf("no code in %q", msg)
+	d := digitsRe.FindStringSubmatch(p.Message)
+	if d == nil || d[1] != p.Code {
+		t.Fatalf("code %q not in %q", p.Code, p.Message)
 	}
-	return d[1]
+	return p.Code
 }
 
 func wrong(code string) string {
@@ -114,11 +114,11 @@ func TestEnrolment(t *testing.T) {
 	if string(ev) != `{"approver_id":"`+info.ApproverID+`","code_id":"`+info.CodeID+`"}` {
 		t.Fatalf("push_code data %s", ev)
 	}
-	tok, msg, err := m.PushPayload(info.CodeID)
-	if err != nil || tok != "tok-a" || !strings.Contains(msg, "enroll this phone") {
-		t.Fatalf("payload %q %q %v", tok, msg, err)
+	p, err := m.PushPayload(info.CodeID)
+	if err != nil || p.Token != "tok-a" || !strings.Contains(p.Message, "enroll this phone") || p.Action != "approver_confirm" {
+		t.Fatalf("payload %+v %v", p, err)
 	}
-	code := digitsRe.FindString(msg)
+	code := p.Code
 	if strings.Contains(string(ev), code) {
 		t.Fatal("the event carries the code")
 	}
@@ -179,8 +179,8 @@ func TestSecondApproverNeedsACode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrol with a code: %v", err)
 	}
-	if tok, _, _ := m.PushPayload(info.CodeID); tok != "tok-b" {
-		t.Fatalf("enrolment code sent to %q", tok)
+	if p, _ := m.PushPayload(info.CodeID); p.Token != "tok-b" {
+		t.Fatalf("enrolment code sent to %q", p.Token)
 	}
 
 	// Done by hand: the payload of info was fetched above.
@@ -392,21 +392,23 @@ func TestPushPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, msg, err := m.PushPayload(info.CodeID)
-	if err != nil || tok != "tok-a" || !strings.Contains(msg, "open the web console") || !digitsRe.MatchString(msg) {
-		t.Fatalf("payload %q %q %v", tok, msg, err)
+	p, err := m.PushPayload(info.CodeID)
+	want := "Calaos admin code " + p.Code + ": open the web console. Valid 60 s, never share it."
+	if err != nil || p.Token != "tok-a" || p.Message != want || p.Action != ActionConsoleOpen ||
+		!ValidCode(p.Code) || p.ExpiresIn != 60 {
+		t.Fatalf("payload %+v %v", p, err)
 	}
-	if _, _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second fetch: %v", err)
 	}
-	if _, _, err := m.PushPayload("0123456789abcdef"); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload("0123456789abcdef"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown code: %v", err)
 	}
 
 	e.clk.Advance(codeInterval)
 	info, _ = m.RequestCode(s, ActionConsoleOpen, nil, "")
 	e.clk.Advance(CodeTTL)
-	if _, _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired code: %v", err)
 	}
 
@@ -417,8 +419,45 @@ func TestPushPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.clk.Advance(codeInterval)
-	if _, _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("code of an expired session: %v", err)
+	}
+}
+
+func TestPushPayloadExpiresIn(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	enrol(t, e, m, s, "tok-a")
+	for _, c := range []struct {
+		wait time.Duration
+		want int
+	}{{0, 60}, {7 * time.Second, 53}, {59*time.Second + 500*time.Millisecond, 1}} {
+		e.clk.Advance(codeInterval)
+		info, err := m.RequestCode(s, ActionConsoleOpen, nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.clk.Advance(c.wait)
+		if p, err := m.PushPayload(info.CodeID); err != nil || p.ExpiresIn != c.want {
+			t.Fatalf("after %v: expires_in %d %v, want %d", c.wait, p.ExpiresIn, err, c.want)
+		}
+	}
+}
+
+// No route requests network_config codes yet, so the code is issued directly.
+func TestPushPayloadNetworkConfig(t *testing.T) {
+	e, m, s := adminWithSession(t)
+	enrol(t, e, m, s, "tok-a")
+	a := m.approvers.list[0]
+	m.mu.Lock()
+	c, err := m.issueLocked(sessionHash(s), ActionNetworkConfig, nil, a, nil)
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := m.PushPayload(c.id)
+	if err != nil || p.Action != ActionNetworkConfig || p.Token != "tok-a" ||
+		p.Message != "Calaos admin code "+p.Code+": change the network configuration. Valid 60 s, never share it." {
+		t.Fatalf("payload %+v %v", p, err)
 	}
 }
 
@@ -447,7 +486,7 @@ func TestVerifyAndGrant(t *testing.T) {
 	if err != nil || action != ActionConsoleOpen || exp != 30 {
 		t.Fatalf("verify: %q %d %v", action, exp, err)
 	}
-	if _, _, err := m.PushPayload(ref.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload(ref.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("payload of a grant: %v", err)
 	}
 	if err := m.TakeGrant(s, ref.ID, ActionAdminPassword); !errors.Is(err, ErrCodeExpired) {
@@ -550,7 +589,7 @@ func TestRemoveApprover(t *testing.T) {
 	if err := m.RemoveApprover(s, a.ID, ref); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	if _, _, err := m.PushPayload(pending.CodeID); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload(pending.CodeID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("code to a removed approver: %v", err)
 	}
 	list, _ := m.Approvers(s)
@@ -589,7 +628,7 @@ func TestResetWipesApprovers(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(e.data, approversFileName)); !os.IsNotExist(err) {
 		t.Fatalf("approvers file after reset: %v", err)
 	}
-	if _, _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("code after reset: %v", err)
 	}
 	mustSet(t, m, ModeBootstrap, goodPassword, "")
@@ -609,7 +648,7 @@ func TestRecoveryKeepsApprovers(t *testing.T) {
 	info, _ := m.RequestCode(s, ActionConsoleOpen, nil, "")
 
 	mustSet(t, m, ModeRecovery, otherPassword, "")
-	if _, _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
+	if _, err := m.PushPayload(info.CodeID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("code after the sessions died: %v", err)
 	}
 	s = mustVerify(t, m, otherPassword)

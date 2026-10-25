@@ -232,12 +232,9 @@ func (a *AppServer) v2PushPayload(c *fiber.Ctx) error {
 	if !admin.ValidID(id) {
 		return adminError(admin.ErrNotFound)
 	}
-	token, message, err := a.admin.PushPayload(id)
+	p, err := a.admin.PushPayload(id)
 	if err != nil {
 		return adminError(err)
 	}
-	return sendOK(c, fiber.StatusOK, struct {
-		Token   string `json:"token"`
-		Message string `json:"message"`
-	}{token, message})
+	return sendOK(c, fiber.StatusOK, p)
 }
