@@ -35,7 +35,6 @@ var Services = []Service{
 	{"envoy", "envoy.service", ServiceKindService, true},
 	{"olad", "olad.service", ServiceKindService, true},
 	{"ntp", "chrony.service", ServiceKindService, true},
-	{"calaos-ddns", "calaos-ddns.service", ServiceKindOneshot, true},
 	{"calaos-container", "calaos-container.service", ServiceKindService, false},
 	{"haproxy", "haproxy.service", ServiceKindService, false},
 	{"networkd", "systemd-networkd.service", ServiceKindService, false},

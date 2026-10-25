@@ -42,7 +42,6 @@ var LogSources = []LogSource{
 	{"calaos-container", "calaos-container", "calaos-container.service", "", false},
 	{"olad", "OLA (olad)", "olad.service", "", false},
 	{"ntp", "Time sync (NTP)", "chrony.service", "", false},
-	{"calaos-ddns", "Calaos DDNS", "calaos-ddns.service", "", false},
 	{"networkd", "Network (networkd)", "systemd-networkd.service", "", false},
 	{"ssh", "SSH", "ssh.service", "", false},
 	{LogSourceKernel, "Kernel", "", "", true},

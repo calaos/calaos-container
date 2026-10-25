@@ -92,9 +92,9 @@ func TestServicesList(t *testing.T) {
 			case i == 1:
 				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=failed", "SubState=failed",
 					"UnitFileState=", "ActiveEnterTimestamp="))
-			case s.ID == "calaos-ddns":
+			case s.ID == "envoy":
 				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=inactive", "SubState=dead",
-					"UnitFileState=static", "ActiveEnterTimestamp=@0"))
+					"UnitFileState=disabled", "ActiveEnterTimestamp=@0"))
 			case u == "systemd-timesyncd.service":
 				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=active", "SubState=running",
 					"UnitFileState=enabled", "ActiveEnterTimestamp=@1793000472"))
@@ -118,7 +118,7 @@ func TestServicesList(t *testing.T) {
 		`{"error":false,"msg":"ok","data":{"services":[{"id":"calaos-server","unit":"calaos-server.service","kind":"service","restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","since":"2026-10-26T07:41:12Z"},`,
 		`{"id":"calaos-home","unit":"calaos-home.service","kind":"service","restartable":true,"active_state":"failed","sub_state":"failed","enabled":"","since":null}`,
 		`{"id":"ntp","unit":"systemd-timesyncd.service","kind":"service","restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","since":"2026-10-26T07:41:12Z"}`,
-		`{"id":"calaos-ddns","unit":"calaos-ddns.service","kind":"oneshot","restartable":true,"active_state":"inactive","sub_state":"dead","enabled":"static","since":null}`,
+		`{"id":"envoy","unit":"envoy.service","kind":"service","restartable":true,"active_state":"inactive","sub_state":"dead","enabled":"disabled","since":null}`,
 		`{"id":"ssh","unit":"ssh.service","kind":"service","restartable":false,"active_state":"not-found","sub_state":"","enabled":"","since":null}]}}`,
 	} {
 		if !strings.Contains(body, want) {
@@ -131,7 +131,7 @@ func TestServicesList(t *testing.T) {
 	calls := f.calls(t)
 	want := "show --no-pager --timestamp=unix -p Id,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp " +
 		"calaos-server.service calaos-home.service mosquitto.service zigbee2mqtt.service influxdb.service grafana.service " +
-		"hue2mqtt.service envoy.service olad.service chrony.service systemd-timesyncd.service calaos-ddns.service calaos-container.service " +
+		"hue2mqtt.service envoy.service olad.service chrony.service systemd-timesyncd.service calaos-container.service " +
 		"haproxy.service systemd-networkd.service ssh.service"
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("calls %q", calls)
@@ -168,7 +168,6 @@ func TestServiceRestartAnswersFirst(t *testing.T) {
 		{"calaos-server", "", []string{"restart --no-block calaos-server.service"}},
 		{"ntp", "loaded\nnot-found\n", []string{resolve, "restart --no-block chrony.service"}},
 		{"ntp", "not-found\nloaded\n", []string{resolve, "restart --no-block systemd-timesyncd.service"}},
-		{"calaos-ddns", "", []string{"start --no-block calaos-ddns.service"}},
 	}
 	for _, tc := range cases {
 		id := tc.id
@@ -236,7 +235,7 @@ func TestServiceRestartRefused(t *testing.T) {
 		`{"unit":"getty@tty1"}`, `{"unit":"calaos-server@"}`, `{"unit":"calaos-server@x.service"}`,
 		`{"unit":".."}`, `{"unit":"../calaos-server"}`, `{"unit":"calaos-server/../haproxy"}`,
 		`{"unit":"CALAOS-SERVER"}`, `{"unit":" calaos-server"}`, `{"unit":"calaos-server\n"}`,
-		`{"unit":"--force"}`, `{"unit":"chrony"}`, `{"unit":"chrony.service"}`, `{"unit":"timesyncd"}`, `{"unit":"sshd"}`, `{"unit":"*"}`, `{"unit":""}`, `{}`,
+		`{"unit":"--force"}`, `{"unit":"chrony"}`, `{"unit":"chrony.service"}`, `{"unit":"timesyncd"}`, `{"unit":"sshd"}`, `{"unit":"calaos-ddns"}`, `{"unit":"*"}`, `{"unit":""}`, `{}`,
 		`{"id":"calaos-server"}`,
 	}
 	f := useFakeSystemctl(t)

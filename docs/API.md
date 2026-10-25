@@ -793,8 +793,7 @@ for a client that has no translation of the `id`:
 | `envoy` | Envoy |
 | `calaos-container` | calaos-container |
 | `olad` | OLA (olad) |
-| `timesyncd` | Time sync (timesyncd) |
-| `calaos-ddns` | Calaos DDNS |
+| `ntp` | Time sync (NTP) |
 | `networkd` | Network (networkd) |
 | `ssh` | SSH |
 | `kernel` | Kernel |
@@ -805,7 +804,7 @@ Entries are matched as follows.
 | `id` | Journal entries |
 |---|---|
 | `calaos-server`, `calaos-home`, `haproxy`, `mosquitto`, `zigbee2mqtt`, `influxdb`, `grafana`, `hue2mqtt`, `envoy` | the unit of the same name, and the container of the same name |
-| `calaos-container`, `olad`, `timesyncd`, `calaos-ddns`, `networkd`, `ssh` | the unit of the Services table |
+| `calaos-container`, `olad`, `ntp`, `networkd`, `ssh` | the unit of the Services table (for `ntp`, the installed candidate, resolved as for a restart) |
 | `kernel` | kernel messages (`_TRANSPORT=kernel`, every boot) |
 | `system` | no unit filter |
 

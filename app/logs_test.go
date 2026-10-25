@@ -177,7 +177,7 @@ func TestLogSources(t *testing.T) {
 	var d struct{ Sources []logSourceInfo }
 	_ = json.Unmarshal(r.Data, &d)
 	if len(d.Sources) != len(models.LogSources) || d.Sources[0] != (logSourceInfo{"calaos-server", "Calaos server"}) ||
-		d.Sources[16] != (logSourceInfo{"system", "Whole system"}) || d.Sources[11] != (logSourceInfo{"ntp", "Time sync (NTP)"}) {
+		d.Sources[15] != (logSourceInfo{"system", "Whole system"}) || d.Sources[11] != (logSourceInfo{"ntp", "Time sync (NTP)"}) {
 		t.Fatalf("sources %s", r.Data)
 	}
 }

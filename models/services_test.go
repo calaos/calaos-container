@@ -30,6 +30,15 @@ func TestServicesTable(t *testing.T) {
 	}
 }
 
+func TestRestartArgs(t *testing.T) {
+	if got := strings.Join(Service{"x", "x.service", ServiceKindOneshot, true}.RestartArgs(), " "); got != "start --no-block x.service" {
+		t.Fatalf("oneshot %q", got)
+	}
+	if s, _ := LookupService("mosquitto"); strings.Join(s.RestartArgs(), " ") != "restart --no-block mosquitto.service" {
+		t.Fatalf("service %q", s.RestartArgs())
+	}
+}
+
 func TestParseResolvedUnit(t *testing.T) {
 	if got := strings.Join(ResolveUnitArgs("chrony.service"), " "); got != "show --no-pager -p LoadState --value chrony.service systemd-timesyncd.service" {
 		t.Fatalf("args %q", got)
