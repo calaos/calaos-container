@@ -131,8 +131,9 @@ func (a *AppServer) v2ServiceRestart(c *fiber.Ctx) error {
 
 // restartService takes its seams as arguments: it outlives the request.
 func restartService(svc models.Service, release func(), delay time.Duration, bus sysbus.SystemdBus) {
-	job := queueRestart(svc, release, delay, bus)
-	if job == nil {
+	job, err := queueRestart(svc, release, delay, bus)
+	if err != nil {
+		logging.Warnf("restarting %s: %v", svc.ID, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), serviceJobLimit)
@@ -145,7 +146,7 @@ func restartService(svc models.Service, release func(), delay time.Duration, bus
 
 // queueRestart hands the guard back once systemd has the job: holding it
 // through the job would answer 409 to every other restart meanwhile.
-func queueRestart(svc models.Service, release func(), delay time.Duration, bus sysbus.SystemdBus) *sysbus.Job {
+func queueRestart(svc models.Service, release func(), delay time.Duration, bus sysbus.SystemdBus) (*sysbus.Job, error) {
 	defer release()
 	time.Sleep(delay)
 
@@ -154,9 +155,8 @@ func queueRestart(svc models.Service, release func(), delay time.Duration, bus s
 	defer cancel()
 	job, err := models.QueueRestart(ctx, bus, svc, unit)
 	if err != nil {
-		logging.Warnf("restarting %s: %v", svc.ID, err)
-		return nil
+		return nil, err
 	}
 	resetServicesCache()
-	return job
+	return job, nil
 }

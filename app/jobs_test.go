@@ -184,6 +184,7 @@ func TestV2UpgradeJob(t *testing.T) {
 		{"POST", "/api/v2/update/upgrade", `{"package":"calaos-server"}`},
 		{"GET", "/api/v2/update/check", ""},
 		{"POST", "/api/v2/system/reboot", ""},
+		{"POST", "/api/v2/system/restart", ""},
 		{"POST", "/api/v2/system/rollback_snapshot", ""},
 	} {
 		tc := httpCase{method: req.method, path: req.path, body: req.body}
@@ -206,6 +207,7 @@ func TestV2UpgradeJob(t *testing.T) {
 		{"POST", "/api/update/upgrade?package=calaos-server", http.StatusInternalServerError},
 		{"GET", "/api/update/check", http.StatusInternalServerError},
 		{"POST", "/api/system/reboot", http.StatusConflict},
+		{"POST", "/api/system/restart", http.StatusConflict},
 	} {
 		resp, b := doCase(t, f.a, httpCase{method: req.method, path: req.path})
 		if resp.StatusCode != req.status || string(b) != legacyBusy {

@@ -30,36 +30,46 @@ func reboot() error {
 }
 
 // restartHome waits for the job, so that a failed restart reaches the client.
+// queueRestart hands the guard back first: that wait lasts up to
+// serviceJobLimit, and every guarded route would stall behind it.
 func restartHome() error {
 	svc, ok := models.LookupService("calaos-home")
 	if !ok {
 		return errors.New("calaos-home is not in the service table")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serviceJobLimit)
-	defer cancel()
-	job, err := models.QueueRestart(ctx, models.Bus, svc, svc.Unit)
+	release, err := serviceGuard()
 	if err != nil {
 		return err
 	}
+	job, err := queueRestart(svc, release, 0, models.Bus)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceJobLimit)
+	defer cancel()
 	return job.Wait(ctx)
 }
 
-// apiSystemReboot answers 409 during an upgrade, the one deliberate change to
-// a legacy route: a reboot there would cut dpkg, and old kiosks handle any
+// legacyGuardedError answers 409 during an upgrade, a deliberate change to the
+// legacy reboot and restart: either would cut dpkg, and old kiosks handle any
 // non-2xx the same way.
+func legacyGuardedError(c *fiber.Ctx, err error) error {
+	if errors.Is(err, models.ErrUpgradeInProgress) {
+		return legacyError(c, fiber.StatusConflict, err)
+	}
+	return legacyError(c, fiber.StatusInternalServerError, err)
+}
+
 func (a *AppServer) apiSystemReboot(c *fiber.Ctx) error {
 	if err := rebootGuard(reboot); err != nil {
-		if errors.Is(err, models.ErrUpgradeInProgress) {
-			return legacyError(c, fiber.StatusConflict, err)
-		}
-		return legacyError(c, fiber.StatusInternalServerError, err)
+		return legacyGuardedError(c, err)
 	}
 	return legacyOK(c)
 }
 
 func (a *AppServer) apiSystemRestart(c *fiber.Ctx) error {
 	if err := restartHome(); err != nil {
-		return legacyError(c, fiber.StatusInternalServerError, err)
+		return legacyGuardedError(c, err)
 	}
 	return legacyOK(c)
 }
@@ -360,7 +370,7 @@ func (a *AppServer) apiSystemInfo(c *fiber.Ctx) error {
 	})
 }
 
-// guardedError maps a RebootGuard failure to the v2 vocabulary.
+// guardedError maps a failure behind the upgrade guard to the v2 vocabulary.
 func guardedError(err error) error {
 	if errors.Is(err, models.ErrUpgradeInProgress) {
 		return errUpgradeInProgress(err)
@@ -377,7 +387,7 @@ func (a *AppServer) v2SystemReboot(c *fiber.Ctx) error {
 
 func (a *AppServer) v2SystemRestart(c *fiber.Ctx) error {
 	if err := restartHome(); err != nil {
-		return errInternal(err)
+		return guardedError(err)
 	}
 	return sendOK(c, fiber.StatusOK, nil)
 }

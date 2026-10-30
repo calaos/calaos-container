@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,6 +337,7 @@ func TestSystemRestartJobResult(t *testing.T) {
 				f.SetUnit("calaos-home.service", loadedUnit)
 				tc.setup(f)
 				(&stubBackend{}).install(t)
+				released := trackGuard(t)
 				a := newHandlerTestApp(t)
 
 				resp, body := doCase(t, a, httpCase{method: "POST", path: route})
@@ -344,8 +347,132 @@ func TestSystemRestartJobResult(t *testing.T) {
 				if c := f.Calls(); len(c) != tc.calls {
 					t.Fatalf("calls %q", c)
 				}
+				if n := len(released); n != 1 {
+					t.Fatalf("guard released %d times", n)
+				}
 			})
 		}
+	}
+}
+
+func TestSystemRestartDuringUpgrade(t *testing.T) {
+	answers := map[string]string{
+		"/api/system/restart":    `{"error":true,"msg":"upgrade already in progress"}`,
+		"/api/v2/system/restart": `{"error":true,"code":"upgrade_in_progress","msg":"an upgrade is already in progress"}`,
+	}
+	for route, want := range answers {
+		t.Run(route, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("calaos-home.service", loadedUnit)
+			(&stubBackend{}).install(t)
+			guards := countGuard(t, models.ErrUpgradeInProgress)
+			a := newHandlerTestApp(t)
+
+			resp, body := doCase(t, a, httpCase{method: "POST", path: route})
+			if resp.StatusCode != http.StatusConflict || string(body) != want {
+				t.Fatalf("%d %s", resp.StatusCode, body)
+			}
+			if *guards != 1 {
+				t.Fatalf("%d guards", *guards)
+			}
+			if c := f.Calls(); len(c) != 0 || f.Reads("UnitProperties") != 0 {
+				t.Fatalf("bus reached: %q", c)
+			}
+		})
+	}
+}
+
+// guardProbe records the bus calls made without the guard, and how long each
+// call was allowed to last.
+type guardProbe struct {
+	sysbus.SystemdBus
+	held atomic.Bool
+
+	mu        sync.Mutex
+	unguarded []string
+	longest   time.Duration
+}
+
+func (p *guardProbe) record(ctx context.Context, method string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.held.Load() {
+		p.unguarded = append(p.unguarded, method)
+	}
+	if d, ok := ctx.Deadline(); !ok {
+		p.longest = serviceJobLimit
+	} else if left := time.Until(d); left > p.longest {
+		p.longest = left
+	}
+}
+
+func (p *guardProbe) UnitProperties(ctx context.Context, units ...string) ([]sysbus.UnitProperties, error) {
+	p.record(ctx, "UnitProperties")
+	return p.SystemdBus.UnitProperties(ctx, units...)
+}
+
+func (p *guardProbe) RestartUnit(ctx context.Context, unit string) (*sysbus.Job, error) {
+	p.record(ctx, "RestartUnit")
+	return p.SystemdBus.RestartUnit(ctx, unit)
+}
+
+// The guard covers every bus call up to the queueing, each bounded by
+// serviceCallLimit, and is back before the job ends: the answer can wait up
+// to serviceJobLimit, the other guarded routes must not.
+func TestSystemRestartReleasesGuardBeforeTheJobEnds(t *testing.T) {
+	f := useFakeBus(t)
+	f.SetUnit("calaos-home.service", loadedUnit)
+	f.HoldJobs()
+	probe := &guardProbe{SystemdBus: f}
+	models.Bus = probe
+
+	released := make(chan struct{})
+	prev := serviceGuard
+	serviceGuard = func() (func(), error) {
+		release, err := prev()
+		if err != nil {
+			return nil, err
+		}
+		probe.held.Store(true)
+		return func() {
+			probe.held.Store(false)
+			release()
+			close(released)
+		}, nil
+	}
+	t.Cleanup(func() { serviceGuard = prev })
+
+	answer := make(chan error, 1)
+	go func() { answer <- restartHome() }()
+
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Error("guard still held while the job runs")
+	}
+	select {
+	case err := <-answer:
+		t.Errorf("answered before the job ended: %v", err)
+	default:
+	}
+	f.FinishJob("calaos-home.service", "failed")
+	select {
+	case err := <-answer:
+		if err == nil {
+			t.Error("a failed job answered success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer after the job ended")
+	}
+
+	if c := f.Calls(); len(c) != 1 || c[0] != "RestartUnit calaos-home.service" {
+		t.Fatalf("calls %q", c)
+	}
+	if len(probe.unguarded) != 0 {
+		t.Fatalf("outside the guard: %q", probe.unguarded)
+	}
+	if probe.longest > serviceCallLimit {
+		t.Fatalf("a bus call may last %s under the guard", probe.longest)
 	}
 }
 

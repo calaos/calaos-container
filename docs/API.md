@@ -95,7 +95,7 @@ ignored.
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
-| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
+| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, kiosk restart, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
 | `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes), log query limits (see Logs) | `{"retry_after": <seconds>}` |
 | `approver_required` | 409 | the action needs a push code and no approver is enrolled | none |
@@ -142,7 +142,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/update/upgrade-all` | bearer, session allowed | 202 | `<Job>` |
 | POST | `/api/v2/update/upgrade` | bearer, session allowed | 202 | `<Job>`; body `{"package": "<name>"}` |
 | POST | `/api/v2/system/reboot` | bearer, session allowed | 200 | `null`; `409 upgrade_in_progress` while a job runs |
-| POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk) |
+| POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
@@ -772,7 +772,10 @@ re-armed at start, and the upgrade guard refuses it during a job.
 
 Each call that passes check 2 writes an audit line with `unit=<id>`; a refusal at check 1 or 2 has
 no `unit=` (see Audit). `POST /api/v2/system/restart` and the legacy `POST /api/system/restart`
-(restart of the `calaos-home` kiosk) are unchanged.
+(restart of the `calaos-home` kiosk) are not part of these routes, but take the same upgrade
+guard: they answer `409` during a run, before anything is asked of systemd. Unlike
+`services/restart`, they answer once the job has ended. The guard is released as soon as systemd
+has the job, so that a slow restart holds up no other action.
 
 ## Logs
 
@@ -1102,13 +1105,14 @@ synchronous behaviour: they answer when apt ends.
 - One upgrade at a time, whatever started it (versioned job, legacy synchronous route, CLI,
   kiosk). Every run is recorded as a job, so `update/status` shows a run started from the kiosk.
 - While a run is in progress, `POST update/upgrade*`, `GET update/check`,
-  `POST system/reboot` and `POST system/rollback_snapshot` answer `409 upgrade_in_progress`
-  (with `data.job_id`).
+  `POST system/reboot`, `POST system/restart` and `POST system/rollback_snapshot` answer
+  `409 upgrade_in_progress` (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
-  `"package not found"` unchanged. One deliberate exception: the legacy `POST /api/system/reboot`
-  answers `409 {"error": true, "msg": "upgrade already in progress"}` during a run, so that an old
-  kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and ignore the reboot result.
+  `"package not found"` unchanged. Two deliberate exceptions: the legacy `POST /api/system/reboot`
+  and `POST /api/system/restart` answer `409 {"error": true, "msg": "upgrade already in progress"}`
+  during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
+  ignore the result of both.
   The legacy `POST /api/system/rollback_snapshot` is unchanged.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
@@ -1322,7 +1326,7 @@ Go error text.
 | Method | Path | Success | Error |
 |---|---|---|---|
 | POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
-| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
