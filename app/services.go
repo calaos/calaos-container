@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -104,44 +105,121 @@ func (a *AppServer) v2Services(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, fiber.Map{"services": states})
 }
 
-func (a *AppServer) v2ServiceRestart(c *fiber.Ctx) error {
-	var b struct {
-		Unit string `json:"unit"`
+// v2ServiceAction is one of the five action routes. The order of the checks
+// is the contract of docs/API.md: unit= stays out of the audit line of a
+// refused pair, and nothing reaches systemd before the guard.
+func (a *AppServer) v2ServiceAction(verb string) fiber.Handler {
+	refusal := "action not allowed for this service"
+	if verb == models.ActionRestart {
+		refusal = "unknown or non-restartable service"
 	}
-	if err := decodeBody(c, &b); err != nil {
+	return func(c *fiber.Ctx) error {
+		var b struct {
+			Unit string `json:"unit"`
+		}
+		if err := decodeBody(c, &b); err != nil {
+			return err
+		}
+		svc, ok := models.LookupService(b.Unit)
+		if !ok || !svc.Allows(verb) {
+			return errInvalid(refusal)
+		}
+		auditField(c, "unit", svc.ID)
+
+		release, err := serviceGuard()
+		if err != nil {
+			return guardedError(err)
+		}
+		if verb == models.ActionRestart {
+			if err := a.checkRestart(svc); err != nil {
+				release()
+				return err
+			}
+			go restartService(svc, release, restartDelay, models.Bus)
+		} else {
+			defer release()
+			if err := runServiceAction(svc, verb, models.Bus); err != nil {
+				return err
+			}
+		}
+		return sendOK(c, fiber.StatusOK, fiber.Map{"id": svc.ID, "state": serviceActionStates[verb]})
+	}
+}
+
+var serviceActionStates = map[string]string{
+	models.ActionRestart: "restarting",
+	models.ActionStart:   "starting",
+	models.ActionStop:    "stopping",
+	models.ActionEnable:  "enabling",
+	models.ActionDisable: "disabling",
+}
+
+// checkUnit reads the unit afresh: the 1 s cache could still show a unit
+// masked or removed a moment ago as available.
+func checkUnit(unit string, bus sysbus.SystemdBus) error {
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
+	defer cancel()
+	switch err := models.CheckUnit(ctx, bus, unit); {
+	case err == nil:
+		return nil
+	case errors.Is(err, models.ErrUnitNotInstalled):
+		return newAPIError(fiber.StatusConflict, codeServiceUnavailable, "the unit is not installed")
+	case errors.Is(err, models.ErrUnitMasked):
+		return newAPIError(fiber.StatusConflict, codeServiceUnavailable, "the unit is masked")
+	default:
+		return errInternal(err)
+	}
+}
+
+func (a *AppServer) checkRestart(svc models.Service) error {
+	if err := checkUnit(resolveUnit(svc.Unit, models.Bus), models.Bus); err != nil {
 		return err
 	}
-	svc, ok := models.LookupService(b.Unit)
-	if !ok {
-		return errInvalid("unknown or non-restartable service")
+	if svc.ID != "calaos-container" {
+		return nil
 	}
-	auditField(c, "unit", svc.ID)
-	if !svc.Restartable {
-		return errInvalid("unknown or non-restartable service")
+	a.net.mu.Lock()
+	defer a.net.mu.Unlock()
+	if p := a.netLiveLocked(); p != nil {
+		return a.errNetPendingLocked(p)
 	}
+	return nil
+}
 
-	release, err := serviceGuard()
+// runServiceAction hands the job to the background once systemd has it: the
+// answer says nothing about the outcome, and the guard must not be held
+// through a job that lasts up to serviceJobLimit.
+func runServiceAction(svc models.Service, verb string, bus sysbus.SystemdBus) error {
+	unit := resolveUnit(svc.Unit, bus)
+	if err := checkUnit(unit, bus); err != nil {
+		return err
+	}
+	defer resetServicesCache()
+	job, err := models.QueueAction(bus, svc, unit, verb, serviceCallLimit)
 	if err != nil {
-		return guardedError(err)
+		return errInternal(err)
 	}
-	go restartService(svc, release, restartDelay, models.Bus)
+	go waitServiceJob(svc, verb, job)
+	return nil
+}
 
-	return sendOK(c, fiber.StatusOK, fiber.Map{"id": svc.ID, "state": "restarting"})
+func waitServiceJob(svc models.Service, verb string, job *sysbus.Job) {
+	ctx, cancel := context.WithTimeout(context.Background(), serviceJobLimit)
+	defer cancel()
+	if err := job.Wait(ctx); err != nil {
+		logging.Warnf("%s %s: %v", serviceActionStates[verb], svc.ID, err)
+	}
+	resetServicesCache()
 }
 
 // restartService takes its seams as arguments: it outlives the request.
 func restartService(svc models.Service, release func(), delay time.Duration, bus sysbus.SystemdBus) {
 	job, err := queueRestart(svc, release, delay, bus)
 	if err != nil {
-		logging.Warnf("restarting %s: %v", svc.ID, err)
+		logging.Warnf("%s %s: %v", serviceActionStates[models.ActionRestart], svc.ID, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serviceJobLimit)
-	defer cancel()
-	if err := job.Wait(ctx); err != nil {
-		logging.Warnf("restarting %s: %v", svc.ID, err)
-	}
-	resetServicesCache()
+	waitServiceJob(svc, models.ActionRestart, job)
 }
 
 // queueRestart hands the guard back once systemd has the job: holding it
@@ -154,9 +232,6 @@ func queueRestart(svc models.Service, release func(), delay time.Duration, bus s
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
 	defer cancel()
 	job, err := models.QueueRestart(ctx, bus, svc, unit)
-	if err != nil {
-		return nil, err
-	}
 	resetServicesCache()
-	return job, nil
+	return job, err
 }

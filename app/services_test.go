@@ -102,11 +102,12 @@ func TestServicesList(t *testing.T) {
 		t.Fatalf("%d %s", status, body)
 	}
 	for _, want := range []string{
-		`{"error":false,"msg":"ok","data":{"services":[{"id":"calaos-server","unit":"calaos-server.service","kind":"service","restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","since":"2026-10-26T07:41:12Z"},`,
-		`{"id":"calaos-home","unit":"calaos-home.service","kind":"service","restartable":true,"active_state":"failed","sub_state":"failed","enabled":"","since":null}`,
-		`{"id":"ntp","unit":"systemd-timesyncd.service","kind":"service","restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","since":"2026-10-26T07:41:12Z"}`,
-		`{"id":"envoy","unit":"envoy.service","kind":"service","restartable":true,"active_state":"inactive","sub_state":"dead","enabled":"disabled","since":null}`,
-		`{"id":"ssh","unit":"ssh.service","kind":"service","restartable":false,"active_state":"not-found","sub_state":"","enabled":"","since":null}]}}`,
+		`{"error":false,"msg":"ok","data":{"services":[{"id":"calaos-server","unit":"calaos-server.service","kind":"service","actions":["restart"],"restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","startup":"enabled","boot_unit":"calaos-server.service","since":"2026-10-26T07:41:12Z"},`,
+		`{"id":"calaos-home","unit":"calaos-home.service","kind":"service","actions":["restart","start","stop","enable","disable"],"restartable":true,"active_state":"failed","sub_state":"failed","enabled":"","startup":"static","boot_unit":"calaos-home.service","since":null}`,
+		`{"id":"ntp","unit":"systemd-timesyncd.service","kind":"service","actions":["restart"],"restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","startup":"enabled","boot_unit":"systemd-timesyncd.service","since":"2026-10-26T07:41:12Z"}`,
+		`{"id":"envoy","unit":"envoy.service","kind":"service","actions":["restart","start","stop","enable","disable"],"restartable":true,"active_state":"inactive","sub_state":"dead","enabled":"disabled","startup":"disabled","boot_unit":"envoy.service","since":null}`,
+		`{"id":"networkd","unit":"systemd-networkd.service","kind":"service","actions":[],"restartable":false,"active_state":"not-found","sub_state":"","enabled":"","startup":"","boot_unit":"systemd-networkd.service","since":null}`,
+		`{"id":"ssh","unit":"ssh.service","kind":"service","actions":["restart"],"restartable":true,"active_state":"not-found","sub_state":"","enabled":"","startup":"","boot_unit":"ssh.service","since":null}]}}`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %s\nin %s", want, body)
@@ -151,10 +152,14 @@ func TestServicesCacheConcurrent(t *testing.T) {
 	}
 }
 
-// TestServiceRestartAnswersFirst: the answer is out before the bus is called.
+// TestServiceRestartAnswersFirst: the answer is out before any mutation, for
+// the units that carry the answer itself too.
 func TestServiceRestartAnswersFirst(t *testing.T) {
 	cases := []struct{ id, installed, want string }{
 		{"calaos-server", "calaos-server.service", "RestartUnit calaos-server.service"},
+		{"haproxy", "haproxy.service", "RestartUnit haproxy.service"},
+		{"calaos-container", "calaos-container.service", "RestartUnit calaos-container.service"},
+		{"ssh", "ssh.service", "ReloadOrRestartUnit ssh.service"},
 		{"ntp", "chrony.service", "RestartUnit chrony.service"},
 		{"ntp", "systemd-timesyncd.service", "RestartUnit systemd-timesyncd.service"},
 	}
@@ -174,7 +179,7 @@ func TestServiceRestartAnswersFirst(t *testing.T) {
 			if status != 200 || body != `{"error":false,"msg":"ok","data":{"id":"`+id+`","state":"restarting"}}` {
 				t.Fatalf("%d %s", status, body)
 			}
-			if c := f.Calls(); len(c) != 0 || f.Reads("UnitProperties") != 0 {
+			if c := f.Calls(); len(c) != 0 {
 				t.Fatalf("bus reached before the answer: %q", c)
 			}
 			waitRestart(t, done)
@@ -191,23 +196,28 @@ func TestServiceRestartAnswersFirst(t *testing.T) {
 // TestServiceRestartReleasesLock: whatever becomes of the restart, the upgrade
 // lock comes back.
 func TestServiceRestartReleasesLock(t *testing.T) {
-	for name, breakIt := range map[string]func(*sysbustest.Bus){
-		"ok":          func(*sysbustest.Bus) {},
-		"job failed":  func(f *sysbustest.Bus) { f.SetJobResult("mosquitto.service", "failed") },
-		"not queued":  func(f *sysbustest.Bus) { f.Fail("RestartUnit", errors.New("boom")) },
-		"not found":   func(f *sysbustest.Bus) { f.SetUnit("mosquitto.service", sysbus.UnitProperties{LoadState: "not-found"}) },
-		"read failed": func(f *sysbustest.Bus) { f.Fail("UnitProperties", errors.New("boom")) },
+	for name, tc := range map[string]struct {
+		breakIt func(*sysbustest.Bus)
+		want    int
+	}{
+		"ok":         {func(*sysbustest.Bus) {}, 200},
+		"job failed": {func(f *sysbustest.Bus) { f.SetJobResult("mosquitto.service", "failed") }, 200},
+		"not queued": {func(f *sysbustest.Bus) { f.Fail("RestartUnit", errors.New("boom")) }, 200},
+		"not found": {func(f *sysbustest.Bus) {
+			f.SetUnit("mosquitto.service", sysbus.UnitProperties{LoadState: "not-found"})
+		}, 409},
+		"read failed": {func(f *sysbustest.Bus) { f.Fail("UnitProperties", errors.New("boom")) }, 500},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := useFakeBus(t)
 			f.SetUnit("mosquitto.service", loadedUnit)
-			breakIt(f)
+			tc.breakIt(f)
 			done := trackGuard(t)
 			(&stubBackend{}).install(t)
 			a := newHandlerTestApp(t)
 
 			if status, _, body := v2Do2(t, a, httpCase{method: "POST", path: "/api/v2/system/services/restart",
-				ctype: "application/json", body: `{"unit":"mosquitto"}`}); status != 200 {
+				ctype: "application/json", body: `{"unit":"mosquitto"}`}); status != tc.want {
 				t.Fatalf("%d %s", status, body)
 			}
 			waitRestart(t, done)
@@ -233,7 +243,7 @@ func TestServiceRestartUnavailableUnit(t *testing.T) {
 			f.SetUnit("mosquitto.service", p)
 			logs := captureLogs(t)
 
-			restartService(models.Service{ID: "mosquitto", Unit: "mosquitto.service", Kind: models.ServiceKindService}, func() {}, 0, f)
+			restartService(models.Service{ID: "mosquitto", Unit: "mosquitto.service"}, func() {}, 0, f)
 
 			if c := f.Calls(); len(c) != 0 {
 				t.Fatalf("calls %q", c)
@@ -479,8 +489,7 @@ func TestSystemRestartReleasesGuardBeforeTheJobEnds(t *testing.T) {
 func TestServiceRestartRefused(t *testing.T) {
 	const msg = "unknown or non-restartable service"
 	bodies := []string{
-		`{"unit":"calaos-container"}`, `{"unit":"haproxy"}`, `{"unit":"networkd"}`, `{"unit":"ssh"}`,
-		`{"unit":"calaos-server.service"}`, `{"unit":"systemd-networkd.service"}`,
+		`{"unit":"networkd"}`, `{"unit":"calaos-server.service"}`, `{"unit":"systemd-networkd.service"}`,
 		`{"unit":"getty@tty1"}`, `{"unit":"calaos-server@"}`, `{"unit":"calaos-server@x.service"}`,
 		`{"unit":".."}`, `{"unit":"../calaos-server"}`, `{"unit":"calaos-server/../haproxy"}`,
 		`{"unit":"CALAOS-SERVER"}`, `{"unit":" calaos-server"}`, `{"unit":"calaos-server\n"}`,
@@ -519,7 +528,7 @@ func TestServiceRestartDuringUpgrade(t *testing.T) {
 	a := newHandlerTestApp(t)
 
 	for _, s := range models.Services {
-		if !s.Restartable {
+		if !s.Allows(models.ActionRestart) {
 			continue
 		}
 		status, r, _ := v2Do2(t, a, httpCase{method: "POST", path: "/api/v2/system/services/restart",
@@ -544,20 +553,19 @@ func TestServiceRestartAudit(t *testing.T) {
 
 	c.expect("POST", "/api/v2/system/services/restart", `{"unit":"calaos-home"}`, session(s), 200, "")
 	waitRestart(t, done)
-	c.expect("POST", "/api/v2/system/services/restart", `{"unit":"haproxy"}`, session(s), 400, codeInvalidRequest)
+	c.expect("POST", "/api/v2/system/services/restart", `{"unit":"networkd"}`, session(s), 400, codeInvalidRequest)
 	c.expect("POST", "/api/v2/system/services/restart", `{"unit":"../x y"}`, session(s), 400, codeInvalidRequest)
 
 	log := readAudit(t)
 	for _, want := range []string{
 		`result=ok session=` + admin.SessionAuditID(s) + ` unit=calaos-home POST "/api/v2/system/services/restart"`,
-		`result=invalid_request session=` + admin.SessionAuditID(s) + ` unit=haproxy POST "/api/v2/system/services/restart"`,
 		`result=invalid_request session=` + admin.SessionAuditID(s) + ` POST "/api/v2/system/services/restart"`,
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("audit missing %q:\n%s", want, log)
 		}
 	}
-	if strings.Contains(log, "x y") {
-		t.Fatalf("client value in audit:\n%s", log)
+	if strings.Contains(log, "x y") || strings.Contains(log, "unit=networkd") {
+		t.Fatalf("refused value in audit:\n%s", log)
 	}
 }
