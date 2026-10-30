@@ -706,7 +706,7 @@ Why some rows have fewer verbs:
   - `static`: any other value.
 
   It is `""` for `not-found`. For a unit whose `UnitFileState` is `generated` (`olad`, which has a
-  SysV script only), `startup` is `enabled` when `systemd-sysv-install is-enabled <unit>` exits 0,
+  SysV script only), `startup` is `enabled` when `systemd-sysv-install is-enabled olad` exits 0,
   `disabled` otherwise, read in the same 1 s cache.
 - `boot_unit` is the unit that `enable` and `disable` act on. It is `unit` for every row.
 - `since` is when the unit last entered the `active` state (`ActiveEnterTimestamp`), RFC 3339 UTC,
@@ -732,13 +732,16 @@ All five routes are `bearer, session allowed`, take the body `{"unit": "<id>"}` 
 
 - Every D-Bus call has a 10 s limit, which covers the queuing of the job and not its outcome. The
   answer says nothing about the outcome: a client reads it by polling `GET system/services`, and
-  the daemon logs a job that ends in anything but `done`. A client that restarts `calaos-server`, `haproxy` or `calaos-container`
-  loses its connection within seconds.
+  the daemon logs a job that ends in anything but `done`. A client that restarts `calaos-server`,
+  `haproxy` or `calaos-container` loses its connection within seconds.
 - `restart` starts a stopped unit. For `ntp` it first resolves the unit (`LoadState`, cached
   for 1 min). A `reload` of `ssh` runs `sshd -t` first, so a broken
   `sshd_config` leaves the running daemon alone, and open sessions survive.
 - `enable` and `disable` act now and at boot: "start now and at every boot", "stop now and
   at every boot". Enabling without starting, or disabling without stopping, is not offered.
+- `olad` has a SysV script only, and `EnableUnitFiles` does not act on it: its `enable` and
+  `disable` run `systemd-sysv-install enable|disable olad` in place of `EnableUnitFiles` and
+  `DisableUnitFiles`. `Reload`, then `StartUnit` or `StopUnit`, follow as for any other row.
 - A `stop` lasts until the next reboot, or the next update of the package when the unit is
   enabled. A unit that is not enabled is not started by an update, nor by a reboot: `start` and
   `restart` do not change that, `enable` does. An update keeps a disabled unit disabled.
@@ -767,8 +770,9 @@ Checks, in this order, on every one of the five routes:
 A restart of `calaos-container` is safe: sessions are on disk, a pending network change is
 re-armed at start, and the upgrade guard refuses it during a job.
 
-Each call that passes check 2 writes an audit line with `unit=<id>`; a refusal at check 1 or 2 has no `unit=` (see Audit). `POST /api/v2/system/restart` and the
-legacy `POST /api/system/restart` (restart of the `calaos-home` kiosk) are unchanged.
+Each call that passes check 2 writes an audit line with `unit=<id>`; a refusal at check 1 or 2 has
+no `unit=` (see Audit). `POST /api/v2/system/restart` and the legacy `POST /api/system/restart`
+(restart of the `calaos-home` kiosk) are unchanged.
 
 ## Logs
 
@@ -1343,8 +1347,18 @@ The words `apply`, `confirm`, `revert`, `state`, `list` and `trial` are refused 
 by the validator the legacy route shares: it still answers `400`, with the raw error text of the
 validator as `msg` for those six words.
 A failed write or networkd call still answers `500`. The `msg` of a failed write is the raw error
-text, `failed to write network config file: ...`; that of a failed call is a fixed text such as
-`reload networkd failed`, the D-Bus detail going to the daemon log.
+text, `failed to write network config file: ...`; that of a failed call is a fixed text,
+`failed to reload networkd: reload networkd failed` or
+`failed to reconfigure interface: reconfigure interface failed`, the D-Bus detail going to the
+daemon log.
+
+The other legacy routes that reach systemd keep their `500` too, with a fixed `msg`:
+`reboot failed` on `POST /api/system/reboot` and on `POST /api/system/rollback_snapshot` when the
+reboot fails, and `describe network failed` on `GET /api/network/list` and on the interface check of
+`POST /api/network/{intf}`. On `POST /api/system/restart` it is `read unit state failed`,
+`<n> unit states for calaos-home.service`, `unit not available: calaos-home.service`,
+`restart calaos-home.service failed` or `calaos-home.service: job <result>`, `<result>` being
+anything but `done`.
 
 Unknown legacy paths answer fiber's plain-text `404 Cannot GET ...` and `405 Method Not Allowed`.
 A bearer failure answers `401 {"error":true,"msg":"wrong token"}`, or `"unauthorized"` when no

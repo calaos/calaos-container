@@ -96,6 +96,8 @@ type stubResult struct {
 
 // stubBus keeps the reboot and the kiosk restart under the keys of
 // stubBackend.commands, which the goldens share with the routes that do exec.
+// A failure carries the stub's text, so the goldens do not pin the msg of a
+// real bus failure: docs/API.md lists those.
 type stubBus struct{ *sysbustest.Bus }
 
 func newStubBus() *stubBus {

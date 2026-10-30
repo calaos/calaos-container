@@ -65,7 +65,8 @@ type SystemdBus interface {
 	// `networkctl list --json` prints.
 	NetworkDescribe(ctx context.Context) (string, error)
 
-	// Reboot goes through logind, which honours delay inhibitors.
+	// Reboot goes through logind, which honours delay inhibitors. Unlike
+	// `systemctl reboot` it does not fall back on reboot.target if logind fails.
 	Reboot(ctx context.Context) error
 }
 

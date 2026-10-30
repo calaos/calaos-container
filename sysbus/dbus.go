@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	sd "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/godbus/dbus/v5"
@@ -226,6 +227,10 @@ func property[T any](ctx context.Context, obj dbus.BusObject, iface, name string
 	return out, v.Store(&out)
 }
 
+// rtcWarning logs an unreadable hardware clock once: GET system/time is polled,
+// and a box without a clock stays that way.
+var rtcWarning sync.Once
+
 func (b *Bus) Timedate(ctx context.Context) (TimedateState, error) {
 	var st TimedateState
 	err := onSystemBus(ctx, "read time state", func(conn *dbus.Conn) error {
@@ -243,7 +248,7 @@ func (b *Bus) Timedate(ctx context.Context) (TimedateState, error) {
 		// Apart from GetAll on purpose: timedated fails this one getter
 		// when the hardware clock cannot be read.
 		if rtc, err := property[uint64](ctx, obj, timedateName, "RTCTimeUSec"); err != nil {
-			logging.Warnf("reading the hardware clock: %v", err)
+			rtcWarning.Do(func() { logging.Warnf("reading the hardware clock: %v", err) })
 		} else {
 			st.RTCTimeUSec = rtc
 		}
