@@ -3,7 +3,9 @@ module github.com/calaos/calaos-container
 go 1.20
 
 require (
+	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/creack/pty v1.1.24
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/gofiber/contrib/websocket v1.3.4
 	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/gorilla/websocket v1.5.3

@@ -323,7 +323,7 @@ func (a *AppServer) v2LogsQuery(c *fiber.Ctx) error {
 		return errLogsRateLimited()
 	}
 	for i := range req.q.Sources {
-		req.q.Sources[i].Unit = resolveUnit(req.q.Sources[i].Unit, runServiceCommand)
+		req.q.Sources[i].Unit = resolveUnit(req.q.Sources[i].Unit, models.Bus)
 	}
 
 	res, err := readJournal(req)

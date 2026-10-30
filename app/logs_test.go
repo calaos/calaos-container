@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/calaos/calaos-container/models"
+	"github.com/calaos/calaos-container/sysbus"
 )
 
 // The fake prints FAKE_JOURNAL_OUT as is: tests write it in the order
@@ -216,18 +218,22 @@ func TestLogsQueryNTPUnit(t *testing.T) {
 	clk := useLogClock(t)
 	j := useFakeJournalctl(t)
 	j.write()
-	f := useFakeSystemctl(t)
+	f := useFakeBus(t)
 	(&stubBackend{}).install(t)
 	a := newHandlerTestApp(t)
 
-	for _, tc := range []struct{ show, unit string }{
-		{"not-found\n\nloaded\n", "systemd-timesyncd.service"},
-		{"loaded\n\nnot-found\n", "chrony.service"},
+	loaded := sysbus.UnitProperties{LoadState: "loaded"}
+	notFound := sysbus.UnitProperties{LoadState: "not-found"}
+	for _, tc := range []struct {
+		chrony, timesyncd sysbus.UnitProperties
+		unit              string
+	}{
+		{notFound, loaded, "systemd-timesyncd.service"},
+		{loaded, notFound, "chrony.service"},
 	} {
 		resetServicesCache()
-		if err := os.WriteFile(f.show, []byte(tc.show), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		f.SetUnit("chrony.service", tc.chrony)
+		f.SetUnit("systemd-timesyncd.service", tc.timesyncd)
 		for i := 0; i < 2; i++ {
 			clk.Advance(time.Second)
 			if status, _, _ := logsQuery(t, a, `{"sources":["ntp","ssh"]}`, nil); status != 200 {
@@ -239,13 +245,15 @@ func TestLogsQueryNTPUnit(t *testing.T) {
 			}
 		}
 	}
-	if c := f.calls(t); len(c) != 2 {
-		t.Fatalf("calls %q", c)
+	if n := f.Reads("UnitProperties"); n != 2 {
+		t.Fatalf("%d reads", n)
 	}
 
-	// systemctl failing leaves the first candidate.
+	// A failed read leaves the first candidate.
 	resetServicesCache()
-	t.Setenv("FAKE_SYSTEMCTL_RC", "1")
+	f.SetUnit("chrony.service", notFound)
+	f.SetUnit("systemd-timesyncd.service", loaded)
+	f.Fail("UnitProperties", errors.New("bus down"))
 	clk.Advance(time.Second)
 	logsQuery(t, a, `{"sources":["ntp"]}`, nil)
 	if argv := j.argv(); argv[len(argv)-1] != "_SYSTEMD_UNIT=chrony.service" {

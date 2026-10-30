@@ -3,88 +3,36 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/calaos/calaos-container/app/admin"
 	logger "github.com/calaos/calaos-container/log"
+	"github.com/calaos/calaos-container/sysbus"
+	"github.com/calaos/calaos-container/sysbus/sysbustest"
 )
 
-// The fake keeps the zone and the NTP switch in files, as timedated would.
-const fakeTimedatectl = `#!/bin/sh
-D="$FAKE_TD_DIR"
-echo "$*" >> "$D/calls"
-if [ "$1" = "$FAKE_TD_FAIL" ]; then echo "Failed to $1: boom" >&2; exit 1; fi
-case "$1" in
-show)
-	printf 'Timezone=%s\nLocalRTC=no\nCanNTP=yes\nNTP=%s\nNTPSynchronized=%s\nTimeUSec=Sun 2026-10-25 09:12:03 UTC\nRTCTimeUSec=%s\n' \
-		"$(cat "$D/tz")" "$(cat "$D/ntp")" "$(cat "$D/sync")" "$(cat "$D/rtc")" ;;
-list-timezones) printf 'Africa/Abidjan\nEurope/Paris\nUTC\n' ;;
-set-timezone) echo "$2" > "$D/tz" ;;
-set-ntp) if [ "$2" = true ]; then echo yes > "$D/ntp"; else echo no > "$D/ntp"; fi ;;
-set-time) ;;
-*) exit 2 ;;
-esac
-`
+var fakeRTC = uint64(time.Date(2026, 10, 25, 9, 12, 1, 0, time.UTC).UnixMicro())
 
-type fakeTimedate struct {
-	t   *testing.T
-	dir string
-}
-
-func useFakeTimedatectl(t *testing.T) *fakeTimedate {
+func useFakeTimedate(t *testing.T) *sysbustest.Bus {
 	t.Helper()
-	bin := t.TempDir()
-	// #nosec G306 -- the fake must be executable.
-	if err := os.WriteFile(filepath.Join(bin, "timedatectl"), []byte(fakeTimedatectl), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	f := &fakeTimedate{t: t, dir: t.TempDir()}
-	f.set("tz", "UTC")
-	f.set("ntp", "yes")
-	f.set("sync", "yes")
-	f.set("rtc", "Sun 2026-10-25 09:12:01 UTC")
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("FAKE_TD_DIR", f.dir)
-	t.Setenv("FAKE_TD_FAIL", "")
+	f := useFakeBus(t)
+	f.SetTimedate(sysbus.TimedateState{Timezone: "UTC", NTP: true, NTPSynchronized: true, RTCTimeUSec: fakeRTC})
+	f.SetTimezones("Africa/Abidjan", "Europe/Paris", "UTC")
 	resetTimezonesCache()
 	resetBoxTimeCache()
 	t.Cleanup(func() { resetTimezonesCache(); resetBoxTimeCache() })
 	return f
 }
 
-func (f *fakeTimedate) set(name, v string) {
-	f.t.Helper()
-	if err := os.WriteFile(filepath.Join(f.dir, name), []byte(v+"\n"), 0o600); err != nil {
-		f.t.Fatal(err)
-	}
-}
-
-// calls lists the commands that change something.
-func (f *fakeTimedate) calls() []string {
-	f.t.Helper()
-	b, _ := os.ReadFile(filepath.Join(f.dir, "calls"))
-	var out []string
-	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		if strings.HasPrefix(l, "set-") {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
-func (f *fakeTimedate) count(cmd string) int {
-	b, _ := os.ReadFile(filepath.Join(f.dir, "calls"))
-	return strings.Count(string(b), cmd+"\n")
-}
-
 func TestSystemTimeGet(t *testing.T) {
 	clk := useAdminClock(t)
-	f := useFakeTimedatectl(t)
-	f.set("sync", "no")
+	f := useFakeTimedate(t)
+	f.SetTimedate(sysbus.TimedateState{Timezone: "UTC", NTP: true, RTCTimeUSec: fakeRTC})
 	c := newAdminApp(t)
 
 	r := c.expect("GET", "/api/v2/system/time", "", nil, 200, "")
@@ -101,11 +49,11 @@ func TestSystemTimeGet(t *testing.T) {
 		}
 	}
 
-	// Cached for 1 s: a poll does not run timedatectl each time.
-	f.set("rtc", "")
+	// Cached for 1 s: a poll does not reach timedated each time.
+	f.SetTimedate(sysbus.TimedateState{Timezone: "UTC", NTP: true})
 	c.expect("GET", "/api/v2/system/time", "", nil, 200, "")
-	if n := f.count("show"); n != 1 {
-		t.Fatalf("%d show calls", n)
+	if n := f.Reads("Timedate"); n != 1 {
+		t.Fatalf("%d reads", n)
 	}
 	resetBoxTimeCache()
 	if r = c.expect("GET", "/api/v2/system/time", "", nil, 200, ""); !strings.Contains(string(r.Data), `"rtc":null`) {
@@ -114,17 +62,19 @@ func TestSystemTimeGet(t *testing.T) {
 
 	r = c.expect("GET", "/api/v2/system/timezones", "", nil, 200, "")
 	c.expect("GET", "/api/v2/system/timezones", "", nil, 200, "")
-	if string(r.Data) != `{"timezones":["Africa/Abidjan","Europe/Paris","UTC"]}` || f.count("list-timezones") != 1 {
-		t.Fatalf("%s, %d calls", r.Data, f.count("list-timezones"))
+	if string(r.Data) != `{"timezones":["Africa/Abidjan","Europe/Paris","UTC"]}` || f.Reads("ListTimezones") != 1 {
+		t.Fatalf("%s, %d reads", r.Data, f.Reads("ListTimezones"))
 	}
 
-	t.Setenv("FAKE_TD_FAIL", "show")
+	f.Fail("Timedate", errors.New(secretDetail))
 	resetBoxTimeCache()
-	c.expect("GET", "/api/v2/system/time", "", nil, 500, codeInternal)
+	if r = c.expect("GET", "/api/v2/system/time", "", nil, 500, codeInternal); strings.Contains(r.Msg, "SECRET") {
+		t.Fatalf("%s", r.Msg)
+	}
 }
 
 func TestSystemTimeSet(t *testing.T) {
-	f := useFakeTimedatectl(t)
+	f := useFakeTimedate(t)
 	c := newAdminApp(t)
 	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
 	s := c.verify(adminPw)
@@ -146,7 +96,7 @@ func TestSystemTimeSet(t *testing.T) {
 			t.Errorf("%s: %q, want %q", body, r.Msg, msg)
 		}
 	}
-	if calls := f.calls(); len(calls) != 0 {
+	if calls := f.Calls(); len(calls) != 0 {
 		t.Fatalf("a refused request changed the box: %q", calls)
 	}
 
@@ -156,8 +106,9 @@ func TestSystemTimeSet(t *testing.T) {
 	if d["timezone"] != "Europe/Paris" || d["ntp"] != false || d["restart_required"] != true {
 		t.Fatalf("%s", r.Data)
 	}
-	want := []string{"set-timezone Europe/Paris", "set-ntp false", "set-time 2026-10-25 09:12:03 UTC"}
-	if got := f.calls(); strings.Join(got, "|") != strings.Join(want, "|") {
+	usec := time.Date(2026, 10, 25, 9, 12, 3, 0, time.UTC).UnixMicro()
+	want := []string{"SetTimezone Europe/Paris", "SetNTP false", fmt.Sprintf("SetTime %d", usec)}
+	if got := f.Calls(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls %q", got)
 	}
 
@@ -175,23 +126,23 @@ func TestSystemTimeSet(t *testing.T) {
 }
 
 func TestSystemTimeSetPartialFailure(t *testing.T) {
-	useFakeTimedatectl(t)
+	f := useFakeTimedate(t)
 	c := newAdminApp(t)
 	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
 	s := c.verify(adminPw)
 
-	t.Setenv("FAKE_TD_FAIL", "set-ntp")
+	f.Fail("SetNTP", errors.New("boom"))
 	r := c.expect("POST", "/api/v2/system/time", `{"timezone":"Africa/Abidjan","ntp":false}`, session(s), 500, codeInternal)
 	if string(r.Data) != `{"applied":["timezone"],"failed":"ntp"}` || strings.Contains(r.Msg, "boom") {
 		t.Fatalf("%s %s", r.Msg, r.Data)
 	}
 	// The applied step stays: the GET shows the real state.
-	t.Setenv("FAKE_TD_FAIL", "")
+	f.Fail("SetNTP", nil)
 	if r = c.expect("GET", "/api/v2/system/time", "", nil, 200, ""); !strings.Contains(string(r.Data), `"timezone":"Africa/Abidjan","ntp":true`) {
 		t.Fatalf("%s", r.Data)
 	}
 
-	t.Setenv("FAKE_TD_FAIL", "set-timezone")
+	f.Fail("SetTimezone", errors.New("boom"))
 	r = c.expect("POST", "/api/v2/system/time", `{"timezone":"Europe/Paris"}`, nil, 500, codeInternal)
 	if string(r.Data) != `{"applied":[],"failed":"timezone"}` {
 		t.Fatalf("%s", r.Data)
@@ -203,13 +154,42 @@ func TestSystemTimeSetPartialFailure(t *testing.T) {
 	}
 }
 
+// A failed step stops the sequence: the time is never set on a clock whose
+// NTP daemon could not be stopped, and neither follows a failed timezone.
+func TestSystemTimeSetStopsAtFirstError(t *testing.T) {
+	const body = `{"timezone":"Europe/Paris","ntp":false,"time":"2026-10-25T09:12:03Z"}`
+	for _, tc := range []struct {
+		fail, data string
+		want       []string
+	}{
+		{"SetTimezone", `{"applied":[],"failed":"timezone"}`, []string{"SetTimezone Europe/Paris"}},
+		{"SetNTP", `{"applied":["timezone"],"failed":"ntp"}`, []string{"SetTimezone Europe/Paris", "SetNTP false"}},
+	} {
+		t.Run(tc.fail, func(t *testing.T) {
+			f := useFakeTimedate(t)
+			c := newAdminApp(t)
+			c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")
+			s := c.verify(adminPw)
+
+			f.Fail(tc.fail, errors.New(secretDetail))
+			r := c.expect("POST", "/api/v2/system/time", body, session(s), 500, codeInternal)
+			if string(r.Data) != tc.data || strings.Contains(r.Msg, "SECRET") {
+				t.Fatalf("%s %s", r.Msg, r.Data)
+			}
+			if got := f.Calls(); strings.Join(got, "|") != strings.Join(tc.want, "|") {
+				t.Fatalf("calls %q", got)
+			}
+		})
+	}
+}
+
 // The webapp polls these: a line each would flood audit.log. Changes and
 // refused sessions are still recorded.
 func TestPolledReadsNotAudited(t *testing.T) {
 	var logs bytes.Buffer
 	logger.Logger.SetOutput(&logs)
 	t.Cleanup(func() { logger.Logger.SetOutput(os.Stdout) })
-	useFakeTimedatectl(t)
+	useFakeTimedate(t)
 	f := useFakeJournalctl(t)
 	f.write()
 	clk := useAdminClock(t)

@@ -1,9 +1,13 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/calaos/calaos-container/sysbus"
+	"github.com/calaos/calaos-container/sysbus/sysbustest"
 )
 
 func TestServicesTable(t *testing.T) {
@@ -30,111 +34,199 @@ func TestServicesTable(t *testing.T) {
 	}
 }
 
-func TestRestartArgs(t *testing.T) {
-	if got := strings.Join(Service{"x", "x.service", ServiceKindOneshot, true}.RestartArgs(), " "); got != "start --no-block x.service" {
-		t.Fatalf("oneshot %q", got)
-	}
-	if s, _ := LookupService("mosquitto"); strings.Join(s.RestartArgs(), " ") != "restart --no-block mosquitto.service" {
-		t.Fatalf("service %q", s.RestartArgs())
-	}
-}
+var (
+	loaded   = sysbus.UnitProperties{LoadState: "loaded", ActiveState: "active", SubState: "running", UnitFileState: "enabled"}
+	notFound = sysbus.UnitProperties{LoadState: "not-found", ActiveState: "inactive", SubState: "dead"}
+)
 
-func TestParseResolvedUnit(t *testing.T) {
-	if got := strings.Join(ResolveUnitArgs("chrony.service"), " "); got != "show --no-pager -p LoadState --value chrony.service systemd-timesyncd.service" {
-		t.Fatalf("args %q", got)
-	}
-	for out, want := range map[string]string{
-		"loaded\n\nnot-found\n":    "chrony.service",
-		"loaded\n\nloaded\n":       "chrony.service",
-		"not-found\n\nloaded\n":    "systemd-timesyncd.service",
-		"not-found\n\nmasked\n":    "systemd-timesyncd.service",
-		"not-found\n\nnot-found\n": "chrony.service",
-		"loaded\n":                 "chrony.service",
-		"":                         "chrony.service",
+func TestResolveUnit(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name              string
+		chrony, timesyncd sysbus.UnitProperties
+		want              string
+	}{
+		{"first installed", loaded, loaded, "chrony.service"},
+		{"fallback", notFound, loaded, "systemd-timesyncd.service"},
+		{"none installed", notFound, notFound, "chrony.service"},
+		// A masked unit is installed: the fallback must not win over it.
+		{"masked first", sysbus.UnitProperties{LoadState: "masked"}, loaded, "chrony.service"},
 	} {
-		if got := ParseResolvedUnit("chrony.service", out); got != want {
-			t.Fatalf("%q: %q, want %q", out, got, want)
-		}
-	}
-	if HasUnitFallbacks("ssh.service") || ParseResolvedUnit("ssh.service", "not-found\n") != "ssh.service" {
-		t.Fatal("a unit without fallbacks was resolved")
-	}
-}
-
-func TestParseServiceStatesFallback(t *testing.T) {
-	blocks := map[string]string{
-		"chrony.service":            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nActiveEnterTimestamp=\n\n",
-		"systemd-timesyncd.service": "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nActiveEnterTimestamp=@1793000472\n\n",
-	}
-	var b strings.Builder
-	for _, s := range Services {
-		for _, u := range UnitCandidates(s.Unit) {
-			if blk, ok := blocks[u]; ok {
-				b.WriteString(blk)
-			} else {
-				b.WriteString("LoadState=not-found\n\n")
+		t.Run(tc.name, func(t *testing.T) {
+			f := sysbustest.New()
+			f.SetUnit("chrony.service", tc.chrony)
+			f.SetUnit("systemd-timesyncd.service", tc.timesyncd)
+			got, err := ResolveUnit(ctx, f, "chrony.service")
+			if err != nil || got != tc.want {
+				t.Fatalf("%q, %v", got, err)
 			}
-		}
+		})
 	}
-	states, err := ParseServiceStates(b.String())
-	if err != nil {
-		t.Fatal(err)
+
+	f := sysbustest.New()
+	f.Fail("UnitProperties", errors.New("boom"))
+	if got, err := ResolveUnit(ctx, f, "chrony.service"); err == nil || got != "chrony.service" {
+		t.Fatalf("%q, %v", got, err)
 	}
-	for _, st := range states {
-		if st.ID == "ntp" && (st.Unit != "systemd-timesyncd.service" || st.ActiveState != "active" || st.Enabled != "enabled") {
-			t.Fatalf("%+v", st)
-		}
-	}
-	if _, err := ParseServiceStates(strings.Repeat("LoadState=not-found\n\n", len(Services))); err == nil {
-		t.Fatal("one block per row accepted, the fallbacks are missing")
+	if got, err := ResolveUnit(ctx, shortBus{f}, "chrony.service"); err == nil || got != "chrony.service" {
+		t.Fatalf("short reply: %q, %v", got, err)
 	}
 }
 
-func TestParseServiceStatesFirstCandidateWins(t *testing.T) {
-	var b strings.Builder
-	for _, s := range Services {
-		for _, u := range UnitCandidates(s.Unit) {
-			b.WriteString("LoadState=loaded\nActiveState=active\nSubState=" + u + "\n\n")
-		}
-	}
-	states, err := ParseServiceStates(b.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, st := range states {
-		if st.ID == "ntp" && (st.Unit != "chrony.service" || st.SubState != "chrony.service") {
-			t.Fatalf("%+v", st)
-		}
-	}
+// shortBus answers fewer rows than asked, which must not shift the table.
+type shortBus struct{ sysbus.SystemdBus }
+
+func (shortBus) UnitProperties(context.Context, ...string) ([]sysbus.UnitProperties, error) {
+	return nil, nil
 }
 
-func TestParseServiceStatesNotFound(t *testing.T) {
-	var b strings.Builder
-	for _, s := range Services {
-		for _, u := range UnitCandidates(s.Unit) {
-			b.WriteString("Id=" + u + "\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nActiveEnterTimestamp=\n\n")
-		}
-	}
-	states, err := ParseServiceStates(b.String())
+func TestServiceStates(t *testing.T) {
+	f := sysbustest.New()
+	f.SetUnit("calaos-server.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: "active", SubState: "running",
+		UnitFileState: "enabled", ActiveEnterTimestamp: 1793000472*1_000_000 + 123456})
+	f.SetUnit("chrony.service", notFound)
+	f.SetUnit("systemd-timesyncd.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: "inactive", SubState: "dead", UnitFileState: "disabled"})
+	f.SetUnit("grafana.service", sysbus.UnitProperties{LoadState: "masked", ActiveState: "inactive", SubState: "dead", UnitFileState: "masked"})
+
+	states, err := ServiceStates(context.Background(), f)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(states) != len(Services) || f.Reads("UnitProperties") != 1 {
+		t.Fatalf("%d rows, %d reads", len(states), f.Reads("UnitProperties"))
+	}
+	byID := map[string]ServiceState{}
 	for i, st := range states {
-		if st.ID != Services[i].ID || st.Unit != Services[i].Unit || st.ActiveState != "not-found" || st.SubState != "" || st.Enabled != "" || st.Since != nil {
+		if st.ID != Services[i].ID {
+			t.Fatalf("row %d is %s", i, st.ID)
+		}
+		byID[st.ID] = st
+	}
+
+	if st := byID["calaos-server"]; st.Since == nil || *st.Since != "2026-10-26T07:41:12Z" || st.ActiveState != "active" ||
+		st.SubState != "running" || st.Enabled != "enabled" {
+		t.Fatalf("%+v", st)
+	}
+	if st := byID["ntp"]; st.Unit != "systemd-timesyncd.service" || st.ActiveState != "inactive" || st.Enabled != "disabled" || st.Since != nil {
+		t.Fatalf("%+v", st)
+	}
+	if st := byID["ssh"]; st != (ServiceState{ID: "ssh", Unit: "ssh.service", Kind: ServiceKindService, ActiveState: "not-found"}) {
+		t.Fatalf("%+v", st)
+	}
+	// Masked stays a normal row: only a restart refuses it.
+	if st := byID["grafana"]; st.ActiveState != "inactive" || st.Enabled != "masked" {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestServiceStatesFirstCandidateWins(t *testing.T) {
+	f := sysbustest.New()
+	f.SetUnit("chrony.service", loaded)
+	f.SetUnit("systemd-timesyncd.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: "inactive"})
+	states, err := ServiceStates(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range states {
+		if st.ID == "ntp" && (st.Unit != "chrony.service" || st.ActiveState != "active") {
 			t.Fatalf("%+v", st)
 		}
 	}
 }
 
-func TestParseServiceStatesBadTimestamp(t *testing.T) {
-	var b strings.Builder
-	for _, s := range Services {
-		for range UnitCandidates(s.Unit) {
-			b.WriteString("LoadState=loaded\nActiveEnterTimestamp=Sat 2026-10-25 07:41:12 CET\n\n")
-		}
+func TestServiceStatesFailure(t *testing.T) {
+	f := sysbustest.New()
+	f.Fail("UnitProperties", errors.New("boom"))
+	if _, err := ServiceStates(context.Background(), f); err == nil {
+		t.Fatal("no error")
 	}
-	if _, err := ParseServiceStates(b.String()); err == nil {
-		t.Fatal("a non-unix timestamp was accepted")
+	if _, err := ServiceStates(context.Background(), shortBus{f}); err == nil {
+		t.Fatal("no error on a short reply")
+	}
+}
+
+func TestCheckUnit(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		p    sysbus.UnitProperties
+		ok   bool
+	}{
+		{"loaded", loaded, true},
+		{"disabled", sysbus.UnitProperties{LoadState: "loaded", UnitFileState: "disabled"}, true},
+		{"sysv only", sysbus.UnitProperties{LoadState: "loaded"}, true},
+		{"not found", notFound, false},
+		{"masked", sysbus.UnitProperties{LoadState: "masked"}, false},
+		{"unit file masked", sysbus.UnitProperties{LoadState: "loaded", UnitFileState: "masked"}, false},
+		{"masked in run", sysbus.UnitProperties{LoadState: "loaded", UnitFileState: "masked-runtime"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := sysbustest.New()
+			f.SetUnit("x.service", tc.p)
+			err := CheckUnit(ctx, f, "x.service")
+			if tc.ok != (err == nil) || (err != nil && !errors.Is(err, ErrUnitUnavailable)) {
+				t.Fatalf("%v", err)
+			}
+		})
+	}
+
+	f := sysbustest.New()
+	boom := errors.New("boom")
+	f.Fail("UnitProperties", boom)
+	if err := CheckUnit(ctx, f, "x.service"); !errors.Is(err, boom) {
+		t.Fatalf("%v", err)
+	}
+	if err := CheckUnit(ctx, shortBus{f}, "x.service"); err == nil {
+		t.Fatal("no error on a short reply")
+	}
+}
+
+func TestQueueRestart(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		s    Service
+		want string
+	}{
+		{"service", Service{ID: "mosquitto", Kind: ServiceKindService}, "RestartUnit x.service"},
+		{"oneshot", Service{ID: "backup", Kind: ServiceKindOneshot}, "StartUnit x.service"},
+		{"ssh", Service{ID: "ssh", Kind: ServiceKindService}, "ReloadOrRestartUnit x.service"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := sysbustest.New()
+			f.SetUnit("x.service", loaded)
+			job, err := QueueRestart(ctx, f, tc.s, "x.service")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := job.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if c := f.Calls(); len(c) != 1 || c[0] != tc.want {
+				t.Fatalf("%q", c)
+			}
+		})
+	}
+}
+
+func TestQueueRestartRefused(t *testing.T) {
+	ctx := context.Background()
+	s := Service{ID: "mosquitto", Kind: ServiceKindService}
+
+	f := sysbustest.New()
+	if _, err := QueueRestart(ctx, f, s, "x.service"); !errors.Is(err, ErrUnitUnavailable) {
+		t.Fatalf("not found: %v", err)
+	}
+	f.SetUnit("x.service", sysbus.UnitProperties{LoadState: "masked"})
+	if _, err := QueueRestart(ctx, f, s, "x.service"); !errors.Is(err, ErrUnitUnavailable) {
+		t.Fatalf("masked: %v", err)
+	}
+	f.Fail("UnitProperties", errors.New("boom"))
+	if _, err := QueueRestart(ctx, f, s, "x.service"); err == nil {
+		t.Fatal("no error on a failed read")
+	}
+	if c := f.Calls(); len(c) != 0 {
+		t.Fatalf("%q", c)
 	}
 }
 

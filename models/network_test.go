@@ -6,43 +6,17 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/calaos/calaos-container/models/structs"
+	"github.com/calaos/calaos-container/sysbus/sysbustest"
 )
 
 const sharedUnit = "[Match]\nName=en*\n\n[Network]\nDHCP=yes\n"
 
-type fakeNetworkctl struct {
-	mu    sync.Mutex
-	calls []string
-	fail  map[string]bool
-}
-
-func (f *fakeNetworkctl) run(args ...string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cmd := strings.Join(args, " ")
-	f.calls = append(f.calls, cmd)
-	if f.fail[cmd] {
-		return errors.New("networkctl " + cmd + " failed")
-	}
-	return nil
-}
-
-func (f *fakeNetworkctl) take() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	c := f.calls
-	f.calls = nil
-	return c
-}
-
 // useNetDirs points networkd's directories at a temp dir holding the image's
-// shared config.network, and networkctl at a fake.
-func useNetDirs(t *testing.T) (etc, run string, nc *fakeNetworkctl) {
+// shared config.network, and the bus at a fake.
+func useNetDirs(t *testing.T) (etc, run string, nc *sysbustest.Bus) {
 	t.Helper()
 	root := t.TempDir()
 	etc, run = filepath.Join(root, "etc"), filepath.Join(root, "run")
@@ -52,10 +26,10 @@ func useNetDirs(t *testing.T) (etc, run string, nc *fakeNetworkctl) {
 	if err := os.WriteFile(filepath.Join(etc, "config.network"), []byte(sharedUnit), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	nc = &fakeNetworkctl{fail: map[string]bool{}}
-	prevEtc, prevRun, prevCtl := NetworkEtcDir, NetworkRunDir, Networkctl
-	NetworkEtcDir, NetworkRunDir, Networkctl = etc, run, nc.run
-	t.Cleanup(func() { NetworkEtcDir, NetworkRunDir, Networkctl = prevEtc, prevRun, prevCtl })
+	nc = sysbustest.New()
+	prevEtc, prevRun, prevBus := NetworkEtcDir, NetworkRunDir, Bus
+	NetworkEtcDir, NetworkRunDir, Bus = etc, run, nc
+	t.Cleanup(func() { NetworkEtcDir, NetworkRunDir, Bus = prevEtc, prevRun, prevBus })
 	return etc, run, nc
 }
 
@@ -100,7 +74,7 @@ func TestConfigureNetInterfaceWritesItsOwnUnit(t *testing.T) {
 	if got := dirFiles(t, etc); !reflect.DeepEqual(got, []string{"calaos_eth0.network", "config.network"}) {
 		t.Fatalf("/etc holds %v", got)
 	}
-	if got := dirFiles(t, run); got != nil {
+	if got := dirFiles(t, run); len(got) != 0 {
 		t.Fatalf("/run holds %v", got)
 	}
 	want := readFile(t, "testdata/calaos_eth0_static.network")
@@ -114,8 +88,8 @@ func TestConfigureNetInterfaceWritesItsOwnUnit(t *testing.T) {
 	if err != nil || fi.Mode().Perm() != 0o644 {
 		t.Fatalf("unit mode %v %v", fi, err)
 	}
-	if got := nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 
 	// A second interface gets its own file; the first one is untouched.
@@ -143,11 +117,11 @@ func TestConfigureNetInterfaceRejectsWithoutWriting(t *testing.T) {
 	if got := dirFiles(t, etc); !reflect.DeepEqual(got, []string{"config.network"}) {
 		t.Fatalf("/etc holds %v", got)
 	}
-	if got := dirFiles(t, run); got != nil {
+	if got := dirFiles(t, run); len(got) != 0 {
 		t.Fatalf("/run holds %v", got)
 	}
-	if got := nc.take(); got != nil {
-		t.Fatalf("networkctl ran: %v", got)
+	if got := nc.Take(); len(got) != 0 {
+		t.Fatalf("network calls ran: %v", got)
 	}
 }
 
@@ -169,8 +143,8 @@ func TestNetworkTrialConfirm(t *testing.T) {
 	if got := readFile(t, filepath.Join(run, "00-calaos-trial-eth0.network")); got != want {
 		t.Fatalf("trial:\n%s", got)
 	}
-	if got := nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 
 	if err := ConfirmNetworkTrial("eth0"); err != nil {
@@ -189,8 +163,8 @@ func TestNetworkTrialConfirm(t *testing.T) {
 		t.Fatal("config.network changed")
 	}
 	// Same content: no reconfigure.
-	if got := nc.take(); !reflect.DeepEqual(got, []string{"reload"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload"}) {
+		t.Fatalf("network calls %v", got)
 	}
 
 	if err := ConfirmNetworkTrial("eth0"); err == nil {
@@ -212,17 +186,17 @@ func TestNetworkTrialRevert(t *testing.T) {
 	if got := dirFiles(t, etc); !reflect.DeepEqual(got, []string{"config.network"}) {
 		t.Fatalf("/etc holds %v", got)
 	}
-	if got := nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 
 	// Every step runs even when one fails, and a missing trial is no error.
-	nc.fail["reload"] = true
+	nc.Fail("NetworkReload", errors.New("boom"))
 	if err := RevertNetworkTrial("eth0"); err == nil {
 		t.Fatal("failed reload not reported")
 	}
-	if got := nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 }
 
@@ -314,7 +288,7 @@ func TestNetworkTrialKeptAndListed(t *testing.T) {
 	if err := RevertNetworkTrial("eth0"); !errors.Is(err, ErrTrialKept) {
 		t.Fatalf("revert of a stuck trial: %v", err)
 	}
-	if got := nc.take(); got != nil {
-		t.Fatalf("networkctl ran: %v", got)
+	if got := nc.Take(); len(got) != 0 {
+		t.Fatalf("network calls ran: %v", got)
 	}
 }

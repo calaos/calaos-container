@@ -24,8 +24,24 @@ func legacyOK(c *fiber.Ctx) error {
 }
 
 func reboot() error {
-	_, err := runCommand("systemctl", "reboot")
-	return err
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
+	defer cancel()
+	return models.Bus.Reboot(ctx)
+}
+
+// restartHome waits for the job, so that a failed restart reaches the client.
+func restartHome() error {
+	svc, ok := models.LookupService("calaos-home")
+	if !ok {
+		return errors.New("calaos-home is not in the service table")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceJobLimit)
+	defer cancel()
+	job, err := models.QueueRestart(ctx, models.Bus, svc, svc.Unit)
+	if err != nil {
+		return err
+	}
+	return job.Wait(ctx)
 }
 
 // apiSystemReboot answers 409 during an upgrade, the one deliberate change to
@@ -42,7 +58,7 @@ func (a *AppServer) apiSystemReboot(c *fiber.Ctx) error {
 }
 
 func (a *AppServer) apiSystemRestart(c *fiber.Ctx) error {
-	if _, err := runCommand("systemctl", "restart", "calaos-home"); err != nil {
+	if err := restartHome(); err != nil {
 		return legacyError(c, fiber.StatusInternalServerError, err)
 	}
 	return legacyOK(c)
@@ -360,7 +376,7 @@ func (a *AppServer) v2SystemReboot(c *fiber.Ctx) error {
 }
 
 func (a *AppServer) v2SystemRestart(c *fiber.Ctx) error {
-	if _, err := runCommand("systemctl", "restart", "calaos-home"); err != nil {
+	if err := restartHome(); err != nil {
 		return errInternal(err)
 	}
 	return sendOK(c, fiber.StatusOK, nil)

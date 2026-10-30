@@ -27,7 +27,7 @@ func (a *AppServer) apiNetIntfConfigure(c *fiber.Ctx) (err error) {
 	intf := c.Params("intf")
 
 	// The interface name is interpolated into a path under
-	// /etc/systemd/network/ and passed to networkctl: check its syntax before
+	// /etc/systemd/network/ and passed to networkd: check its syntax before
 	// doing anything else.
 	if err := models.ValidateInterfaceName(intf); err != nil {
 		return legacyError(c, fiber.StatusBadRequest, err)

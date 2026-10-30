@@ -3,7 +3,8 @@ package app
 import "github.com/calaos/calaos-container/models"
 
 // Handlers reach the system only through these variables, so handler tests
-// (legacy golden tests included) can stub apt, dpkg, systemctl and friends.
+// (legacy golden tests included) can stub apt, dpkg and friends; the system
+// bus is reached through models.Bus.
 var (
 	runCommand            = models.RunCommand
 	checkUpdates          = models.CheckUpdates

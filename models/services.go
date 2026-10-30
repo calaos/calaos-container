@@ -1,17 +1,24 @@
 package models
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/calaos/calaos-container/sysbus"
 )
 
 const (
 	ServiceKindService = "service"
 	ServiceKindOneshot = "oneshot"
+
+	loadStateNotFound = "not-found"
 )
+
+// Bus is the system bus. Tests replace it with sysbustest.Bus.
+var Bus sysbus.SystemdBus = sysbus.New()
 
 // Service is a row of the allowlist. Unit names only ever come from here.
 type Service struct {
@@ -56,27 +63,28 @@ func UnitCandidates(unit string) []string {
 // HasUnitFallbacks tells whether unit must be resolved before use.
 func HasUnitFallbacks(unit string) bool { return len(unitFallbacks[unit]) > 0 }
 
-// ResolveUnitArgs is the systemctl argv printing the LoadState of every
-// candidate of unit, in order.
-func ResolveUnitArgs(unit string) []string {
-	return append([]string{"show", "--no-pager", "-p", "LoadState", "--value"}, UnitCandidates(unit)...)
-}
-
-// ParseResolvedUnit picks the first candidate that is installed, or unit
-// itself when none is or the output is not understood. systemctl separates
-// the units with a blank line, even with --value.
-func ParseResolvedUnit(unit, out string) string {
-	cands := UnitCandidates(unit)
-	states := strings.Fields(out)
-	if len(states) != len(cands) {
-		return unit
-	}
-	for i, st := range states {
-		if st != "not-found" {
-			return cands[i]
+// firstInstalled is the index of the first row that is installed, 0 if none.
+func firstInstalled(props []sysbus.UnitProperties) int {
+	for i, p := range props {
+		if p.LoadState != loadStateNotFound {
+			return i
 		}
 	}
-	return unit
+	return 0
+}
+
+// ResolveUnit picks the first candidate of unit that is installed, or unit
+// itself when none is. A failed read is returned, so that it is not cached.
+func ResolveUnit(ctx context.Context, bus sysbus.SystemdBus, unit string) (string, error) {
+	cands := UnitCandidates(unit)
+	props, err := bus.UnitProperties(ctx, cands...)
+	if err != nil {
+		return unit, err
+	}
+	if len(props) != len(cands) {
+		return unit, fmt.Errorf("%d unit states for %d units", len(props), len(cands))
+	}
+	return cands[firstInstalled(props)], nil
 }
 
 // LookupService finds an allowlist row by exact id.
@@ -89,24 +97,41 @@ func LookupService(id string) (Service, bool) {
 	return Service{}, false
 }
 
-// RestartArgs is the systemctl argv that restarts s (starts a oneshot).
-func (s Service) RestartArgs() []string {
-	verb := "restart"
-	if s.Kind == ServiceKindOneshot {
-		verb = "start"
+// ErrUnitUnavailable: the unit is not installed or is masked. Nothing was
+// asked of systemd.
+var ErrUnitUnavailable = errors.New("unit not available")
+
+// CheckUnit is the gate before any mutation of a unit: a failed read counts
+// as a refusal too, never as an installed unit.
+func CheckUnit(ctx context.Context, bus sysbus.SystemdBus, unit string) error {
+	props, err := bus.UnitProperties(ctx, unit)
+	if err != nil {
+		return err
 	}
-	return []string{verb, "--no-block", s.Unit}
+	if len(props) != 1 {
+		return fmt.Errorf("%d unit states for %s", len(props), unit)
+	}
+	switch p := props[0]; {
+	case p.LoadState == loadStateNotFound, p.LoadState == "masked",
+		p.UnitFileState == "masked", p.UnitFileState == "masked-runtime":
+		return fmt.Errorf("%w: %s", ErrUnitUnavailable, unit)
+	}
+	return nil
 }
 
-// ServiceStateArgs is the single systemctl call reading every unit. Unix
-// timestamps avoid parsing a local time zone abbreviation.
-func ServiceStateArgs() []string {
-	args := []string{"show", "--no-pager", "--timestamp=unix",
-		"-p", "Id,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp"}
-	for _, s := range Services {
-		args = append(args, UnitCandidates(s.Unit)...)
+// QueueRestart restarts unit, the resolved unit of s: a oneshot is started,
+// and ssh is reloaded when it can be, so that the session in use survives.
+func QueueRestart(ctx context.Context, bus sysbus.SystemdBus, s Service, unit string) (*sysbus.Job, error) {
+	if err := CheckUnit(ctx, bus, unit); err != nil {
+		return nil, err
 	}
-	return args
+	switch {
+	case s.Kind == ServiceKindOneshot:
+		return bus.StartUnit(ctx, unit)
+	case s.ID == "ssh":
+		return bus.ReloadOrRestartUnit(ctx, unit)
+	}
+	return bus.RestartUnit(ctx, unit)
 }
 
 type ServiceState struct {
@@ -120,87 +145,49 @@ type ServiceState struct {
 	Since       *string `json:"since"`
 }
 
-// ParseServiceStates reads the output of ServiceStateArgs. systemctl prints
-// one block per unit in argument order; the order is relied on rather than
-// Id, which names the target when a unit is an alias. A row with fallbacks
+// ServiceStates reads every unit of the allowlist. A row with fallbacks
 // reports its first installed candidate.
-func ParseServiceStates(out string) ([]ServiceState, error) {
-	var blocks []map[string]string
-	cur := map[string]string{}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			if len(cur) > 0 {
-				blocks = append(blocks, cur)
-				cur = map[string]string{}
-			}
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, fmt.Errorf("systemctl show: unexpected line %q", line)
-		}
-		cur[k] = v
-	}
-	if len(cur) > 0 {
-		blocks = append(blocks, cur)
-	}
-	want := 0
+func ServiceStates(ctx context.Context, bus sysbus.SystemdBus) ([]ServiceState, error) {
+	var units []string
 	for _, s := range Services {
-		want += len(UnitCandidates(s.Unit))
+		units = append(units, UnitCandidates(s.Unit)...)
 	}
-	if len(blocks) != want {
-		return nil, fmt.Errorf("systemctl show: %d units, want %d", len(blocks), want)
+	props, err := bus.UnitProperties(ctx, units...)
+	if err != nil {
+		return nil, err
+	}
+	if len(props) != len(units) {
+		return nil, fmt.Errorf("%d unit states for %d units", len(props), len(units))
 	}
 
 	states := make([]ServiceState, len(Services))
 	next := 0
 	for i, s := range Services {
 		cands := UnitCandidates(s.Unit)
-		unit, b := cands[0], blocks[next]
-		for j, u := range cands {
-			if blocks[next+j]["LoadState"] != "not-found" {
-				unit, b = u, blocks[next+j]
-				break
-			}
-		}
+		pick := firstInstalled(props[next : next+len(cands)])
+		p := props[next+pick]
 		next += len(cands)
-		st := ServiceState{ID: s.ID, Unit: unit, Kind: s.Kind, Restartable: s.Restartable}
-		if b["LoadState"] == "not-found" {
-			st.ActiveState = "not-found"
+		st := ServiceState{ID: s.ID, Unit: cands[pick], Kind: s.Kind, Restartable: s.Restartable}
+		if p.LoadState == loadStateNotFound {
+			st.ActiveState = loadStateNotFound
 		} else {
-			st.ActiveState = b["ActiveState"]
-			st.SubState = b["SubState"]
-			st.Enabled = b["UnitFileState"]
-			since, err := parseUnixTimestamp(b["ActiveEnterTimestamp"])
-			if err != nil {
-				return nil, fmt.Errorf("systemctl show %s: %w", unit, err)
-			}
-			st.Since = since
+			st.ActiveState = p.ActiveState
+			st.SubState = p.SubState
+			st.Enabled = p.UnitFileState
+			st.Since = unitSince(p.ActiveEnterTimestamp)
 		}
 		states[i] = st
 	}
 	return states, nil
 }
 
-// parseUnixTimestamp reads "@<seconds>"; empty, "n/a" and "@0" mean never.
-func parseUnixTimestamp(v string) (*string, error) {
-	if v == "" || v == "n/a" {
-		return nil, nil
+// unitSince formats a timestamp in microseconds; 0 means never.
+func unitSince(usec uint64) *string {
+	if usec == 0 {
+		return nil
 	}
-	raw, ok := strings.CutPrefix(v, "@")
-	if !ok {
-		return nil, fmt.Errorf("bad timestamp %q", v)
-	}
-	sec, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("bad timestamp %q", v)
-	}
-	if sec == 0 {
-		return nil, nil
-	}
-	s := time.Unix(sec, 0).UTC().Format(time.RFC3339)
-	return &s, nil
+	s := time.Unix(int64(usec/1_000_000), 0).UTC().Format(time.RFC3339)
+	return &s
 }
 
 // ServiceGuard refuses while an upgrade runs, like RebootGuard, but hands

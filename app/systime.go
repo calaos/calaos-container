@@ -4,24 +4,22 @@ import (
 	"context"
 	"errors"
 	"regexp"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/calaos/calaos-container/models"
+	"github.com/calaos/calaos-container/sysbus"
 )
 
 const (
-	timeCmdLimit = 10 * time.Second
-	timeCacheTTL = time.Second
+	timeCallLimit = 10 * time.Second
+	timeCacheTTL  = time.Second
 )
 
-var (
-	runTimeCommand = models.RunCommandContext
-	timezoneRe     = regexp.MustCompile(`^[A-Za-z0-9_+/][A-Za-z0-9_+\-/]{0,63}$`)
-)
+var timezoneRe = regexp.MustCompile(`^[A-Za-z0-9_+/][A-Za-z0-9_+\-/]{0,63}$`)
 
 // The daemon only drives timedated: it never writes /etc/timezone and sets
 // no TZ (docs/API.md, Box time).
@@ -31,10 +29,10 @@ var timeState struct {
 	zonesMu sync.Mutex
 	zones   []string
 
-	// GET system/time is polled: one timedatectl per second at most.
+	// GET system/time is polled: one read of timedated per second at most.
 	showMu sync.Mutex
 	showAt time.Time
-	show   *models.TimedateState
+	show   *sysbus.TimedateState
 }
 
 type boxTime struct {
@@ -50,26 +48,26 @@ type boxTimeSet struct {
 	RestartRequired bool `json:"restart_required"`
 }
 
-func timedatectl(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeCmdLimit)
+func onTimedate(call func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeCallLimit)
 	defer cancel()
-	return runTimeCommand(ctx, "timedatectl", args...)
+	return call(ctx)
 }
 
 // timedateState reads timedated, from the cache unless fresh is set.
-func timedateState(fresh bool) (models.TimedateState, error) {
+func timedateState(fresh bool) (sysbus.TimedateState, error) {
 	timeState.showMu.Lock()
 	defer timeState.showMu.Unlock()
 	if !fresh && timeState.show != nil && time.Since(timeState.showAt) < timeCacheTTL {
 		return *timeState.show, nil
 	}
-	out, err := timedatectl("show")
+	var st sysbus.TimedateState
+	err := onTimedate(func(ctx context.Context) (err error) {
+		st, err = models.Bus.Timedate(ctx)
+		return err
+	})
 	if err != nil {
-		return models.TimedateState{}, err
-	}
-	st, err := models.ParseTimedateShow(out)
-	if err != nil {
-		return models.TimedateState{}, err
+		return sysbus.TimedateState{}, err
 	}
 	timeState.show, timeState.showAt = &st, time.Now()
 	return st, nil
@@ -90,9 +88,18 @@ func (a *AppServer) readBoxTime(fresh bool) (boxTime, error) {
 		Now:          a.now().UTC().Format(time.RFC3339),
 		Timezone:     st.Timezone,
 		NTP:          st.NTP,
-		Synchronized: st.Synchronized,
-		RTC:          st.RTC,
+		Synchronized: st.NTPSynchronized,
+		RTC:          rtcTime(st.RTCTimeUSec),
 	}, nil
+}
+
+// rtcTime formats the hardware clock; 0 is one that cannot be read.
+func rtcTime(usec uint64) *string {
+	if usec == 0 {
+		return nil
+	}
+	s := time.UnixMicro(int64(usec)).UTC().Format(time.RFC3339)
+	return &s
 }
 
 // timezones caches the first successful list: it only changes with tzdata.
@@ -102,18 +109,16 @@ func timezones() ([]string, error) {
 	if timeState.zones != nil {
 		return timeState.zones, nil
 	}
-	out, err := timedatectl("list-timezones")
+	var zones []string
+	err := onTimedate(func(ctx context.Context) (err error) {
+		zones, err = models.Bus.ListTimezones(ctx)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	zones := []string{}
-	for _, l := range strings.Split(out, "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			zones = append(zones, l)
-		}
-	}
 	if len(zones) == 0 {
-		return nil, errors.New("timedatectl list-timezones: empty list")
+		return nil, errors.New("timedated listed no timezone")
 	}
 	timeState.zones = zones
 	return zones, nil
@@ -143,7 +148,7 @@ func (a *AppServer) v2SystemTimezones(c *fiber.Ctx) error {
 
 type timeStep struct {
 	field string
-	args  []string
+	apply func(context.Context) error
 	audit [2]string
 }
 
@@ -201,22 +206,27 @@ func (a *AppServer) v2SystemTimeSet(c *fiber.Ctx) error {
 
 	var steps []timeStep
 	if b.Timezone != nil {
-		steps = append(steps, timeStep{"timezone", []string{"set-timezone", *b.Timezone}, [2]string{"tz", *b.Timezone}})
+		tz := *b.Timezone
+		steps = append(steps, timeStep{"timezone", func(ctx context.Context) error {
+			return models.Bus.SetTimezone(ctx, tz)
+		}, [2]string{"tz", tz}})
 	}
 	if b.NTP != nil {
-		v := "false"
-		if *b.NTP {
-			v = "true"
-		}
-		steps = append(steps, timeStep{"ntp", []string{"set-ntp", v}, [2]string{"ntp", v}})
+		ntp := *b.NTP
+		steps = append(steps, timeStep{"ntp", func(ctx context.Context) error {
+			return models.Bus.SetNTP(ctx, ntp)
+		}, [2]string{"ntp", strconv.FormatBool(ntp)}})
 	}
 	if b.Time != nil {
-		steps = append(steps, timeStep{"time", []string{"set-time", setTime.UTC().Format("2006-01-02 15:04:05") + " UTC"}, [2]string{"time", "set"}})
+		usec := setTime.Unix() * 1_000_000
+		steps = append(steps, timeStep{"time", func(ctx context.Context) error {
+			return models.Bus.SetTime(ctx, usec)
+		}, [2]string{"time", "set"}})
 	}
 
 	applied := []string{}
 	for _, s := range steps {
-		if _, err := timedatectl(s.args...); err != nil {
+		if err := onTimedate(s.apply); err != nil {
 			resetBoxTimeCache()
 			e := errInternal(err)
 			e.data = fiber.Map{"applied": applied, "failed": s.field}
