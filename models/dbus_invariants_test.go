@@ -111,7 +111,7 @@ func contains(list []string, s string) bool {
 // whatever the other properties say.
 func TestQueueRestartRefusalPrecedesMutation(t *testing.T) {
 	ctx := context.Background()
-	rng := rand.New(rand.NewSource(7))
+	rng := rand.New(rand.NewSource(7)) //nolint:gosec // fixed seed keeps the property test reproducible
 	loadStates := []string{"loaded", "not-found", "masked", "error", "bad-setting", ""}
 	fileStates := []string{"enabled", "disabled", "masked", "masked-runtime", "static", "generated", ""}
 	for i := 0; i < 200; i++ {
@@ -240,7 +240,7 @@ func TestNetworkReloadFailureSkipsReconfigure(t *testing.T) {
 // Whatever the interface name, the only file written is the one named after
 // it, in the one directory meant for it, and nothing else of the tree moves.
 func TestNetworkWritesStayOnTheirOwnFile(t *testing.T) {
-	rng := rand.New(rand.NewSource(11))
+	rng := rand.New(rand.NewSource(11)) //nolint:gosec // fixed seed keeps the property test reproducible
 	const alphabet = "abcdeth0123.-_/\\ \n*%@:"
 	names := []string{"eth0", "wlan1", "en*", "..", ".", "a/b", "../etc", "-all", "apply", "eth0\n", "", "e t", "x" + strings.Repeat("y", 40)}
 	for i := 0; i < 80; i++ {

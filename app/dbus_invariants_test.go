@@ -49,7 +49,7 @@ func TestServiceRestartMutatedIDsNeverReachGuardOrBus(t *testing.T) {
 	}
 	seeds = append(seeds, "getty@tty1", "ssh", "chrony", "-", "a b")
 
-	rng := rand.New(rand.NewSource(20261030))
+	rng := rand.New(rand.NewSource(20261030)) //nolint:gosec // fixed seed keeps the property test reproducible
 	mutate := []func(string) string{
 		strings.ToUpper,
 		func(s string) string { return " " + s },

@@ -98,7 +98,7 @@ func rtcTime(usec uint64) *string {
 	if usec == 0 {
 		return nil
 	}
-	s := time.UnixMicro(int64(usec)).UTC().Format(time.RFC3339)
+	s := time.UnixMicro(int64(usec)).UTC().Format(time.RFC3339) //nolint:gosec // dbus timestamps are far below the int64 range
 	return &s
 }
 

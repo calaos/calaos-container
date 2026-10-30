@@ -186,7 +186,7 @@ func unitSince(usec uint64) *string {
 	if usec == 0 {
 		return nil
 	}
-	s := time.Unix(int64(usec/1_000_000), 0).UTC().Format(time.RFC3339)
+	s := time.Unix(int64(usec/1_000_000), 0).UTC().Format(time.RFC3339) //nolint:gosec // dbus timestamps are far below the int64 range
 	return &s
 }
 

@@ -211,7 +211,7 @@ func onSystemBus(ctx context.Context, op string, fn func(*dbus.Conn) error) erro
 	if err != nil {
 		return fail(op, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := fn(conn); err != nil {
 		return fail(op, err)
 	}
