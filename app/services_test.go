@@ -84,19 +84,24 @@ func TestServicesList(t *testing.T) {
 	f := useFakeSystemctl(t)
 	var out strings.Builder
 	for i, s := range models.Services {
-		switch i {
-		case 0:
-			out.WriteString(showBlock("Id="+s.Unit, "LoadState=loaded", "ActiveState=active", "SubState=running",
-				"UnitFileState=enabled", "ActiveEnterTimestamp=@1793000472"))
-		case 1:
-			out.WriteString(showBlock("Id="+s.Unit, "LoadState=loaded", "ActiveState=failed", "SubState=failed",
-				"UnitFileState=", "ActiveEnterTimestamp="))
-		case 10:
-			out.WriteString(showBlock("Id="+s.Unit, "LoadState=loaded", "ActiveState=inactive", "SubState=dead",
-				"UnitFileState=static", "ActiveEnterTimestamp=@0"))
-		default:
-			out.WriteString(showBlock("Id="+s.Unit, "LoadState=not-found", "ActiveState=inactive", "SubState=dead",
-				"UnitFileState=", "ActiveEnterTimestamp="))
+		for _, u := range models.UnitCandidates(s.Unit) {
+			switch {
+			case i == 0:
+				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=active", "SubState=running",
+					"UnitFileState=enabled", "ActiveEnterTimestamp=@1793000472"))
+			case i == 1:
+				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=failed", "SubState=failed",
+					"UnitFileState=", "ActiveEnterTimestamp="))
+			case s.ID == "envoy":
+				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=inactive", "SubState=dead",
+					"UnitFileState=disabled", "ActiveEnterTimestamp=@0"))
+			case u == "systemd-timesyncd.service":
+				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=active", "SubState=running",
+					"UnitFileState=enabled", "ActiveEnterTimestamp=@1793000472"))
+			default:
+				out.WriteString(showBlock("Id="+u, "LoadState=not-found", "ActiveState=inactive", "SubState=dead",
+					"UnitFileState=", "ActiveEnterTimestamp="))
+			}
 		}
 	}
 	if err := os.WriteFile(f.show, []byte(out.String()), 0o600); err != nil {
@@ -112,8 +117,8 @@ func TestServicesList(t *testing.T) {
 	for _, want := range []string{
 		`{"error":false,"msg":"ok","data":{"services":[{"id":"calaos-server","unit":"calaos-server.service","kind":"service","restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","since":"2026-10-26T07:41:12Z"},`,
 		`{"id":"calaos-home","unit":"calaos-home.service","kind":"service","restartable":true,"active_state":"failed","sub_state":"failed","enabled":"","since":null}`,
-		`{"id":"timesyncd","unit":"systemd-timesyncd.service","kind":"service","restartable":true,"active_state":"not-found","sub_state":"","enabled":"","since":null}`,
-		`{"id":"calaos-ddns","unit":"calaos-ddns.service","kind":"oneshot","restartable":true,"active_state":"inactive","sub_state":"dead","enabled":"static","since":null}`,
+		`{"id":"ntp","unit":"systemd-timesyncd.service","kind":"service","restartable":true,"active_state":"active","sub_state":"running","enabled":"enabled","since":"2026-10-26T07:41:12Z"}`,
+		`{"id":"envoy","unit":"envoy.service","kind":"service","restartable":true,"active_state":"inactive","sub_state":"dead","enabled":"disabled","since":null}`,
 		`{"id":"ssh","unit":"ssh.service","kind":"service","restartable":false,"active_state":"not-found","sub_state":"","enabled":"","since":null}]}}`,
 	} {
 		if !strings.Contains(body, want) {
@@ -126,7 +131,7 @@ func TestServicesList(t *testing.T) {
 	calls := f.calls(t)
 	want := "show --no-pager --timestamp=unix -p Id,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp " +
 		"calaos-server.service calaos-home.service mosquitto.service zigbee2mqtt.service influxdb.service grafana.service " +
-		"hue2mqtt.service envoy.service olad.service systemd-timesyncd.service calaos-ddns.service calaos-container.service " +
+		"hue2mqtt.service envoy.service olad.service chrony.service systemd-timesyncd.service calaos-container.service " +
 		"haproxy.service systemd-networkd.service ssh.service"
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("calls %q", calls)
@@ -155,14 +160,22 @@ func TestServicesListFailure(t *testing.T) {
 
 // TestServiceRestartAnswersFirst: the answer is out before systemctl runs.
 func TestServiceRestartAnswersFirst(t *testing.T) {
-	cases := map[string]string{
-		"calaos-server": "restart --no-block calaos-server.service",
-		"timesyncd":     "restart --no-block systemd-timesyncd.service",
-		"calaos-ddns":   "start --no-block calaos-ddns.service",
+	resolve := "show --no-pager -p LoadState --value chrony.service systemd-timesyncd.service"
+	cases := []struct {
+		id, show string
+		want     []string
+	}{
+		{"calaos-server", "", []string{"restart --no-block calaos-server.service"}},
+		{"ntp", "loaded\n\nnot-found\n", []string{resolve, "restart --no-block chrony.service"}},
+		{"ntp", "not-found\n\nloaded\n", []string{resolve, "restart --no-block systemd-timesyncd.service"}},
 	}
-	for id, want := range cases {
+	for _, tc := range cases {
+		id := tc.id
 		t.Run(id, func(t *testing.T) {
 			f := useFakeSystemctl(t)
+			if err := os.WriteFile(f.show, []byte(tc.show), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			done := trackGuard(t)
 			(&stubBackend{}).install(t)
 			a := newHandlerTestApp(t)
@@ -181,8 +194,8 @@ func TestServiceRestartAnswersFirst(t *testing.T) {
 			if time.Since(start) < restartDelay || answered >= restartDelay {
 				t.Fatalf("answered after %v, restarted before %v", answered, restartDelay)
 			}
-			if c := f.calls(t); len(c) != 1 || c[0] != want {
-				t.Fatalf("calls %q, want %q", c, want)
+			if c := f.calls(t); strings.Join(c, ";") != strings.Join(tc.want, ";") {
+				t.Fatalf("calls %q, want %q", c, tc.want)
 			}
 		})
 	}
@@ -222,7 +235,7 @@ func TestServiceRestartRefused(t *testing.T) {
 		`{"unit":"getty@tty1"}`, `{"unit":"calaos-server@"}`, `{"unit":"calaos-server@x.service"}`,
 		`{"unit":".."}`, `{"unit":"../calaos-server"}`, `{"unit":"calaos-server/../haproxy"}`,
 		`{"unit":"CALAOS-SERVER"}`, `{"unit":" calaos-server"}`, `{"unit":"calaos-server\n"}`,
-		`{"unit":"--force"}`, `{"unit":"chrony"}`, `{"unit":"sshd"}`, `{"unit":"*"}`, `{"unit":""}`, `{}`,
+		`{"unit":"--force"}`, `{"unit":"chrony"}`, `{"unit":"chrony.service"}`, `{"unit":"timesyncd"}`, `{"unit":"sshd"}`, `{"unit":"calaos-ddns"}`, `{"unit":"*"}`, `{"unit":""}`, `{}`,
 		`{"id":"calaos-server"}`,
 	}
 	f := useFakeSystemctl(t)

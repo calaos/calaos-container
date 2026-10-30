@@ -34,12 +34,49 @@ var Services = []Service{
 	{"hue2mqtt", "hue2mqtt.service", ServiceKindService, true},
 	{"envoy", "envoy.service", ServiceKindService, true},
 	{"olad", "olad.service", ServiceKindService, true},
-	{"timesyncd", "systemd-timesyncd.service", ServiceKindService, true},
-	{"calaos-ddns", "calaos-ddns.service", ServiceKindOneshot, true},
+	{"ntp", "chrony.service", ServiceKindService, true},
 	{"calaos-container", "calaos-container.service", ServiceKindService, false},
 	{"haproxy", "haproxy.service", ServiceKindService, false},
 	{"networkd", "systemd-networkd.service", ServiceKindService, false},
 	{"ssh", "ssh.service", ServiceKindService, false},
+}
+
+// unitFallbacks lists, for a unit of the tables, the units tried in order
+// when it is not installed. Calaos OS runs chrony (the calaos package
+// depends on it, which removes timesyncd); a plain Debian keeps timesyncd.
+var unitFallbacks = map[string][]string{
+	"chrony.service": {"systemd-timesyncd.service"},
+}
+
+// UnitCandidates is unit followed by its fallbacks.
+func UnitCandidates(unit string) []string {
+	return append([]string{unit}, unitFallbacks[unit]...)
+}
+
+// HasUnitFallbacks tells whether unit must be resolved before use.
+func HasUnitFallbacks(unit string) bool { return len(unitFallbacks[unit]) > 0 }
+
+// ResolveUnitArgs is the systemctl argv printing the LoadState of every
+// candidate of unit, in order.
+func ResolveUnitArgs(unit string) []string {
+	return append([]string{"show", "--no-pager", "-p", "LoadState", "--value"}, UnitCandidates(unit)...)
+}
+
+// ParseResolvedUnit picks the first candidate that is installed, or unit
+// itself when none is or the output is not understood. systemctl separates
+// the units with a blank line, even with --value.
+func ParseResolvedUnit(unit, out string) string {
+	cands := UnitCandidates(unit)
+	states := strings.Fields(out)
+	if len(states) != len(cands) {
+		return unit
+	}
+	for i, st := range states {
+		if st != "not-found" {
+			return cands[i]
+		}
+	}
+	return unit
 }
 
 // LookupService finds an allowlist row by exact id.
@@ -67,7 +104,7 @@ func ServiceStateArgs() []string {
 	args := []string{"show", "--no-pager", "--timestamp=unix",
 		"-p", "Id,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp"}
 	for _, s := range Services {
-		args = append(args, s.Unit)
+		args = append(args, UnitCandidates(s.Unit)...)
 	}
 	return args
 }
@@ -85,7 +122,8 @@ type ServiceState struct {
 
 // ParseServiceStates reads the output of ServiceStateArgs. systemctl prints
 // one block per unit in argument order; the order is relied on rather than
-// Id, which names the target when a unit is an alias.
+// Id, which names the target when a unit is an alias. A row with fallbacks
+// reports its first installed candidate.
 func ParseServiceStates(out string) ([]ServiceState, error) {
 	var blocks []map[string]string
 	cur := map[string]string{}
@@ -107,14 +145,27 @@ func ParseServiceStates(out string) ([]ServiceState, error) {
 	if len(cur) > 0 {
 		blocks = append(blocks, cur)
 	}
-	if len(blocks) != len(Services) {
-		return nil, fmt.Errorf("systemctl show: %d units, want %d", len(blocks), len(Services))
+	want := 0
+	for _, s := range Services {
+		want += len(UnitCandidates(s.Unit))
+	}
+	if len(blocks) != want {
+		return nil, fmt.Errorf("systemctl show: %d units, want %d", len(blocks), want)
 	}
 
 	states := make([]ServiceState, len(Services))
+	next := 0
 	for i, s := range Services {
-		b := blocks[i]
-		st := ServiceState{ID: s.ID, Unit: s.Unit, Kind: s.Kind, Restartable: s.Restartable}
+		cands := UnitCandidates(s.Unit)
+		unit, b := cands[0], blocks[next]
+		for j, u := range cands {
+			if blocks[next+j]["LoadState"] != "not-found" {
+				unit, b = u, blocks[next+j]
+				break
+			}
+		}
+		next += len(cands)
+		st := ServiceState{ID: s.ID, Unit: unit, Kind: s.Kind, Restartable: s.Restartable}
 		if b["LoadState"] == "not-found" {
 			st.ActiveState = "not-found"
 		} else {
@@ -123,7 +174,7 @@ func ParseServiceStates(out string) ([]ServiceState, error) {
 			st.Enabled = b["UnitFileState"]
 			since, err := parseUnixTimestamp(b["ActiveEnterTimestamp"])
 			if err != nil {
-				return nil, fmt.Errorf("systemctl show %s: %w", s.Unit, err)
+				return nil, fmt.Errorf("systemctl show %s: %w", unit, err)
 			}
 			st.Since = since
 		}

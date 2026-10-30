@@ -30,7 +30,7 @@ func TestLogSourcesUseServiceUnits(t *testing.T) {
 			t.Errorf("source %s: unit %q, services table %q", s.ID, s.Unit, svc.Unit)
 		}
 	}
-	if n := len(LogSources); n != 17 {
+	if n := len(LogSources); n != 16 {
 		t.Fatalf("%d sources", n)
 	}
 }

@@ -28,7 +28,7 @@ const (
 )
 
 // LogSources is the table of docs/API.md, in its order. The units are those
-// of the Services table.
+// of the Services table; one with fallbacks is resolved by the caller.
 var LogSources = []LogSource{
 	{"calaos-server", "Calaos server", "calaos-server.service", "calaos-server", false},
 	{"calaos-home", "Calaos Home (kiosk)", "calaos-home.service", "calaos-home", false},
@@ -41,8 +41,7 @@ var LogSources = []LogSource{
 	{"envoy", "Envoy", "envoy.service", "envoy", false},
 	{"calaos-container", "calaos-container", "calaos-container.service", "", false},
 	{"olad", "OLA (olad)", "olad.service", "", false},
-	{"timesyncd", "Time sync (timesyncd)", "systemd-timesyncd.service", "", false},
-	{"calaos-ddns", "Calaos DDNS", "calaos-ddns.service", "", false},
+	{"ntp", "Time sync (NTP)", "chrony.service", "", false},
 	{"networkd", "Network (networkd)", "systemd-networkd.service", "", false},
 	{"ssh", "SSH", "ssh.service", "", false},
 	{LogSourceKernel, "Kernel", "", "", true},

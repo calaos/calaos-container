@@ -793,8 +793,7 @@ for a client that has no translation of the `id`:
 | `envoy` | Envoy |
 | `calaos-container` | calaos-container |
 | `olad` | OLA (olad) |
-| `timesyncd` | Time sync (timesyncd) |
-| `calaos-ddns` | Calaos DDNS |
+| `ntp` | Time sync (NTP) |
 | `networkd` | Network (networkd) |
 | `ssh` | SSH |
 | `kernel` | Kernel |
@@ -805,7 +804,7 @@ Entries are matched as follows.
 | `id` | Journal entries |
 |---|---|
 | `calaos-server`, `calaos-home`, `haproxy`, `mosquitto`, `zigbee2mqtt`, `influxdb`, `grafana`, `hue2mqtt`, `envoy` | the unit of the same name, and the container of the same name |
-| `calaos-container`, `olad`, `timesyncd`, `calaos-ddns`, `networkd`, `ssh` | the unit of the Services table |
+| `calaos-container`, `olad`, `ntp`, `networkd`, `ssh` | the unit of the Services table (for `ntp`, the installed candidate, resolved as for a restart) |
 | `kernel` | kernel messages (`_TRANSPORT=kernel`, every boot) |
 | `system` | no unit filter |
 
@@ -912,8 +911,9 @@ The query `text` is matched against the redacted message and is never logged.
 {"now": "2026-10-25T09:12:03Z", "timezone": "Europe/Paris", "ntp": true, "synchronized": true, "rtc": "2026-10-25T09:12:03Z"}
 ```
 
-`ntp` tells whether the NTP client (`systemd-timesyncd`) is enabled, `synchronized` whether the
-clock is synchronized, `rtc` is the hardware clock or `null`.
+`ntp` tells whether the NTP client (chrony on Calaos OS) is enabled, `synchronized` whether the
+clock is synchronized (timedated's `NTPSynchronized`, the kernel flag that chrony sets with
+`rtcsync`, on in Debian's `chrony.conf`), `rtc` is the hardware clock or `null`.
 
 `GET /api/v2/system/time` answers a `<BoxTime>` (`timedatectl show` cached for 1 s; `now` is read
 at each call). `GET /api/v2/system/timezones` answers
@@ -924,7 +924,8 @@ each field optional, at least one (an empty body is `400 invalid_request`, "no f
 Answer: the new `<BoxTime>` plus `"restart_required": <bool>`, true when `timezone` changed.
 
 - The changes apply in this order: `timezone` (it must be in the list of `timezones`), then `ntp`
-  (`timedatectl set-ntp`, which starts or stops `systemd-timesyncd`), then `time`.
+  (`timedatectl set-ntp`, which enables and starts, or disables and stops, the first unit listed in
+  `/usr/lib/systemd/ntp-units.d/`: `50-chrony.list` names `chrony.service`), then `time`.
 - `time` is RFC 3339 with a year from 2020 to 2100. It is refused with `invalid_request`
   ("ntp is active") when NTP is still on after the `ntp` step.
 - Each `timedatectl` command has 10 s. The first step that fails stops the sequence and answers
