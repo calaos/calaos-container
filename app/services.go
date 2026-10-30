@@ -232,9 +232,6 @@ func queueRestart(svc models.Service, release func(), delay time.Duration, bus s
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
 	defer cancel()
 	job, err := models.QueueRestart(ctx, bus, svc, unit)
-	if err != nil {
-		return nil, err
-	}
 	resetServicesCache()
-	return job, nil
+	return job, err
 }

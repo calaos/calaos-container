@@ -332,6 +332,30 @@ func TestServiceActionFailedStep(t *testing.T) {
 	}
 }
 
+// The answer is gone when the restart fails: only the list can show it.
+func TestServiceRestartFailureResetsTheCache(t *testing.T) {
+	f := useFakeBus(t)
+	f.SetUnit("mosquitto.service", loadedUnit)
+	done := trackGuard(t)
+	logs := captureLogs(t)
+	(&stubBackend{}).install(t)
+	a := newHandlerTestApp(t)
+
+	get := httpCase{method: "GET", path: "/api/v2/system/services"}
+	v2Do2(t, a, get)
+	f.SetUnit("mosquitto.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: "failed", UnitFileState: "enabled"})
+	f.Fail("RestartUnit", errors.New(secretDetail))
+
+	if status, _, body := postAction(t, a, models.ActionRestart, "mosquitto"); status != 200 {
+		t.Fatalf("%d %s", status, body)
+	}
+	waitRestart(t, done)
+	waitLog(t, logs, secretDetail)
+	if _, _, list := v2Do2(t, a, get); !strings.Contains(list, `"active_state":"failed"`) {
+		t.Fatalf("stale list %s", list)
+	}
+}
+
 // The job ends after the answer: its outcome goes to the log and to the list.
 func TestServiceActionJobFails(t *testing.T) {
 	for verb, state := range map[string]string{
@@ -378,47 +402,57 @@ func TestServiceActionFreesTheGuardBeforeTheJobEnds(t *testing.T) {
 }
 
 // Every bus call of the five verbs runs under the guard, and none can hold
-// it longer than serviceCallLimit.
+// it longer than serviceCallLimit. olad takes the SysV path of enable and
+// disable.
 func TestServiceActionRunsUnderTheGuard(t *testing.T) {
-	for _, verb := range serviceVerbs {
-		t.Run(verb, func(t *testing.T) {
-			f := useFakeBus(t)
-			f.SetUnit("mosquitto.service", loadedUnit)
-			probe := &guardProbe{SystemdBus: f}
-			prev := serviceGuard
-			serviceGuard = func() (func(), error) {
-				release, err := prev()
-				if err != nil {
-					return nil, err
-				}
-				probe.held.Store(true)
-				return func() {
-					probe.held.Store(false)
-					release()
-				}, nil
-			}
-			t.Cleanup(func() { serviceGuard = prev })
-			done := trackGuard(t)
-			(&stubBackend{}).install(t)
-			models.Bus = probe
-			a := newHandlerTestApp(t)
+	for _, id := range []string{"mosquitto", "olad"} {
+		for _, verb := range serviceVerbs {
+			t.Run(id+" "+verb, func(t *testing.T) { testActionUnderGuard(t, id, verb) })
+		}
+	}
+}
 
-			if status, _, body := postAction(t, a, verb, "mosquitto"); status != 200 {
-				t.Fatalf("%d %s", status, body)
-			}
-			waitRestart(t, done)
-			if len(f.Calls()) == 0 {
-				t.Fatal("no call")
-			}
-			probe.mu.Lock()
-			defer probe.mu.Unlock()
-			if len(probe.unguarded) != 0 {
-				t.Fatalf("outside the guard: %q", probe.unguarded)
-			}
-			if probe.longest > serviceCallLimit {
-				t.Fatalf("a bus call may last %s under the guard", probe.longest)
-			}
-		})
+func testActionUnderGuard(t *testing.T, id, verb string) {
+	f := useFakeBus(t)
+	unit := loadedUnit
+	if id == "olad" {
+		unit.UnitFileState = "generated"
+		fakeSysv(t, 0)
+	}
+	f.SetUnit(id+".service", unit)
+	probe := &guardProbe{SystemdBus: f}
+	prev := serviceGuard
+	serviceGuard = func() (func(), error) {
+		release, err := prev()
+		if err != nil {
+			return nil, err
+		}
+		probe.held.Store(true)
+		return func() {
+			probe.held.Store(false)
+			release()
+		}, nil
+	}
+	t.Cleanup(func() { serviceGuard = prev })
+	done := trackGuard(t)
+	(&stubBackend{}).install(t)
+	models.Bus = probe
+	a := newHandlerTestApp(t)
+
+	if status, _, body := postAction(t, a, verb, id); status != 200 {
+		t.Fatalf("%d %s", status, body)
+	}
+	waitRestart(t, done)
+	if len(f.Calls()) == 0 {
+		t.Fatal("no call")
+	}
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if len(probe.unguarded) != 0 {
+		t.Fatalf("outside the guard: %q", probe.unguarded)
+	}
+	if probe.longest > serviceCallLimit {
+		t.Fatalf("a bus call may last %s under the guard", probe.longest)
 	}
 }
 

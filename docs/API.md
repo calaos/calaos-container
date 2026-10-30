@@ -95,7 +95,7 @@ ignored.
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
-| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, kiosk restart, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
+| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, kiosk restart, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check, a reboot or a service action) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
 | `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes), log query limits (see Logs) | `{"retry_after": <seconds>}` |
 | `approver_required` | 409 | the action needs a push code and no approver is enrolled | none |
@@ -1231,6 +1231,10 @@ validated `package`.
 | `admin {action: console_open}` | `POST /api/v2/admin/console {"code_id", "term"}`, then the console socket (see Console); the session is the one that verified the code | yes |
 | `admin {action: services_list}` | `GET /api/v2/system/services` | yes |
 | `admin {action: services_restart, params: {unit}}` | `POST /api/v2/system/services/restart {"unit"}` | yes |
+| `admin {action: services_start, params: {unit}}` | `POST /api/v2/system/services/start {"unit"}` | yes |
+| `admin {action: services_stop, params: {unit}}` | `POST /api/v2/system/services/stop {"unit"}` | yes |
+| `admin {action: services_enable, params: {unit}}` | `POST /api/v2/system/services/enable {"unit"}` | yes |
+| `admin {action: services_disable, params: {unit}}` | `POST /api/v2/system/services/disable {"unit"}` | yes |
 | `admin {action: logs_sources}` | `GET /api/v2/logs/sources` | yes |
 | `admin {action: logs_query, params}` | `POST /api/v2/logs/query`, body rebuilt field by field from the fields of Logs | yes |
 | `admin {action: time_get}` | `GET /api/v2/system/time` | yes |
@@ -1290,7 +1294,7 @@ never forwarded. Every other type is dropped.
 | connection refused, timeout, invalid answer | `daemon_unreachable` or `admin_unavailable`, per `AdminState` |
 | `401` without `code: bad_session`, after re-reading the token and one retry | `daemon_unreachable` |
 | `404` on `GET /api/v2/admin/status` (any body), or any `/api/v2/` `404` whose body is not an envelope with a `code` | `daemon_too_old` |
-| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired`, `console_limit`, `network_pending` | same code |
+| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired`, `console_limit`, `network_pending`, `service_unavailable` | same code |
 | `invalid_request`, `package_not_found`, `package_held` | same code, with the daemon `msg` (safe to display) |
 | `not_found` on a relay-table route (the path is fixed by the table, so the route does not exist in a daemon that predates it) | `daemon_too_old`, for that action only |
 | `internal`, `not_found` on any other call (`admin/push/{code_id}`, ...), `method_not_allowed`, any unknown code | `internal` |

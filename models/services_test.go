@@ -1,6 +1,7 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	logger "github.com/calaos/calaos-container/log"
 	"github.com/calaos/calaos-container/sysbus"
 	"github.com/calaos/calaos-container/sysbus/sysbustest"
 )
@@ -341,6 +343,29 @@ func TestServiceStatesSysvStartup(t *testing.T) {
 		f.SetUnit("olad.service", generated)
 		if st := serviceState(t, f, "olad"); st.Startup != "disabled" {
 			t.Fatalf("%+v", st)
+		}
+	})
+
+	// A killed command looks like a disabled service: only the log tells.
+	t.Run("deadline", func(t *testing.T) {
+		script := filepath.Join(t.TempDir(), "systemd-sysv-install")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil { //nolint:gosec // the test must run it
+			t.Fatal(err)
+		}
+		prev := SysvInstall
+		SysvInstall = script
+		t.Cleanup(func() { SysvInstall = prev })
+		var logs bytes.Buffer
+		logger.Logger.SetOutput(&logs)
+		t.Cleanup(func() { logger.Logger.SetOutput(os.Stdout) })
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		if got := sysvStartup(ctx); got != StartupDisabled {
+			t.Fatalf("startup %q", got)
+		}
+		if !strings.Contains(logs.String(), "reading the boot state of olad") {
+			t.Fatalf("not logged: %q", logs.String())
 		}
 	})
 

@@ -218,7 +218,7 @@ func setBootState(ctx context.Context, bus sysbus.SystemdBus, s Service, unit, v
 // sysvInstall does not go through the Executor: it logs a failure as an
 // error, and is-enabled exits 1 on every read of a disabled olad.
 func sysvInstall(ctx context.Context, verb string) error {
-	cmd := exec.CommandContext(ctx, SysvInstall, verb, sysvServiceID) //nolint:gosec // both are constants of this package
+	cmd := exec.CommandContext(ctx, SysvInstall, verb, sysvServiceID) //nolint:gosec // fixed path, replaced by tests only
 	cmd.WaitDelay = runCancelGrace
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -233,8 +233,9 @@ func sysvStartup(ctx context.Context) string {
 	if err == nil {
 		return StartupEnabled
 	}
+	// A deadline kills the command: that exit code says nothing about olad.
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) {
+	if !errors.As(err, &exit) || ctx.Err() != nil {
 		logging.Warnf("reading the boot state of %s: %v", sysvServiceID, err)
 	}
 	return StartupDisabled
