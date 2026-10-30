@@ -156,23 +156,24 @@ var serviceActionStates = map[string]string{
 
 // checkUnit reads the unit afresh: the 1 s cache could still show a unit
 // masked or removed a moment ago as available.
-func checkUnit(unit string, bus sysbus.SystemdBus) error {
+func checkUnit(unit string, bus sysbus.SystemdBus) (failed bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
 	defer cancel()
-	switch err := models.CheckUnit(ctx, bus, unit); {
+	failed, err = models.CheckUnit(ctx, bus, unit)
+	switch {
 	case err == nil:
-		return nil
+		return failed, nil
 	case errors.Is(err, models.ErrUnitNotInstalled):
-		return newAPIError(fiber.StatusConflict, codeServiceUnavailable, "the unit is not installed")
+		return false, newAPIError(fiber.StatusConflict, codeServiceUnavailable, "the unit is not installed")
 	case errors.Is(err, models.ErrUnitMasked):
-		return newAPIError(fiber.StatusConflict, codeServiceUnavailable, "the unit is masked")
+		return false, newAPIError(fiber.StatusConflict, codeServiceUnavailable, "the unit is masked")
 	default:
-		return errInternal(err)
+		return false, errInternal(err)
 	}
 }
 
 func (a *AppServer) checkRestart(svc models.Service) error {
-	if err := checkUnit(resolveUnit(svc.Unit, models.Bus), models.Bus); err != nil {
+	if _, err := checkUnit(resolveUnit(svc.Unit, models.Bus), models.Bus); err != nil {
 		return err
 	}
 	if svc.ID != "calaos-container" {
@@ -191,11 +192,12 @@ func (a *AppServer) checkRestart(svc models.Service) error {
 // through a job that lasts up to serviceJobLimit.
 func runServiceAction(svc models.Service, verb string, bus sysbus.SystemdBus) error {
 	unit := resolveUnit(svc.Unit, bus)
-	if err := checkUnit(unit, bus); err != nil {
+	failed, err := checkUnit(unit, bus)
+	if err != nil {
 		return err
 	}
 	defer resetServicesCache()
-	job, err := models.QueueAction(bus, svc, unit, verb, serviceCallLimit)
+	job, err := models.QueueAction(bus, svc, unit, verb, failed, serviceCallLimit)
 	if err != nil {
 		return errInternal(err)
 	}

@@ -123,6 +123,19 @@ func (b *Bus) ReloadOrRestartUnit(ctx context.Context, unit string) (*Job, error
 	return queue(ctx, "reload-or-restart "+unit, unit, (*sd.Conn).ReloadOrRestartUnitContext)
 }
 
+func (b *Bus) ResetFailedUnit(ctx context.Context, unit string) error {
+	op := "reset " + unit
+	conn, err := dialSystemd(ctx)
+	if err != nil {
+		return fail(op, err)
+	}
+	defer conn.Close()
+	if err := conn.ResetFailedUnitContext(ctx, unit); err != nil {
+		return fail(op, err)
+	}
+	return nil
+}
+
 func (b *Bus) UnitProperties(ctx context.Context, units ...string) ([]UnitProperties, error) {
 	const op = "read unit state"
 	conn, err := dialSystemd(ctx)

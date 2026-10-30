@@ -20,6 +20,8 @@ var serviceVerbs = []string{
 	models.ActionRestart, models.ActionStart, models.ActionStop, models.ActionEnable, models.ActionDisable,
 }
 
+const mosquittoReset = "ResetFailedUnit mosquitto.service"
+
 func actionPath(verb string) string { return "/api/v2/system/services/" + verb }
 
 func postAction(t *testing.T, a *AppServer, verb, id string) (int, v2Reply, string) {
@@ -36,6 +38,11 @@ func (p *guardProbe) StartUnit(ctx context.Context, unit string) (*sysbus.Job, e
 func (p *guardProbe) StopUnit(ctx context.Context, unit string) (*sysbus.Job, error) {
 	p.record(ctx, "StopUnit")
 	return p.SystemdBus.StopUnit(ctx, unit)
+}
+
+func (p *guardProbe) ResetFailedUnit(ctx context.Context, unit string) error {
+	p.record(ctx, "ResetFailedUnit")
+	return p.SystemdBus.ResetFailedUnit(ctx, unit)
 }
 
 func (p *guardProbe) EnableUnitFiles(ctx context.Context, units []string) error {
@@ -156,10 +163,10 @@ func TestServiceActionUnavailable(t *testing.T) {
 		p   sysbus.UnitProperties
 		msg string
 	}{
-		"not found":      {sysbus.UnitProperties{LoadState: "not-found"}, notInstalled},
-		"load masked":    {sysbus.UnitProperties{LoadState: "masked"}, masked},
-		"masked":         {sysbus.UnitProperties{LoadState: "loaded", UnitFileState: "masked"}, masked},
-		"masked-runtime": {sysbus.UnitProperties{LoadState: "loaded", UnitFileState: "masked-runtime"}, masked},
+		"not found":      {sysbus.UnitProperties{LoadState: "not-found", ActiveState: "failed"}, notInstalled},
+		"load masked":    {sysbus.UnitProperties{LoadState: "masked", ActiveState: "failed"}, masked},
+		"masked":         {sysbus.UnitProperties{LoadState: "loaded", UnitFileState: "masked", ActiveState: "failed"}, masked},
+		"masked-runtime": {sysbus.UnitProperties{LoadState: "loaded", UnitFileState: "masked-runtime", ActiveState: "failed"}, masked},
 	}
 	for name, u := range units {
 		for _, verb := range serviceVerbs {
@@ -252,9 +259,9 @@ func TestServiceActionCalls(t *testing.T) {
 		verb, state string
 		want        []string
 	}{
-		{models.ActionStart, "starting", []string{"StartUnit mosquitto.service"}},
+		{models.ActionStart, "starting", []string{mosquittoReset, "StartUnit mosquitto.service"}},
 		{models.ActionStop, "stopping", []string{"StopUnit mosquitto.service"}},
-		{models.ActionEnable, "enabling", []string{"EnableUnitFiles mosquitto.service", "Reload", "StartUnit mosquitto.service"}},
+		{models.ActionEnable, "enabling", []string{mosquittoReset, "EnableUnitFiles mosquitto.service", "Reload", "StartUnit mosquitto.service"}},
 		{models.ActionDisable, "disabling", []string{"DisableUnitFiles mosquitto.service", "Reload", "StopUnit mosquitto.service"}},
 	} {
 		t.Run(tc.verb, func(t *testing.T) {
@@ -268,6 +275,113 @@ func TestServiceActionCalls(t *testing.T) {
 				t.Fatalf("%d %s", status, body)
 			}
 			if c := f.Calls(); !slices.Equal(c, tc.want) {
+				t.Fatalf("calls %q", c)
+			}
+		})
+	}
+}
+
+func TestServiceActionClearsAFailedUnit(t *testing.T) {
+	failed := sysbus.UnitProperties{LoadState: "loaded", ActiveState: "failed", SubState: "failed", UnitFileState: "enabled"}
+	for _, tc := range []struct {
+		verb string
+		want []string
+	}{
+		{models.ActionStart, []string{mosquittoReset, "StartUnit mosquitto.service"}},
+		{models.ActionStop, []string{"StopUnit mosquitto.service", mosquittoReset}},
+		{models.ActionEnable, []string{mosquittoReset, "EnableUnitFiles mosquitto.service", "Reload", "StartUnit mosquitto.service"}},
+		{models.ActionDisable, []string{"DisableUnitFiles mosquitto.service", "Reload", "StopUnit mosquitto.service", mosquittoReset}},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("mosquitto.service", failed)
+			(&stubBackend{}).install(t)
+			a := newHandlerTestApp(t)
+
+			if status, _, body := postAction(t, a, tc.verb, "mosquitto"); status != 200 {
+				t.Fatalf("%d %s", status, body)
+			}
+			if c := f.Calls(); !slices.Equal(c, tc.want) {
+				t.Fatalf("calls %q", c)
+			}
+		})
+	}
+
+	t.Run(models.ActionRestart, func(t *testing.T) {
+		f := useFakeBus(t)
+		f.SetUnit("mosquitto.service", failed)
+		done := trackGuard(t)
+		(&stubBackend{}).install(t)
+		a := newHandlerTestApp(t)
+		if status, _, body := postAction(t, a, models.ActionRestart, "mosquitto"); status != 200 {
+			t.Fatalf("%d %s", status, body)
+		}
+		waitRestart(t, done)
+		want := []string{mosquittoReset, "RestartUnit mosquitto.service"}
+		if c := f.Calls(); !slices.Equal(c, want) {
+			t.Fatalf("calls %q", c)
+		}
+	})
+}
+
+// The reset answers nothing to the client: the action it comes with has gone
+// through, or is about to.
+func TestServiceActionResetFailure(t *testing.T) {
+	failed := sysbus.UnitProperties{LoadState: "loaded", ActiveState: "failed", UnitFileState: "enabled"}
+	for _, verb := range []string{models.ActionStart, models.ActionStop, models.ActionEnable, models.ActionDisable} {
+		t.Run(verb, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("mosquitto.service", failed)
+			f.Fail("ResetFailedUnit", errors.New(secretDetail))
+			logs := captureLogs(t)
+			(&stubBackend{}).install(t)
+			a := newHandlerTestApp(t)
+
+			status, _, body := postAction(t, a, verb, "mosquitto")
+			if status != 200 || strings.Contains(body, secretDetail) {
+				t.Fatalf("%d %s", status, body)
+			}
+			waitLog(t, logs, secretDetail)
+		})
+	}
+}
+
+// A healthy unit that dies while stopping must stay failed: nothing here may
+// reset it.
+func TestServiceActionKeepsAFailureFromTheStop(t *testing.T) {
+	for _, verb := range []string{models.ActionStop, models.ActionDisable} {
+		t.Run(verb, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("mosquitto.service", loadedUnit)
+			f.SetJobResult("mosquitto.service", "failed")
+			logs := captureLogs(t)
+			(&stubBackend{}).install(t)
+			a := newHandlerTestApp(t)
+
+			if status, _, body := postAction(t, a, verb, "mosquitto"); status != 200 {
+				t.Fatalf("%d %s", status, body)
+			}
+			waitLog(t, logs, "job failed")
+			if c := f.Calls(); slices.Contains(c, mosquittoReset) {
+				t.Fatalf("calls %q", c)
+			}
+		})
+	}
+}
+
+func TestServiceActionDuringUpgradeClearsNothing(t *testing.T) {
+	for _, verb := range serviceVerbs {
+		t.Run(verb, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("mosquitto.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: "failed", UnitFileState: "enabled"})
+			(&stubBackend{}).install(t)
+			countGuard(t, models.ErrUpgradeInProgress)
+			a := newHandlerTestApp(t)
+
+			if status, r, body := postAction(t, a, verb, "mosquitto"); status != 409 || r.Code != "upgrade_in_progress" {
+				t.Fatalf("%d %s", status, body)
+			}
+			if c := f.Calls(); len(c) != 0 {
 				t.Fatalf("calls %q", c)
 			}
 		})
@@ -293,11 +407,11 @@ func TestServiceActionFailedStep(t *testing.T) {
 		verb, failing string
 		want          []string
 	}{
-		{models.ActionStart, "StartUnit", []string{"StartUnit mosquitto.service"}},
+		{models.ActionStart, "StartUnit", []string{mosquittoReset, "StartUnit mosquitto.service"}},
 		{models.ActionStop, "StopUnit", []string{"StopUnit mosquitto.service"}},
-		{models.ActionEnable, "EnableUnitFiles", []string{"EnableUnitFiles mosquitto.service"}},
-		{models.ActionEnable, "Reload", []string{"EnableUnitFiles mosquitto.service", "Reload"}},
-		{models.ActionEnable, "StartUnit", []string{"EnableUnitFiles mosquitto.service", "Reload", "StartUnit mosquitto.service"}},
+		{models.ActionEnable, "EnableUnitFiles", []string{mosquittoReset, "EnableUnitFiles mosquitto.service"}},
+		{models.ActionEnable, "Reload", []string{mosquittoReset, "EnableUnitFiles mosquitto.service", "Reload"}},
+		{models.ActionEnable, "StartUnit", []string{mosquittoReset, "EnableUnitFiles mosquitto.service", "Reload", "StartUnit mosquitto.service"}},
 		{models.ActionDisable, "DisableUnitFiles", []string{"DisableUnitFiles mosquitto.service"}},
 		{models.ActionDisable, "Reload", []string{"DisableUnitFiles mosquitto.service", "Reload"}},
 		{models.ActionDisable, "StopUnit", []string{"DisableUnitFiles mosquitto.service", "Reload", "StopUnit mosquitto.service"}},
@@ -415,6 +529,7 @@ func TestServiceActionRunsUnderTheGuard(t *testing.T) {
 func testActionUnderGuard(t *testing.T, id, verb string) {
 	f := useFakeBus(t)
 	unit := loadedUnit
+	unit.ActiveState = "failed"
 	if id == "olad" {
 		unit.UnitFileState = "generated"
 		fakeSysv(t, 0)
@@ -458,7 +573,7 @@ func testActionUnderGuard(t *testing.T, id, verb string) {
 
 func TestServiceActionSysv(t *testing.T) {
 	for verb, want := range map[string][]string{
-		models.ActionEnable:  {"Reload", "StartUnit olad.service"},
+		models.ActionEnable:  {"ResetFailedUnit olad.service", "Reload", "StartUnit olad.service"},
 		models.ActionDisable: {"Reload", "StopUnit olad.service"},
 	} {
 		t.Run(verb, func(t *testing.T) {
@@ -490,7 +605,11 @@ func TestServiceActionSysv(t *testing.T) {
 			if status != 500 || r.Code != codeInternal || strings.Contains(body, secretDetail) {
 				t.Fatalf("%d %s", status, body)
 			}
-			if c := f.Calls(); len(c) != 0 {
+			var want []string
+			if verb == models.ActionEnable {
+				want = []string{"ResetFailedUnit olad.service"}
+			}
+			if c := f.Calls(); !slices.Equal(c, want) {
 				t.Fatalf("calls %q", c)
 			}
 			waitLog(t, logs, secretDetail)

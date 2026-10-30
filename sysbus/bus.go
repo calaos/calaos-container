@@ -45,6 +45,10 @@ type SystemdBus interface {
 	RestartUnit(ctx context.Context, unit string) (*Job, error)
 	ReloadOrRestartUnit(ctx context.Context, unit string) (*Job, error)
 
+	// ResetFailedUnit leaves the failed state and clears the start rate limit
+	// of unit. The journal keeps its lines.
+	ResetFailedUnit(ctx context.Context, unit string) error
+
 	// EnableUnitFiles and DisableUnitFiles only touch the symlinks: unlike
 	// systemctl they neither reload systemd nor call systemd-sysv-install
 	// for a unit that has only a SysV script.

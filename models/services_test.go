@@ -194,7 +194,7 @@ func TestCheckUnit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := sysbustest.New()
 			f.SetUnit("x.service", tc.p)
-			err := CheckUnit(ctx, f, "x.service")
+			_, err := CheckUnit(ctx, f, "x.service")
 			if !errors.Is(err, tc.want) || (tc.want != nil && !errors.Is(err, ErrUnitUnavailable)) {
 				t.Fatalf("%v", err)
 			}
@@ -204,10 +204,10 @@ func TestCheckUnit(t *testing.T) {
 	f := sysbustest.New()
 	boom := errors.New("boom")
 	f.Fail("UnitProperties", boom)
-	if err := CheckUnit(ctx, f, "x.service"); !errors.Is(err, boom) {
+	if _, err := CheckUnit(ctx, f, "x.service"); !errors.Is(err, boom) {
 		t.Fatalf("%v", err)
 	}
-	if err := CheckUnit(ctx, shortBus{f}, "x.service"); err == nil {
+	if _, err := CheckUnit(ctx, shortBus{f}, "x.service"); err == nil {
 		t.Fatal("no error on a short reply")
 	}
 }
@@ -232,7 +232,7 @@ func TestQueueRestart(t *testing.T) {
 			if err := job.Wait(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if c := f.Calls(); len(c) != 1 || c[0] != tc.want {
+			if c := f.Calls(); !slices.Equal(c, []string{"ResetFailedUnit x.service", tc.want}) {
 				t.Fatalf("%q", c)
 			}
 		})
@@ -247,7 +247,7 @@ func TestQueueRestartRefused(t *testing.T) {
 	if _, err := QueueRestart(ctx, f, s, "x.service"); !errors.Is(err, ErrUnitUnavailable) {
 		t.Fatalf("not found: %v", err)
 	}
-	f.SetUnit("x.service", sysbus.UnitProperties{LoadState: "masked"})
+	f.SetUnit("x.service", sysbus.UnitProperties{LoadState: "masked", ActiveState: "failed"})
 	if _, err := QueueRestart(ctx, f, s, "x.service"); !errors.Is(err, ErrUnitUnavailable) {
 		t.Fatalf("masked: %v", err)
 	}
@@ -420,14 +420,14 @@ func TestQueueAction(t *testing.T) {
 		verb string
 		want []string
 	}{
-		{ActionStart, []string{"StartUnit x.service"}},
+		{ActionStart, []string{"ResetFailedUnit x.service", "StartUnit x.service"}},
 		{ActionStop, []string{"StopUnit x.service"}},
-		{ActionEnable, []string{"EnableUnitFiles x.service", "Reload", "StartUnit x.service"}},
+		{ActionEnable, []string{"ResetFailedUnit x.service", "EnableUnitFiles x.service", "Reload", "StartUnit x.service"}},
 		{ActionDisable, []string{"DisableUnitFiles x.service", "Reload", "StopUnit x.service"}},
 	} {
 		t.Run(tc.verb, func(t *testing.T) {
 			f := sysbustest.New()
-			job, err := QueueAction(f, mosquitto, "x.service", tc.verb, time.Second)
+			job, err := QueueAction(f, mosquitto, "x.service", tc.verb, false, time.Second)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -441,7 +441,7 @@ func TestQueueAction(t *testing.T) {
 	}
 
 	f := sysbustest.New()
-	if job, err := QueueAction(f, mosquitto, "x.service", ActionRestart, time.Second); err == nil || job != nil || len(f.Calls()) != 0 {
+	if job, err := QueueAction(f, mosquitto, "x.service", ActionRestart, true, time.Second); err == nil || job != nil || len(f.Calls()) != 0 {
 		t.Fatalf("restart has its own path: %v %q", err, f.Calls())
 	}
 }
@@ -449,14 +449,15 @@ func TestQueueAction(t *testing.T) {
 // A failed step ends the sequence: no enable without its start, no disable
 // without its stop, and no job for the caller to wait on.
 func TestQueueActionStopsAtTheFirstFailure(t *testing.T) {
+	const reset = "ResetFailedUnit x.service"
 	mosquitto, _ := LookupService("mosquitto")
 	for _, tc := range []struct {
 		verb, failing string
 		want          []string
 	}{
-		{ActionEnable, "EnableUnitFiles", []string{"EnableUnitFiles x.service"}},
-		{ActionEnable, "Reload", []string{"EnableUnitFiles x.service", "Reload"}},
-		{ActionEnable, "StartUnit", []string{"EnableUnitFiles x.service", "Reload", "StartUnit x.service"}},
+		{ActionEnable, "EnableUnitFiles", []string{reset, "EnableUnitFiles x.service"}},
+		{ActionEnable, "Reload", []string{reset, "EnableUnitFiles x.service", "Reload"}},
+		{ActionEnable, "StartUnit", []string{reset, "EnableUnitFiles x.service", "Reload", "StartUnit x.service"}},
 		{ActionDisable, "DisableUnitFiles", []string{"DisableUnitFiles x.service"}},
 		{ActionDisable, "Reload", []string{"DisableUnitFiles x.service", "Reload"}},
 		{ActionDisable, "StopUnit", []string{"DisableUnitFiles x.service", "Reload", "StopUnit x.service"}},
@@ -465,7 +466,7 @@ func TestQueueActionStopsAtTheFirstFailure(t *testing.T) {
 			f := sysbustest.New()
 			boom := errors.New("boom")
 			f.Fail(tc.failing, boom)
-			job, err := QueueAction(f, mosquitto, "x.service", tc.verb, time.Second)
+			job, err := QueueAction(f, mosquitto, "x.service", tc.verb, false, time.Second)
 			if !errors.Is(err, boom) || job != nil {
 				t.Fatalf("job %v err %v", job, err)
 			}
@@ -476,16 +477,113 @@ func TestQueueActionStopsAtTheFirstFailure(t *testing.T) {
 	}
 }
 
+func TestCheckUnitReadsTheFailedState(t *testing.T) {
+	for state, want := range map[string]bool{"failed": true, "active": false, "inactive": false, "": false} {
+		f := sysbustest.New()
+		f.SetUnit("x.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: state})
+		got, err := CheckUnit(context.Background(), f, "x.service")
+		if err != nil || got != want {
+			t.Fatalf("%q: %v %v", state, got, err)
+		}
+		if n := f.Reads("UnitProperties"); n != 1 {
+			t.Fatalf("%d reads", n)
+		}
+	}
+}
+
+// A stop clears only the failure the unit had before it: a unit that was
+// healthy and ends failed did not stop cleanly, and that must stay visible.
+func TestQueueActionResetsFailedUnits(t *testing.T) {
+	const reset = "ResetFailedUnit x.service"
+	mosquitto, _ := LookupService("mosquitto")
+	for _, tc := range []struct {
+		name   string
+		verb   string
+		failed bool
+		want   []string
+	}{
+		{"failed start", ActionStart, true, []string{reset, "StartUnit x.service"}},
+		{"healthy start", ActionStart, false, []string{reset, "StartUnit x.service"}},
+		{"failed enable", ActionEnable, true, []string{reset, "EnableUnitFiles x.service", "Reload", "StartUnit x.service"}},
+		{"healthy enable", ActionEnable, false, []string{reset, "EnableUnitFiles x.service", "Reload", "StartUnit x.service"}},
+		{"failed stop", ActionStop, true, []string{"StopUnit x.service", reset}},
+		{"healthy stop", ActionStop, false, []string{"StopUnit x.service"}},
+		{"failed disable", ActionDisable, true, []string{"DisableUnitFiles x.service", "Reload", "StopUnit x.service", reset}},
+		{"healthy disable", ActionDisable, false, []string{"DisableUnitFiles x.service", "Reload", "StopUnit x.service"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := sysbustest.New()
+			job, err := QueueAction(f, mosquitto, "x.service", tc.verb, tc.failed, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := job.Wait(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if c := f.Calls(); !slices.Equal(c, tc.want) {
+				t.Fatalf("%q", c)
+			}
+		})
+	}
+}
+
+// A stop that was never queued left the unit as it was: nothing to clear.
+func TestQueueActionNoResetWithoutTheStop(t *testing.T) {
+	mosquitto, _ := LookupService("mosquitto")
+	for verb, failing := range map[string]string{
+		ActionStop:    "StopUnit",
+		ActionDisable: "Reload",
+	} {
+		f := sysbustest.New()
+		f.Fail(failing, errors.New("boom"))
+		if job, err := QueueAction(f, mosquitto, "x.service", verb, true, time.Second); err == nil || job != nil {
+			t.Fatalf("%s: job %v err %v", verb, job, err)
+		}
+		if c := f.Calls(); slices.Contains(c, "ResetFailedUnit x.service") {
+			t.Fatalf("%s: %q", verb, c)
+		}
+	}
+}
+
+// The reset is housekeeping: whatever it answers, the action goes on and the
+// caller gets its job.
+func TestResetFailureDoesNotStopTheAction(t *testing.T) {
+	ctx := context.Background()
+	mosquitto, _ := LookupService("mosquitto")
+	for _, verb := range []string{ActionStart, ActionStop, ActionEnable, ActionDisable} {
+		f := sysbustest.New()
+		f.Fail("ResetFailedUnit", errors.New("boom"))
+		job, err := QueueAction(f, mosquitto, "x.service", verb, true, time.Second)
+		if err != nil {
+			t.Fatalf("%s: %v", verb, err)
+		}
+		if err := job.Wait(ctx); err != nil {
+			t.Fatalf("%s: %v", verb, err)
+		}
+	}
+
+	f := sysbustest.New()
+	f.SetUnit("x.service", loaded)
+	f.Fail("ResetFailedUnit", errors.New("boom"))
+	job, err := QueueRestart(ctx, f, mosquitto, "x.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestQueueActionSysv(t *testing.T) {
 	olad, _ := LookupService("olad")
 	for verb, want := range map[string][]string{
-		ActionEnable:  {"Reload", "StartUnit olad.service"},
+		ActionEnable:  {"ResetFailedUnit olad.service", "Reload", "StartUnit olad.service"},
 		ActionDisable: {"Reload", "StopUnit olad.service"},
 	} {
 		t.Run(verb, func(t *testing.T) {
 			argv := fakeSysvInstall(t, 0)
 			f := sysbustest.New()
-			job, err := QueueAction(f, olad, "olad.service", verb, time.Second)
+			job, err := QueueAction(f, olad, "olad.service", verb, false, time.Second)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -502,12 +600,14 @@ func TestQueueActionSysv(t *testing.T) {
 		t.Run(verb+" failed", func(t *testing.T) {
 			fakeSysvInstall(t, 1)
 			f := sysbustest.New()
-			job, err := QueueAction(f, olad, "olad.service", verb, time.Second)
+			job, err := QueueAction(f, olad, "olad.service", verb, false, time.Second)
 			if err == nil || job != nil || !strings.Contains(err.Error(), "sysv-detail") {
 				t.Fatalf("job %v err %v", job, err)
 			}
-			if c := f.Calls(); len(c) != 0 {
-				t.Fatalf("%q", c)
+			for _, c := range f.Calls() {
+				if c != "ResetFailedUnit olad.service" {
+					t.Fatalf("%q", f.Calls())
+				}
 			}
 		})
 	}

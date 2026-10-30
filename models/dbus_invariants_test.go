@@ -131,7 +131,7 @@ func TestQueueRestartRefusalPrecedesMutation(t *testing.T) {
 		if refused && len(f.Calls()) != 0 {
 			t.Fatalf("%+v: mutation before the refusal: %q", p, f.Calls())
 		}
-		if !refused && (err != nil || len(f.Calls()) != 1) {
+		if !refused && (err != nil || len(f.Calls()) != 2) {
 			t.Fatalf("%+v: err %v calls %q", p, err, f.Calls())
 		}
 	}

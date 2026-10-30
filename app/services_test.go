@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -186,7 +187,7 @@ func TestServiceRestartAnswersFirst(t *testing.T) {
 			if time.Since(start) < restartDelay || answered >= restartDelay {
 				t.Fatalf("answered after %v, restarted before %v", answered, restartDelay)
 			}
-			if c := f.Calls(); len(c) != 1 || c[0] != tc.want {
+			if c := f.Calls(); !slices.Equal(c, []string{"ResetFailedUnit " + tc.installed, tc.want}) {
 				t.Fatalf("calls %q, want %q", c, tc.want)
 			}
 		})
@@ -331,14 +332,14 @@ func TestSystemRestartJobResult(t *testing.T) {
 		want  int
 		calls int
 	}{
-		{"done", func(*sysbustest.Bus) {}, 200, 1},
-		{"failed", func(f *sysbustest.Bus) { f.SetJobResult("calaos-home.service", "failed") }, 500, 1},
-		{"timeout", func(f *sysbustest.Bus) { f.SetJobResult("calaos-home.service", "timeout") }, 500, 1},
+		{"done", func(*sysbustest.Bus) {}, 200, 2},
+		{"failed", func(f *sysbustest.Bus) { f.SetJobResult("calaos-home.service", "failed") }, 500, 2},
+		{"timeout", func(f *sysbustest.Bus) { f.SetJobResult("calaos-home.service", "timeout") }, 500, 2},
 		{"not found", func(f *sysbustest.Bus) {
 			f.SetUnit("calaos-home.service", sysbus.UnitProperties{LoadState: "not-found"})
 		}, 500, 0},
 		{"masked", func(f *sysbustest.Bus) { f.SetUnit("calaos-home.service", sysbus.UnitProperties{LoadState: "masked"}) }, 500, 0},
-		{"not queued", func(f *sysbustest.Bus) { f.Fail("RestartUnit", errors.New(secretDetail)) }, 500, 1},
+		{"not queued", func(f *sysbustest.Bus) { f.Fail("RestartUnit", errors.New(secretDetail)) }, 500, 2},
 	}
 	for _, route := range routes {
 		for _, tc := range cases {
@@ -475,7 +476,8 @@ func TestSystemRestartReleasesGuardBeforeTheJobEnds(t *testing.T) {
 		t.Fatal("no answer after the job ended")
 	}
 
-	if c := f.Calls(); len(c) != 1 || c[0] != "RestartUnit calaos-home.service" {
+	want := []string{"ResetFailedUnit calaos-home.service", "RestartUnit calaos-home.service"}
+	if c := f.Calls(); !slices.Equal(c, want) {
 		t.Fatalf("calls %q", c)
 	}
 	if len(probe.unguarded) != 0 {

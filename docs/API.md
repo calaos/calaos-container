@@ -745,6 +745,10 @@ All five routes are `bearer, session allowed`, take the body `{"unit": "<id>"}` 
 - A `stop` lasts until the next reboot, or the next update of the package when the unit is
   enabled. A unit that is not enabled is not started by an update, nor by a reboot: `start` and
   `restart` do not change that, `enable` does. An update keeps a disabled unit disabled.
+- The daemon clears a `failed` state with `ResetFailedUnit`: always before `start`, `restart` and
+  `enable`, which also clears the start rate limit, and once the stop is queued for `stop` and
+  `disable` of a unit that was `failed` before the call; a unit that ends `failed` from a stop
+  stays `failed`, and a failed reset is only logged.
 - A unit whose `startup` is `masked`, or that is not installed, refuses every verb (below).
 
 Checks, in this order, on every one of the five routes:

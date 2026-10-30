@@ -206,6 +206,10 @@ func (b *Bus) ReloadOrRestartUnit(ctx context.Context, unit string) (*sysbus.Job
 	return b.queue("ReloadOrRestartUnit", unit)
 }
 
+func (b *Bus) ResetFailedUnit(ctx context.Context, unit string) error {
+	return b.mutate("ResetFailedUnit", unit)
+}
+
 func (b *Bus) EnableUnitFiles(ctx context.Context, units []string) error {
 	return b.mutate("EnableUnitFiles", units...)
 }
