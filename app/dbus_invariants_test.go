@@ -68,7 +68,7 @@ func TestServiceRestartMutatedIDsNeverReachGuardOrBus(t *testing.T) {
 		for n := 1 + rng.Intn(2); n > 0; n-- {
 			id = mutate[rng.Intn(len(mutate))](id)
 		}
-		if s, ok := models.LookupService(id); ok && s.Restartable {
+		if s, ok := models.LookupService(id); ok && s.Allows(models.ActionRestart) {
 			continue
 		}
 		seen[id] = true
@@ -101,7 +101,7 @@ func TestServiceRestartGuardAppliesToEveryRestartableUnit(t *testing.T) {
 	for _, s := range models.Services {
 		status, r, _ := v2Do2(t, a, httpCase{method: "POST", path: "/api/v2/system/services/restart",
 			ctype: "application/json", body: restartBody(t, s.ID)})
-		if s.Restartable {
+		if s.Allows(models.ActionRestart) {
 			want++
 			if status != 409 || r.Code != codeUpgradeInProgress {
 				t.Fatalf("%s: %d %q", s.ID, status, r.Code)
@@ -142,14 +142,17 @@ func TestServiceRestartSendsOnlyTableUnits(t *testing.T) {
 
 	var want []string
 	for _, s := range models.Services {
-		if !s.Restartable {
+		if !s.Allows(models.ActionRestart) {
 			continue
 		}
-		unit := s.Unit
-		if s.ID == "ntp" {
-			unit = "systemd-timesyncd.service"
+		call := "RestartUnit " + s.Unit
+		switch s.ID {
+		case "ntp":
+			call = "RestartUnit systemd-timesyncd.service"
+		case "ssh":
+			call = "ReloadOrRestartUnit ssh.service"
 		}
-		want = append(want, "RestartUnit "+unit)
+		want = append(want, call)
 
 		status, r, _ := v2Do2(t, a, httpCase{method: "POST", path: "/api/v2/system/services/restart",
 			ctype: "application/json", body: restartBody(t, s.ID)})

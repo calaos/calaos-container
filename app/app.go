@@ -21,6 +21,7 @@ import (
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/events"
 	logger "github.com/calaos/calaos-container/log"
+	"github.com/calaos/calaos-container/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -237,7 +238,11 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Get("/system/info", s, a.v2SystemInfo)
 	v2.Get("/system/fs_status", s, a.v2SystemFsStatus)
 	v2.Get("/system/services", s, a.v2Services)
-	v2.Post("/system/services/restart", s, a.v2ServiceRestart)
+	v2.Post("/system/services/restart", s, a.v2ServiceAction(models.ActionRestart))
+	v2.Post("/system/services/start", s, a.v2ServiceAction(models.ActionStart))
+	v2.Post("/system/services/stop", s, a.v2ServiceAction(models.ActionStop))
+	v2.Post("/system/services/enable", s, a.v2ServiceAction(models.ActionEnable))
+	v2.Post("/system/services/disable", s, a.v2ServiceAction(models.ActionDisable))
 	v2.Get("/system/time", s, a.v2SystemTime)
 	v2.Post("/system/time", s, a.v2SystemTimeSet)
 	v2.Get("/system/timezones", s, a.v2SystemTimezones)

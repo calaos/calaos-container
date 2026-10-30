@@ -1,9 +1,12 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
+	"slices"
 	"sync"
 	"time"
 
@@ -12,40 +15,70 @@ import (
 
 const (
 	ServiceKindService = "service"
-	ServiceKindOneshot = "oneshot"
+
+	ActionRestart = "restart"
+	ActionStart   = "start"
+	ActionStop    = "stop"
+	ActionEnable  = "enable"
+	ActionDisable = "disable"
+
+	StartupEnabled  = "enabled"
+	StartupDisabled = "disabled"
+	StartupMasked   = "masked"
+	StartupStatic   = "static"
 
 	loadStateNotFound = "not-found"
+	loadStateMasked   = "masked"
+
+	unitFileGenerated = "generated"
+
+	// olad ships a SysV script only: systemd generates its unit, and
+	// EnableUnitFiles does not act on it.
+	sysvServiceID = "olad"
 )
 
 // Bus is the system bus. Tests replace it with sysbustest.Bus.
 var Bus sysbus.SystemdBus = sysbus.New()
 
+// SysvInstall is not on the PATH of a systemd service. Tests replace it.
+var SysvInstall = "/lib/systemd/systemd-sysv-install"
+
 // Service is a row of the allowlist. Unit names only ever come from here.
 type Service struct {
-	ID          string
-	Unit        string
-	Kind        string
-	Restartable bool
+	ID      string
+	Unit    string
+	Actions []string
 }
 
-// Services is the allowlist, in the order of docs/API.md. calaos-container
-// may be running apt, haproxy carries the admin session and networkd is
-// reloaded by the network routes under their own guard: status only.
+// Allows tells whether verb is one of the actions of the row.
+func (s Service) Allows(verb string) bool {
+	return slices.Contains(s.Actions, verb)
+}
+
+var (
+	allActions  = []string{ActionRestart, ActionStart, ActionStop, ActionEnable, ActionDisable}
+	restartOnly = []string{ActionRestart}
+)
+
+// Services is the allowlist, in the order of docs/API.md. calaos-server,
+// haproxy, calaos-container and ssh are the way back in: stopping one leaves
+// a box no client can repair. networkd drops its leases on a restart, and
+// ntp is switched by system/time.
 var Services = []Service{
-	{"calaos-server", "calaos-server.service", ServiceKindService, true},
-	{"calaos-home", "calaos-home.service", ServiceKindService, true},
-	{"mosquitto", "mosquitto.service", ServiceKindService, true},
-	{"zigbee2mqtt", "zigbee2mqtt.service", ServiceKindService, true},
-	{"influxdb", "influxdb.service", ServiceKindService, true},
-	{"grafana", "grafana.service", ServiceKindService, true},
-	{"hue2mqtt", "hue2mqtt.service", ServiceKindService, true},
-	{"envoy", "envoy.service", ServiceKindService, true},
-	{"olad", "olad.service", ServiceKindService, true},
-	{"ntp", "chrony.service", ServiceKindService, true},
-	{"calaos-container", "calaos-container.service", ServiceKindService, false},
-	{"haproxy", "haproxy.service", ServiceKindService, false},
-	{"networkd", "systemd-networkd.service", ServiceKindService, false},
-	{"ssh", "ssh.service", ServiceKindService, false},
+	{"calaos-server", "calaos-server.service", restartOnly},
+	{"calaos-home", "calaos-home.service", allActions},
+	{"mosquitto", "mosquitto.service", allActions},
+	{"zigbee2mqtt", "zigbee2mqtt.service", allActions},
+	{"influxdb", "influxdb.service", allActions},
+	{"grafana", "grafana.service", allActions},
+	{"hue2mqtt", "hue2mqtt.service", allActions},
+	{"envoy", "envoy.service", allActions},
+	{sysvServiceID, "olad.service", allActions},
+	{"ntp", "chrony.service", restartOnly},
+	{"calaos-container", "calaos-container.service", restartOnly},
+	{"haproxy", "haproxy.service", restartOnly},
+	{"networkd", "systemd-networkd.service", []string{}},
+	{"ssh", "ssh.service", restartOnly},
 }
 
 // unitFallbacks lists, for a unit of the tables, the units tried in order
@@ -99,7 +132,11 @@ func LookupService(id string) (Service, bool) {
 
 // ErrUnitUnavailable: the unit is not installed or is masked. Nothing was
 // asked of systemd.
-var ErrUnitUnavailable = errors.New("unit not available")
+var (
+	ErrUnitUnavailable  = errors.New("unit not available")
+	ErrUnitNotInstalled = fmt.Errorf("%w: not installed", ErrUnitUnavailable)
+	ErrUnitMasked       = fmt.Errorf("%w: masked", ErrUnitUnavailable)
+)
 
 // CheckUnit is the gate before any mutation of a unit: a failed read counts
 // as a refusal too, never as an installed unit.
@@ -112,37 +149,136 @@ func CheckUnit(ctx context.Context, bus sysbus.SystemdBus, unit string) error {
 		return fmt.Errorf("%d unit states for %s", len(props), unit)
 	}
 	switch p := props[0]; {
-	case p.LoadState == loadStateNotFound, p.LoadState == "masked",
-		p.UnitFileState == "masked", p.UnitFileState == "masked-runtime":
-		return fmt.Errorf("%w: %s", ErrUnitUnavailable, unit)
+	case p.LoadState == loadStateNotFound:
+		return fmt.Errorf("%w: %s", ErrUnitNotInstalled, unit)
+	case unitStartup(p) == StartupMasked:
+		return fmt.Errorf("%w: %s", ErrUnitMasked, unit)
 	}
 	return nil
 }
 
-// QueueRestart restarts unit, the resolved unit of s: a oneshot is started,
-// and ssh is reloaded when it can be, so that the session in use survives.
+// QueueRestart restarts unit, the resolved unit of s. ssh is reloaded when it
+// can be, so that the session in use survives.
 func QueueRestart(ctx context.Context, bus sysbus.SystemdBus, s Service, unit string) (*sysbus.Job, error) {
 	if err := CheckUnit(ctx, bus, unit); err != nil {
 		return nil, err
 	}
-	switch {
-	case s.Kind == ServiceKindOneshot:
-		return bus.StartUnit(ctx, unit)
-	case s.ID == "ssh":
+	if s.ID == "ssh" {
 		return bus.ReloadOrRestartUnit(ctx, unit)
 	}
 	return bus.RestartUnit(ctx, unit)
 }
 
+// QueueAction runs start, stop, enable or disable on unit, the resolved unit
+// of s, and returns the job left to wait for. limit bounds each step, not the
+// whole sequence. A failed step stops it: neither half of enable or disable
+// goes on alone.
+func QueueAction(bus sysbus.SystemdBus, s Service, unit, verb string, limit time.Duration) (*sysbus.Job, error) {
+	run := func(step func(ctx context.Context) error) error {
+		ctx, cancel := context.WithTimeout(context.Background(), limit)
+		defer cancel()
+		return step(ctx)
+	}
+	queue := func(q func(context.Context, string) (*sysbus.Job, error)) (*sysbus.Job, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), limit)
+		defer cancel()
+		return q(ctx, unit)
+	}
+
+	switch verb {
+	case ActionStart:
+		return queue(bus.StartUnit)
+	case ActionStop:
+		return queue(bus.StopUnit)
+	case ActionEnable, ActionDisable:
+		if err := run(func(ctx context.Context) error { return setBootState(ctx, bus, s, unit, verb) }); err != nil {
+			return nil, err
+		}
+		if err := run(bus.Reload); err != nil {
+			return nil, err
+		}
+		if verb == ActionEnable {
+			return queue(bus.StartUnit)
+		}
+		return queue(bus.StopUnit)
+	}
+	return nil, fmt.Errorf("unknown action %q", verb)
+}
+
+func setBootState(ctx context.Context, bus sysbus.SystemdBus, s Service, unit, verb string) error {
+	switch {
+	case s.ID == sysvServiceID:
+		return sysvInstall(ctx, verb)
+	case verb == ActionEnable:
+		return bus.EnableUnitFiles(ctx, []string{unit})
+	}
+	return bus.DisableUnitFiles(ctx, []string{unit})
+}
+
+// sysvInstall does not go through the Executor: it logs a failure as an
+// error, and is-enabled exits 1 on every read of a disabled olad.
+func sysvInstall(ctx context.Context, verb string) error {
+	cmd := exec.CommandContext(ctx, SysvInstall, verb, sysvServiceID) //nolint:gosec // both are constants of this package
+	cmd.WaitDelay = runCancelGrace
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("systemd-sysv-install %s %s: %w: %s", verb, sysvServiceID, err, stderr.String())
+	}
+	return nil
+}
+
+func sysvStartup(ctx context.Context) string {
+	err := sysvInstall(ctx, "is-enabled")
+	if err == nil {
+		return StartupEnabled
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		logging.Warnf("reading the boot state of %s: %v", sysvServiceID, err)
+	}
+	return StartupDisabled
+}
+
+// NormalizeStartup reduces a UnitFileState to the words of the API.
+func NormalizeStartup(unitFileState string) string {
+	switch unitFileState {
+	case "enabled", "enabled-runtime", "linked", "linked-runtime", "alias":
+		return StartupEnabled
+	case "disabled":
+		return StartupDisabled
+	case "masked", "masked-runtime":
+		return StartupMasked
+	}
+	return StartupStatic
+}
+
+func unitStartup(p sysbus.UnitProperties) string {
+	if p.LoadState == loadStateMasked {
+		return StartupMasked
+	}
+	return NormalizeStartup(p.UnitFileState)
+}
+
+func serviceStartup(ctx context.Context, s Service, p sysbus.UnitProperties) string {
+	if s.ID == sysvServiceID && p.LoadState != loadStateMasked && p.UnitFileState == unitFileGenerated {
+		return sysvStartup(ctx)
+	}
+	return unitStartup(p)
+}
+
 type ServiceState struct {
-	ID          string  `json:"id"`
-	Unit        string  `json:"unit"`
-	Kind        string  `json:"kind"`
-	Restartable bool    `json:"restartable"`
-	ActiveState string  `json:"active_state"`
-	SubState    string  `json:"sub_state"`
-	Enabled     string  `json:"enabled"`
-	Since       *string `json:"since"`
+	ID          string   `json:"id"`
+	Unit        string   `json:"unit"`
+	Kind        string   `json:"kind"`
+	Actions     []string `json:"actions"`
+	Restartable bool     `json:"restartable"`
+	ActiveState string   `json:"active_state"`
+	SubState    string   `json:"sub_state"`
+	Enabled     string   `json:"enabled"`
+	Startup     string   `json:"startup"`
+	BootUnit    string   `json:"boot_unit"`
+	Since       *string  `json:"since"`
 }
 
 // ServiceStates reads every unit of the allowlist. A row with fallbacks
@@ -167,13 +303,21 @@ func ServiceStates(ctx context.Context, bus sysbus.SystemdBus) ([]ServiceState, 
 		pick := firstInstalled(props[next : next+len(cands)])
 		p := props[next+pick]
 		next += len(cands)
-		st := ServiceState{ID: s.ID, Unit: cands[pick], Kind: s.Kind, Restartable: s.Restartable}
+		st := ServiceState{
+			ID:          s.ID,
+			Unit:        cands[pick],
+			Kind:        ServiceKindService,
+			Actions:     s.Actions,
+			Restartable: s.Allows(ActionRestart),
+			BootUnit:    cands[pick],
+		}
 		if p.LoadState == loadStateNotFound {
 			st.ActiveState = loadStateNotFound
 		} else {
 			st.ActiveState = p.ActiveState
 			st.SubState = p.SubState
 			st.Enabled = p.UnitFileState
+			st.Startup = serviceStartup(ctx, s, p)
 			st.Since = unitSince(p.ActiveEnterTimestamp)
 		}
 		states[i] = st

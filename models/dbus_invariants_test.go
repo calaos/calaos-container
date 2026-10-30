@@ -60,7 +60,7 @@ func TestUnitNamesOnTheBusComeFromTheTable(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, s := range Services {
-				if !s.Restartable {
+				if !s.Allows(ActionRestart) {
 					continue
 				}
 				unit, err := ResolveUnit(ctx, f, s.Unit)
@@ -122,19 +122,17 @@ func TestQueueRestartRefusalPrecedesMutation(t *testing.T) {
 		}
 		refused := p.LoadState == "not-found" || p.LoadState == "masked" ||
 			p.UnitFileState == "masked" || p.UnitFileState == "masked-runtime"
-		for _, kind := range []string{ServiceKindService, ServiceKindOneshot} {
-			f := sysbustest.New()
-			f.SetUnit("x.service", p)
-			_, err := QueueRestart(ctx, f, Service{ID: "x", Kind: kind}, "x.service")
-			if refused != errors.Is(err, ErrUnitUnavailable) {
-				t.Fatalf("%+v %v: err %v", p, kind, err)
-			}
-			if refused && len(f.Calls()) != 0 {
-				t.Fatalf("%+v %v: mutation before the refusal: %q", p, kind, f.Calls())
-			}
-			if !refused && (err != nil || len(f.Calls()) != 1) {
-				t.Fatalf("%+v %v: err %v calls %q", p, kind, err, f.Calls())
-			}
+		f := sysbustest.New()
+		f.SetUnit("x.service", p)
+		_, err := QueueRestart(ctx, f, Service{ID: "x"}, "x.service")
+		if refused != errors.Is(err, ErrUnitUnavailable) {
+			t.Fatalf("%+v: err %v", p, err)
+		}
+		if refused && len(f.Calls()) != 0 {
+			t.Fatalf("%+v: mutation before the refusal: %q", p, f.Calls())
+		}
+		if !refused && (err != nil || len(f.Calls()) != 1) {
+			t.Fatalf("%+v: err %v calls %q", p, err, f.Calls())
 		}
 	}
 }
@@ -142,18 +140,11 @@ func TestQueueRestartRefusalPrecedesMutation(t *testing.T) {
 // A mutation the bus refuses is no job: the caller never gets a handle to
 // wait on.
 func TestQueueRestartBusRefusal(t *testing.T) {
-	for _, verb := range []string{"RestartUnit", "StartUnit", "ReloadOrRestartUnit"} {
+	for verb, id := range map[string]string{"RestartUnit": "x", "ReloadOrRestartUnit": "ssh"} {
 		f := sysbustest.New()
 		f.SetUnit("x.service", loaded)
 		f.Fail(verb, errors.New("boom"))
-		kind, id := ServiceKindService, "x"
-		switch verb {
-		case "StartUnit":
-			kind = ServiceKindOneshot
-		case "ReloadOrRestartUnit":
-			id = "ssh"
-		}
-		job, err := QueueRestart(context.Background(), f, Service{ID: id, Kind: kind}, "x.service")
+		job, err := QueueRestart(context.Background(), f, Service{ID: id}, "x.service")
 		if err == nil || job != nil {
 			t.Fatalf("%s: job %v err %v", verb, job, err)
 		}
