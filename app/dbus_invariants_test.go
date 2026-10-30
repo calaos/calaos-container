@@ -152,7 +152,8 @@ func TestServiceRestartSendsOnlyTableUnits(t *testing.T) {
 		case "ssh":
 			call = "ReloadOrRestartUnit ssh.service"
 		}
-		want = append(want, call)
+		_, resolved, _ := strings.Cut(call, " ")
+		want = append(want, "ResetFailedUnit "+resolved, call)
 
 		status, r, _ := v2Do2(t, a, httpCase{method: "POST", path: "/api/v2/system/services/restart",
 			ctype: "application/json", body: restartBody(t, s.ID)})

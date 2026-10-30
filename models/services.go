@@ -30,6 +30,8 @@ const (
 	loadStateNotFound = "not-found"
 	loadStateMasked   = "masked"
 
+	activeStateFailed = "failed"
+
 	unitFileGenerated = "generated"
 
 	// olad ships a SysV script only: systemd generates its unit, and
@@ -139,30 +141,42 @@ var (
 )
 
 // CheckUnit is the gate before any mutation of a unit: a failed read counts
-// as a refusal too, never as an installed unit.
-func CheckUnit(ctx context.Context, bus sysbus.SystemdBus, unit string) error {
+// as a refusal too, never as an installed unit. failed tells whether the unit
+// that passed is in the failed state.
+func CheckUnit(ctx context.Context, bus sysbus.SystemdBus, unit string) (failed bool, err error) {
 	props, err := bus.UnitProperties(ctx, unit)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(props) != 1 {
-		return fmt.Errorf("%d unit states for %s", len(props), unit)
+		return false, fmt.Errorf("%d unit states for %s", len(props), unit)
 	}
 	switch p := props[0]; {
 	case p.LoadState == loadStateNotFound:
-		return fmt.Errorf("%w: %s", ErrUnitNotInstalled, unit)
+		return false, fmt.Errorf("%w: %s", ErrUnitNotInstalled, unit)
 	case unitStartup(p) == StartupMasked:
-		return fmt.Errorf("%w: %s", ErrUnitMasked, unit)
+		return false, fmt.Errorf("%w: %s", ErrUnitMasked, unit)
+	default:
+		return p.ActiveState == activeStateFailed, nil
 	}
-	return nil
+}
+
+// resetFailed never stops an action: after a stop the job is already queued
+// and must be waited for, and before a start systemd decides on its own
+// whether the unit may run. A start it refuses shows in the job result.
+func resetFailed(ctx context.Context, bus sysbus.SystemdBus, unit string) {
+	if err := bus.ResetFailedUnit(ctx, unit); err != nil {
+		logging.Warnf("clearing the failed state of %s: %v", unit, err)
+	}
 }
 
 // QueueRestart restarts unit, the resolved unit of s. ssh is reloaded when it
 // can be, so that the session in use survives.
 func QueueRestart(ctx context.Context, bus sysbus.SystemdBus, s Service, unit string) (*sysbus.Job, error) {
-	if err := CheckUnit(ctx, bus, unit); err != nil {
+	if _, err := CheckUnit(ctx, bus, unit); err != nil {
 		return nil, err
 	}
+	resetFailed(ctx, bus, unit)
 	if s.ID == "ssh" {
 		return bus.ReloadOrRestartUnit(ctx, unit)
 	}
@@ -172,8 +186,9 @@ func QueueRestart(ctx context.Context, bus sysbus.SystemdBus, s Service, unit st
 // QueueAction runs start, stop, enable or disable on unit, the resolved unit
 // of s, and returns the job left to wait for. limit bounds each step, not the
 // whole sequence. A failed step stops it: neither half of enable or disable
-// goes on alone.
-func QueueAction(bus sysbus.SystemdBus, s Service, unit, verb string, limit time.Duration) (*sysbus.Job, error) {
+// goes on alone. failed is what CheckUnit read: a stop clears only a failure
+// from before it, so that a unit that dies while stopping stays failed.
+func QueueAction(bus sysbus.SystemdBus, s Service, unit, verb string, failed bool, limit time.Duration) (*sysbus.Job, error) {
 	run := func(step func(ctx context.Context) error) error {
 		ctx, cancel := context.WithTimeout(context.Background(), limit)
 		defer cancel()
@@ -184,13 +199,29 @@ func QueueAction(bus sysbus.SystemdBus, s Service, unit, verb string, limit time
 		defer cancel()
 		return q(ctx, unit)
 	}
+	reset := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), limit)
+		defer cancel()
+		resetFailed(ctx, bus, unit)
+	}
+	stop := func() (*sysbus.Job, error) {
+		job, err := queue(bus.StopUnit)
+		if err == nil && failed {
+			reset()
+		}
+		return job, err
+	}
 
 	switch verb {
 	case ActionStart:
+		reset()
 		return queue(bus.StartUnit)
 	case ActionStop:
-		return queue(bus.StopUnit)
+		return stop()
 	case ActionEnable, ActionDisable:
+		if verb == ActionEnable {
+			reset()
+		}
 		if err := run(func(ctx context.Context) error { return setBootState(ctx, bus, s, unit, verb) }); err != nil {
 			return nil, err
 		}
@@ -200,7 +231,7 @@ func QueueAction(bus sysbus.SystemdBus, s Service, unit, verb string, limit time
 		if verb == ActionEnable {
 			return queue(bus.StartUnit)
 		}
-		return queue(bus.StopUnit)
+		return stop()
 	}
 	return nil, fmt.Errorf("unknown action %q", verb)
 }
