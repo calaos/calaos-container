@@ -2,26 +2,28 @@ package app
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/calaos/calaos-container/models"
+	"github.com/calaos/calaos-container/sysbus"
 )
 
 const (
 	servicesCacheTTL = time.Second
-	serviceCmdLimit  = 10 * time.Second
+	serviceCallLimit = 10 * time.Second
+	// A restart is a stop then a start, each bounded by 90 s in systemd by
+	// default.
+	serviceJobLimit = 5 * time.Minute
 	// Log follow polls come every 2 s; a unit is only swapped by a package
 	// install.
 	unitCacheTTL = time.Minute
 )
 
 var (
-	serviceGuard      = models.ServiceGuard
-	runServiceCommand = models.RunCommandContext
+	serviceGuard = models.ServiceGuard
 	// The answer must reach the client before calaos-server, which relays
 	// it, receives SIGTERM.
 	restartDelay = 500 * time.Millisecond
@@ -54,7 +56,7 @@ func resetServicesCache() {
 
 // resolveUnit returns the installed candidate of a table unit. A failed
 // read is not cached and falls back to the unit itself.
-func resolveUnit(unit string, run func(context.Context, string, ...string) (string, error)) string {
+func resolveUnit(unit string, bus sysbus.SystemdBus) string {
 	if !models.HasUnitFallbacks(unit) {
 		return unit
 	}
@@ -63,17 +65,16 @@ func resolveUnit(unit string, run func(context.Context, string, ...string) (stri
 	if e, ok := unitCache.units[unit]; ok && time.Since(e.at) < unitCacheTTL {
 		return e.unit
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serviceCmdLimit)
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
 	defer cancel()
-	out, err := run(ctx, "systemctl", models.ResolveUnitArgs(unit)...)
+	resolved, err := models.ResolveUnit(ctx, bus, unit)
 	if err != nil {
-		logging.Warnf("systemctl show %s: %v", unit, err)
+		logging.Warnf("resolving %s: %v", unit, err)
 		return unit
 	}
 	if unitCache.units == nil {
 		unitCache.units = map[string]unitCacheEntry{}
 	}
-	resolved := models.ParseResolvedUnit(unit, out)
 	unitCache.units[unit] = unitCacheEntry{resolved, time.Now()}
 	return resolved
 }
@@ -85,13 +86,9 @@ func serviceStates() ([]models.ServiceState, error) {
 		return servicesCache.states, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), serviceCmdLimit)
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
 	defer cancel()
-	out, err := runServiceCommand(ctx, "systemctl", models.ServiceStateArgs()...)
-	if err != nil {
-		return nil, err
-	}
-	states, err := models.ParseServiceStates(out)
+	states, err := models.ServiceStates(ctx, models.Bus)
 	if err != nil {
 		return nil, err
 	}
@@ -127,24 +124,39 @@ func (a *AppServer) v2ServiceRestart(c *fiber.Ctx) error {
 	if err != nil {
 		return guardedError(err)
 	}
-	go restartService(svc, release, restartDelay, runServiceCommand)
+	go restartService(svc, release, restartDelay, models.Bus)
 
 	return sendOK(c, fiber.StatusOK, fiber.Map{"id": svc.ID, "state": "restarting"})
 }
 
 // restartService takes its seams as arguments: it outlives the request.
-func restartService(svc models.Service, release func(), delay time.Duration,
-	run func(context.Context, string, ...string) (string, error)) {
+func restartService(svc models.Service, release func(), delay time.Duration, bus sysbus.SystemdBus) {
+	job, err := queueRestart(svc, release, delay, bus)
+	if err != nil {
+		logging.Warnf("restarting %s: %v", svc.ID, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceJobLimit)
+	defer cancel()
+	if err := job.Wait(ctx); err != nil {
+		logging.Warnf("restarting %s: %v", svc.ID, err)
+	}
+	resetServicesCache()
+}
+
+// queueRestart hands the guard back once systemd has the job: holding it
+// through the job would answer 409 to every other restart meanwhile.
+func queueRestart(svc models.Service, release func(), delay time.Duration, bus sysbus.SystemdBus) (*sysbus.Job, error) {
 	defer release()
 	time.Sleep(delay)
 
-	svc.Unit = resolveUnit(svc.Unit, run)
-	ctx, cancel := context.WithTimeout(context.Background(), serviceCmdLimit)
+	unit := resolveUnit(svc.Unit, bus)
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCallLimit)
 	defer cancel()
-	args := svc.RestartArgs()
-	if _, err := run(ctx, "systemctl", args...); err != nil {
-		logging.Warnf("systemctl %s: %v", strings.Join(args, " "), err)
-		return
+	job, err := models.QueueRestart(ctx, bus, svc, unit)
+	if err != nil {
+		return nil, err
 	}
 	resetServicesCache()
+	return job, nil
 }

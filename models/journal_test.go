@@ -151,23 +151,3 @@ func TestCutMessage(t *testing.T) {
 		t.Fatalf("cut %v len %d", cut, len(s))
 	}
 }
-
-func TestParseTimedateShow(t *testing.T) {
-	st, err := ParseTimedateShow("Timezone=UTC\nLocalRTC=no\nCanNTP=yes\nNTP=yes\nNTPSynchronized=no\nTimeUSec=Sun 2026-10-25 09:12:03 UTC\nRTCTimeUSec=Sun 2026-10-25 09:12:01 UTC\n")
-	if err != nil || st.Timezone != "UTC" || !st.NTP || st.Synchronized || st.RTC == nil || *st.RTC != "2026-10-25T09:12:01Z" {
-		t.Fatalf("%+v %v", st, err)
-	}
-	st, err = ParseTimedateShow("Timezone=Europe/Paris\nNTP=no\nNTPSynchronized=yes\nRTCTimeUSec=\n")
-	if err != nil || st.NTP || !st.Synchronized || st.RTC != nil {
-		t.Fatalf("%+v %v", st, err)
-	}
-	if _, err := time.LoadLocation("Europe/Paris"); err == nil {
-		st, _ = ParseTimedateShow("Timezone=Europe/Paris\nRTCTimeUSec=Sun 2026-10-25 10:12:03 CET\n")
-		if st.RTC == nil || *st.RTC != "2026-10-25T09:12:03Z" {
-			t.Fatalf("paris rtc %v", st.RTC)
-		}
-	}
-	if _, err := ParseTimedateShow("garbage"); err == nil {
-		t.Fatal("no Timezone accepted")
-	}
-}

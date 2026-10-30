@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -70,18 +69,16 @@ type RawDNSConfig struct {
 }
 
 func GetAllNetInterfaces() (nets []*structs.NetInterface, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), networkCallLimit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/networkctl", "list", "--json=short")
-	cmd.WaitDelay = time.Second
-	output, err := cmd.Output()
+	output, err := Bus.NetworkDescribe(ctx)
 	if err != nil {
 		logging.Errorf("failed to get network interfaces: %v", err)
 		return nil, err
 	}
 
 	var networkList NetworkList
-	if err := json.Unmarshal(output, &networkList); err != nil {
+	if err := json.Unmarshal([]byte(output), &networkList); err != nil {
 		logging.Errorf("failed to unmarshal network interfaces: %v", err)
 		logging.Debugf("output: %s", output)
 		return nil, err
@@ -164,7 +161,7 @@ func formatIPAddress(address []byte) string {
 // lines. Any user supplied value that carries a newline, a section header or an
 // extra '=' would be read back by systemd-networkd as additional directives,
 // and the interface name becomes part of the unit file path. Everything that
-// reaches the file (or networkctl) is therefore validated against the exact
+// reaches the file (or networkd) is therefore validated against the exact
 // syntax expected for its field, before a single byte is written.
 // ---------------------------------------------------------------------------
 
@@ -205,7 +202,7 @@ func invalidField(field, format string, args ...any) *ValidationError {
 // ValidateInterfaceName checks that name is a syntactically valid network
 // interface name. It guarantees the name cannot escape the
 // /etc/systemd/network/ directory once interpolated into a file name, and that
-// it cannot be mistaken for an option by networkctl.
+// it cannot be mistaken for an option by a command line tool.
 func ValidateInterfaceName(name string) error {
 	const field = "interface"
 
@@ -223,7 +220,7 @@ func ValidateInterfaceName(name string) error {
 	if name == "." || name == ".." || isRouteWord(name) {
 		return invalidField(field, "%q is not a valid interface name", name)
 	}
-	// A leading '-' would be parsed as an option by networkctl ("--all").
+	// A leading '-' reads as an option to every tool taking this name.
 	if strings.HasPrefix(name, "-") {
 		return invalidField(field, "must not start with '-'")
 	}
@@ -546,28 +543,28 @@ type ConfNetworkSection struct {
 	Domains     string `toml:"Domains"`
 }
 
-// networkctlTimeout bounds a hung networkctl (networkd stuck, D-Bus
-// activation): the network routes and the rollback timer wait for it.
-const networkctlTimeout = 30 * time.Second
+// networkCallLimit bounds a hung call (networkd stuck, D-Bus activation): the
+// network routes and the rollback timer wait for it.
+const networkCallLimit = 30 * time.Second
 
-// Directories systemd-networkd reads units from, and the networkctl runner.
-// Variables so tests use temporary directories and a fake networkctl.
+// Directories systemd-networkd reads units from. Variables so tests use
+// temporary directories.
 var (
 	NetworkEtcDir = "/etc/systemd/network"
 	NetworkRunDir = "/run/systemd/network"
-
-	Networkctl = func(args ...string) error {
-		ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "/usr/bin/networkctl", args...)
-		cmd.WaitDelay = time.Second
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("networkctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-		}
-		return nil
-	}
 )
+
+func networkReload() error {
+	ctx, cancel := context.WithTimeout(context.Background(), networkCallLimit)
+	defer cancel()
+	return Bus.NetworkReload(ctx)
+}
+
+func networkReconfigure(intf string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), networkCallLimit)
+	defer cancel()
+	return Bus.NetworkReconfigure(ctx, intf)
+}
 
 // NetworkUnitPath is the only file of /etc the daemon writes for intf. It
 // sorts before the image's shared config.network, so it wins for intf.
@@ -641,10 +638,10 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 }
 
 func reloadAndReconfigure(intf string) error {
-	if err := Networkctl("reload"); err != nil {
+	if err := networkReload(); err != nil {
 		return fmt.Errorf("failed to reload networkd: %w", err)
 	}
-	if err := Networkctl("reconfigure", intf); err != nil {
+	if err := networkReconfigure(intf); err != nil {
 		return fmt.Errorf("failed to reconfigure interface: %w", err)
 	}
 	return nil
@@ -705,7 +702,7 @@ func ConfirmNetworkTrial(intf string) error {
 	if err := os.Remove(NetworkTrialPath(intf)); err != nil {
 		logging.Warnf("removing the network trial of %s: %v", intf, err)
 	}
-	if err := Networkctl("reload"); err != nil {
+	if err := networkReload(); err != nil {
 		logging.Warnf("reloading networkd after the confirmation: %v", err)
 	}
 	return nil
@@ -722,10 +719,10 @@ func RevertNetworkTrial(intf string) error {
 		return fmt.Errorf("%w: %v", ErrTrialKept, err)
 	}
 	var errs []error
-	if err := Networkctl("reload"); err != nil {
+	if err := networkReload(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := Networkctl("reconfigure", intf); err != nil {
+	if err := networkReconfigure(intf); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

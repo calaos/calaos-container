@@ -95,7 +95,7 @@ ignored.
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
-| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
+| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, kiosk restart, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
 | `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes), log query limits (see Logs) | `{"retry_after": <seconds>}` |
 | `approver_required` | 409 | the action needs a push code and no approver is enrolled | none |
@@ -142,7 +142,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/update/upgrade-all` | bearer, session allowed | 202 | `<Job>` |
 | POST | `/api/v2/update/upgrade` | bearer, session allowed | 202 | `<Job>`; body `{"package": "<name>"}` |
 | POST | `/api/v2/system/reboot` | bearer, session allowed | 200 | `null`; `409 upgrade_in_progress` while a job runs |
-| POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk) |
+| POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
@@ -706,15 +706,15 @@ Why some rows have fewer verbs:
   - `static`: any other value.
 
   It is `""` for `not-found`. For a unit whose `UnitFileState` is `generated` (`olad`, which has a
-  SysV script only), `startup` is the first word of `systemctl is-enabled <unit>`, read in the
-  same 1 s cache.
+  SysV script only), `startup` is `enabled` when `systemd-sysv-install is-enabled olad` exits 0,
+  `disabled` otherwise, read in the same 1 s cache.
 - `boot_unit` is the unit that `enable` and `disable` act on. It is `unit` for every row.
 - `since` is when the unit last entered the `active` state (`ActiveEnterTimestamp`), RFC 3339 UTC,
   or `null` when it never did.
 - `unit` is the resolved unit (for `ntp`, the installed candidate, or the first candidate when none
   is installed).
-- The state is read in one `systemctl show` call for all units and every `ntp` candidate, and
-  cached for 1 s. The daemon keeps no state of its own: systemd is the source of truth, read at
+- The state of all units and of every `ntp` candidate is read in one go over D-Bus, and cached
+  for 1 s. The daemon keeps no state of its own: systemd is the source of truth, read at
   each call.
 
 ### Actions: `POST /api/v2/system/services/{restart,start,stop,enable,disable}`
@@ -724,21 +724,24 @@ All five routes are `bearer, session allowed`, take the body `{"unit": "<id>"}` 
 
 | Route | `state` | Runs |
 |---|---|---|
-| `restart` | `restarting` | after the answer, about 500 ms later: `systemctl restart --no-block <unit>` (`reload-or-restart` for `ssh`) |
-| `start` | `starting` | before the answer: `systemctl start --no-block <unit>` |
-| `stop` | `stopping` | before the answer: `systemctl stop --no-block <unit>` |
-| `enable` | `enabling` | before the answer: `systemctl enable --now --no-block <boot_unit>` |
-| `disable` | `disabling` | before the answer: `systemctl disable --now --no-block <boot_unit>` |
+| `restart` | `restarting` | after the answer, about 500 ms later: `RestartUnit` on `<unit>` (`ReloadOrRestartUnit` for `ssh`) |
+| `start` | `starting` | before the answer: `StartUnit` on `<unit>` |
+| `stop` | `stopping` | before the answer: `StopUnit` on `<unit>` |
+| `enable` | `enabling` | before the answer: `EnableUnitFiles`, `Reload`, then `StartUnit` on `<boot_unit>` |
+| `disable` | `disabling` | before the answer: `DisableUnitFiles`, `Reload`, then `StopUnit` on `<boot_unit>` |
 
-- Every command has a 10 s limit. `--no-block` queues the job, so the limit covers the queuing and
-  not the outcome. The answer says nothing about the outcome: a client reads it by polling
-  `GET system/services`. A client that restarts `calaos-server`, `haproxy` or `calaos-container`
-  loses its connection within seconds.
-- `restart` starts a stopped unit. For `ntp` it first resolves the unit (`systemctl show -p
-  LoadState`, cached for 1 min). A `reload` of `ssh` runs `sshd -t` first, so a broken
+- Every D-Bus call has a 10 s limit, which covers the queuing of the job and not its outcome. The
+  answer says nothing about the outcome: a client reads it by polling `GET system/services`, and
+  the daemon logs a job that ends in anything but `done`. A client that restarts `calaos-server`,
+  `haproxy` or `calaos-container` loses its connection within seconds.
+- `restart` starts a stopped unit. For `ntp` it first resolves the unit (`LoadState`, cached
+  for 1 min). A `reload` of `ssh` runs `sshd -t` first, so a broken
   `sshd_config` leaves the running daemon alone, and open sessions survive.
-- `enable` and `disable` act now and at boot (`--now`): "start now and at every boot", "stop now and
+- `enable` and `disable` act now and at boot: "start now and at every boot", "stop now and
   at every boot". Enabling without starting, or disabling without stopping, is not offered.
+- `olad` has a SysV script only, and `EnableUnitFiles` does not act on it: its `enable` and
+  `disable` run `systemd-sysv-install enable|disable olad` in place of `EnableUnitFiles` and
+  `DisableUnitFiles`. `Reload`, then `StartUnit` or `StopUnit`, follow as for any other row.
 - A `stop` lasts until the next reboot, or the next update of the package when the unit is
   enabled. A unit that is not enabled is not started by an update, nor by a reboot: `start` and
   `restart` do not change that, `enable` does. An update keeps a disabled unit disabled.
@@ -749,26 +752,30 @@ Checks, in this order, on every one of the five routes:
 1. The body: valid JSON, with `unit` a string.
 2. `unit` is an `id` of the table and the route's verb is in its `actions`; anything else,
    including a unit name or a status-only id, is `400 invalid_request` ("action not allowed for
-   this service"; for `restart`, "unknown or non-restartable service"). No `systemctl` command
-   runs.
+   this service"; for `restart`, "unknown or non-restartable service"). Nothing is asked of
+   systemd.
 3. The audit field `unit=<id>` is set. The path names the verb.
 4. `409 upgrade_in_progress` while an upgrade run is in progress, for every unit and every verb
    (the same guard as `system/reboot`).
 5. `409 service_unavailable` when the unit is not installed (`active_state` is `not-found`, `msg`
    "the unit is not installed") or masked (`startup` is `masked`, `msg` "the unit is masked"). The
-   state is read by a fresh `systemctl show`, not from the 1 s cache. Masking stays a decision made
+   state is read afresh from systemd, not from the 1 s cache. Masking stays a decision made
    over SSH.
 6. `restart` of `calaos-container` while a network change waits for its confirmation: `409
    network_pending`, with the usual `data`.
-7. For `start`, `stop`, `enable` and `disable`, a command that exits non-zero is `500 internal`.
-   The detail (stderr) goes to the daemon log, not to the client. The 1 s state cache is reset
-   after each command.
+7. For `start`, `stop`, `enable` and `disable`, a D-Bus call that fails is `500 internal`. The
+   detail goes to the daemon log, not to the client. The 1 s state cache is reset after each
+   action.
 
 A restart of `calaos-container` is safe: sessions are on disk, a pending network change is
 re-armed at start, and the upgrade guard refuses it during a job.
 
-Each call that passes check 2 writes an audit line with `unit=<id>`; a refusal at check 1 or 2 has no `unit=` (see Audit). `POST /api/v2/system/restart` and the
-legacy `POST /api/system/restart` (restart of the `calaos-home` kiosk) are unchanged.
+Each call that passes check 2 writes an audit line with `unit=<id>`; a refusal at check 1 or 2 has
+no `unit=` (see Audit). `POST /api/v2/system/restart` and the legacy `POST /api/system/restart`
+(restart of the `calaos-home` kiosk) are not part of these routes, but take the same upgrade
+guard: they answer `409` during a run, before anything is asked of systemd. Unlike
+`services/restart`, they answer once the job has ended. The guard is released as soon as systemd
+has the job, so that a slow restart holds up no other action.
 
 ## Logs
 
@@ -915,20 +922,20 @@ The query `text` is matched against the redacted message and is never logged.
 clock is synchronized (timedated's `NTPSynchronized`, the kernel flag that chrony sets with
 `rtcsync`, on in Debian's `chrony.conf`), `rtc` is the hardware clock or `null`.
 
-`GET /api/v2/system/time` answers a `<BoxTime>` (`timedatectl show` cached for 1 s; `now` is read
+`GET /api/v2/system/time` answers a `<BoxTime>` (timedated's properties cached for 1 s; `now` is read
 at each call). `GET /api/v2/system/timezones` answers
-`{"timezones": [...]}`, the output of `timedatectl list-timezones` (cached).
+`{"timezones": [...]}`, the answer of timedated's `ListTimezones` (cached).
 
 `POST /api/v2/system/time`, body `{"timezone": "Europe/Paris", "ntp": false, "time": "2026-10-25T09:12:03Z"}`,
 each field optional, at least one (an empty body is `400 invalid_request`, "no field to set").
 Answer: the new `<BoxTime>` plus `"restart_required": <bool>`, true when `timezone` changed.
 
 - The changes apply in this order: `timezone` (it must be in the list of `timezones`), then `ntp`
-  (`timedatectl set-ntp`, which enables and starts, or disables and stops, the first unit listed in
+  (timedated's `SetNTP`, which enables and starts, or disables and stops, the first unit listed in
   `/usr/lib/systemd/ntp-units.d/`: `50-chrony.list` names `chrony.service`), then `time`.
 - `time` is RFC 3339 with a year from 2020 to 2100. It is refused with `invalid_request`
   ("ntp is active") when NTP is still on after the `ntp` step.
-- Each `timedatectl` command has 10 s. The first step that fails stops the sequence and answers
+- Each timedated call has 10 s. The first step that fails stops the sequence and answers
   `500 internal` with `data: {"applied": ["timezone"], "failed": "ntp"}`; the steps before it stay
   applied, and `GET system/time` shows the real state. If every step applied but reading the new
   state fails, the answer is `500 internal` with `data: {"applied": [...]}` and no `failed`; a
@@ -954,9 +961,9 @@ it from the new address: otherwise it reverts by itself, and a reboot reverts it
   the change.
 - **Confirm:** the same content is written atomically (temporary file in the same directory,
   `fsync`, `rename`) to `/etc/systemd/network/calaos_<intf>.network`, the trial is removed and
-  `networkctl reload` runs.
+  networkd reloads (`Reload`).
 - **Revert** (explicit, timeout or restart past the deadline): the trial is removed, then
-  `networkctl reload` and `networkctl reconfigure <intf>`.
+  networkd reloads and reconfigures `<intf>` (`Reload`, `ReconfigureLink`).
 - The daemon only writes `00-calaos-trial-<intf>.network` and `calaos_<intf>.network`. It never
   edits a file whose `[Match]` is not exactly the interface, and never touches `config.network`.
 - The static template writes `DHCP=no` and a static IPv4 address, which also stops DHCPv6;
@@ -977,7 +984,7 @@ it from the new address: otherwise it reverts by itself, and a reboot reverts it
 - A restarted daemon that finds a trial without a valid record reverts it, with the same alert and
   a `network_rollback` audit line with `client=-`, `session=-` and `change_id=-`.
 - A rollback that cannot remove the trial keeps the change pending and retries every 10 s; no alert
-  is raised until the trial is gone. `networkctl` calls time out after 30 s.
+  is raised until the trial is gone. Calls to networkd time out after 30 s.
 - At the end of the window, and when a restarted daemon finds the deadline already passed, the
   daemon reverts, deletes the record and raises the persisted alert
   `network_rolled_back {id, ts, intf}` (see Alerts).
@@ -1037,9 +1044,9 @@ The code is bound to the **verbatim validated strings** of the body, six keys, a
 | `dns_servers` | the list joined by `,` |
 | `search_domains` | the list joined by `,` |
 
-Applying: the trial is written and recorded, `networkctl reload` and `reconfigure <intf>` run, the
+Applying: the trial is written and recorded, networkd reloads and reconfigures `<intf>`, the
 timer starts from `applied_at`, and `network_pending {change_id, intf, applied_at, confirm_within}`
-is published. If `reload` or `reconfigure` fails the daemon reverts at once and answers
+is published. If either fails the daemon reverts at once and answers
 `500 internal`. The box may switch address before the answer reaches the client.
 
 ### `POST /api/v2/network/confirm`, `POST /api/v2/network/revert`
@@ -1098,13 +1105,14 @@ synchronous behaviour: they answer when apt ends.
 - One upgrade at a time, whatever started it (versioned job, legacy synchronous route, CLI,
   kiosk). Every run is recorded as a job, so `update/status` shows a run started from the kiosk.
 - While a run is in progress, `POST update/upgrade*`, `GET update/check`,
-  `POST system/reboot` and `POST system/rollback_snapshot` answer `409 upgrade_in_progress`
-  (with `data.job_id`).
+  `POST system/reboot`, `POST system/restart` and `POST system/rollback_snapshot` answer
+  `409 upgrade_in_progress` (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
-  `"package not found"` unchanged. One deliberate exception: the legacy `POST /api/system/reboot`
-  answers `409 {"error": true, "msg": "upgrade already in progress"}` during a run, so that an old
-  kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and ignore the reboot result.
+  `"package not found"` unchanged. Two deliberate exceptions: the legacy `POST /api/system/reboot`
+  and `POST /api/system/restart` answer `409 {"error": true, "msg": "upgrade already in progress"}`
+  during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
+  ignore the result of both.
   The legacy `POST /api/system/rollback_snapshot` is unchanged.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
@@ -1318,7 +1326,7 @@ Go error text.
 | Method | Path | Success | Error |
 |---|---|---|---|
 | POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
-| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
@@ -1342,8 +1350,19 @@ apply at once and have no confirmation or rollback.
 The words `apply`, `confirm`, `revert`, `state`, `list` and `trial` are refused as interface names
 by the validator the legacy route shares: it still answers `400`, with the raw error text of the
 validator as `msg` for those six words.
-A failed write or `networkctl` call still answers `500`; its `msg` is the raw error text, which now
-reads `failed to write network config file: ...` or carries the `networkctl` output.
+A failed write or networkd call still answers `500`. The `msg` of a failed write is the raw error
+text, `failed to write network config file: ...`; that of a failed call is a fixed text,
+`failed to reload networkd: reload networkd failed` or
+`failed to reconfigure interface: reconfigure interface failed`, the D-Bus detail going to the
+daemon log.
+
+The other legacy routes that reach systemd keep their `500` too, with a fixed `msg`:
+`reboot failed` on `POST /api/system/reboot` and on `POST /api/system/rollback_snapshot` when the
+reboot fails, and `describe network failed` on `GET /api/network/list` and on the interface check of
+`POST /api/network/{intf}`. On `POST /api/system/restart` it is `read unit state failed`,
+`<n> unit states for calaos-home.service`, `unit not available: calaos-home.service`,
+`restart calaos-home.service failed` or `calaos-home.service: job <result>`, `<result>` being
+anything but `done`.
 
 Unknown legacy paths answer fiber's plain-text `404 Cannot GET ...` and `405 Method Not Allowed`.
 A bearer failure answers `401 {"error":true,"msg":"wrong token"}`, or `"unauthorized"` when no

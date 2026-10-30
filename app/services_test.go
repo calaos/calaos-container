@@ -1,55 +1,63 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/calaos/calaos-container/app/admin"
+	logger "github.com/calaos/calaos-container/log"
 	"github.com/calaos/calaos-container/models"
+	"github.com/calaos/calaos-container/sysbus"
+	"github.com/calaos/calaos-container/sysbus/sysbustest"
 )
 
-const fakeSystemctl = `#!/bin/sh
-echo "$*" >> "$FAKE_SYSTEMCTL_LOG"
-if [ "$1" = show ]; then cat "$FAKE_SYSTEMCTL_SHOW"; fi
-exit "${FAKE_SYSTEMCTL_RC:-0}"
-`
+var loadedUnit = sysbus.UnitProperties{LoadState: "loaded", ActiveState: "active", SubState: "running", UnitFileState: "enabled"}
 
-type fakeSystemd struct {
-	log, show string
-}
-
-// useFakeSystemctl puts a recording systemctl first on PATH, so the real
-// executor runs.
-func useFakeSystemctl(t *testing.T) *fakeSystemd {
+// useFakeBus must come before stubBackend.install, which then keeps it.
+func useFakeBus(t *testing.T) *sysbustest.Bus {
 	t.Helper()
-	dir := t.TempDir()
-	// #nosec G306 -- the fake must be executable.
-	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(fakeSystemctl), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	f := &fakeSystemd{log: filepath.Join(dir, "calls"), show: filepath.Join(dir, "show")}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("FAKE_SYSTEMCTL_LOG", f.log)
-	t.Setenv("FAKE_SYSTEMCTL_SHOW", f.show)
+	f := sysbustest.New()
+	prev := models.Bus
+	models.Bus = f
 	resetServicesCache()
-	t.Cleanup(resetServicesCache)
+	t.Cleanup(func() {
+		models.Bus = prev
+		resetServicesCache()
+	})
 	return f
 }
 
-func (f *fakeSystemd) calls(t *testing.T) []string {
+// logCapture is safe to read while a restart still logs from its goroutine.
+type logCapture struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logCapture) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logCapture) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func captureLogs(t *testing.T) *logCapture {
 	t.Helper()
-	b, err := os.ReadFile(f.log)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	logs := &logCapture{}
+	logger.Logger.SetOutput(logs)
+	t.Cleanup(func() { logger.Logger.SetOutput(os.Stdout) })
+	return logs
 }
 
 // trackGuard wraps the real guard so a test can wait for the deferred
@@ -78,35 +86,14 @@ func waitRestart(t *testing.T, done <-chan struct{}) {
 	}
 }
 
-func showBlock(lines ...string) string { return strings.Join(lines, "\n") + "\n\n" }
-
 func TestServicesList(t *testing.T) {
-	f := useFakeSystemctl(t)
-	var out strings.Builder
-	for i, s := range models.Services {
-		for _, u := range models.UnitCandidates(s.Unit) {
-			switch {
-			case i == 0:
-				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=active", "SubState=running",
-					"UnitFileState=enabled", "ActiveEnterTimestamp=@1793000472"))
-			case i == 1:
-				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=failed", "SubState=failed",
-					"UnitFileState=", "ActiveEnterTimestamp="))
-			case s.ID == "envoy":
-				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=inactive", "SubState=dead",
-					"UnitFileState=disabled", "ActiveEnterTimestamp=@0"))
-			case u == "systemd-timesyncd.service":
-				out.WriteString(showBlock("Id="+u, "LoadState=loaded", "ActiveState=active", "SubState=running",
-					"UnitFileState=enabled", "ActiveEnterTimestamp=@1793000472"))
-			default:
-				out.WriteString(showBlock("Id="+u, "LoadState=not-found", "ActiveState=inactive", "SubState=dead",
-					"UnitFileState=", "ActiveEnterTimestamp="))
-			}
-		}
-	}
-	if err := os.WriteFile(f.show, []byte(out.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	f := useFakeBus(t)
+	running := loadedUnit
+	running.ActiveEnterTimestamp = 1793000472 * 1_000_000
+	f.SetUnit("calaos-server.service", running)
+	f.SetUnit("systemd-timesyncd.service", running)
+	f.SetUnit("calaos-home.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: "failed", SubState: "failed"})
+	f.SetUnit("envoy.service", sysbus.UnitProperties{LoadState: "loaded", ActiveState: "inactive", SubState: "dead", UnitFileState: "disabled"})
 	(&stubBackend{}).install(t)
 	a := newHandlerTestApp(t)
 
@@ -126,56 +113,56 @@ func TestServicesList(t *testing.T) {
 		}
 	}
 
-	// Cached: a second read within 1 s does not run systemctl again.
+	// Cached: a second read within 1 s does not reach the bus again.
 	v2Do2(t, a, httpCase{method: "GET", path: "/api/v2/system/services"})
-	calls := f.calls(t)
-	want := "show --no-pager --timestamp=unix -p Id,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp " +
-		"calaos-server.service calaos-home.service mosquitto.service zigbee2mqtt.service influxdb.service grafana.service " +
-		"hue2mqtt.service envoy.service olad.service chrony.service systemd-timesyncd.service calaos-container.service " +
-		"haproxy.service systemd-networkd.service ssh.service"
-	if len(calls) != 1 || calls[0] != want {
-		t.Fatalf("calls %q", calls)
+	if n := f.Reads("UnitProperties"); n != 1 {
+		t.Fatalf("%d reads", n)
 	}
 }
 
 func TestServicesListFailure(t *testing.T) {
-	for name, show := range map[string]string{
-		"short output": showBlock("Id=calaos-server.service", "LoadState=loaded"),
-		"bad line":     secretDetail,
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := useFakeSystemctl(t)
-			if err := os.WriteFile(f.show, []byte(show), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			(&stubBackend{}).install(t)
-			a := newHandlerTestApp(t)
-			status, r, body := v2Do2(t, a, httpCase{method: "GET", path: "/api/v2/system/services"})
-			if status != 500 || r.Code != codeInternal || strings.Contains(body, "SECRET") {
-				t.Fatalf("%d %s", status, body)
-			}
-		})
+	f := useFakeBus(t)
+	f.Fail("UnitProperties", errors.New(secretDetail))
+	(&stubBackend{}).install(t)
+	a := newHandlerTestApp(t)
+	status, r, body := v2Do2(t, a, httpCase{method: "GET", path: "/api/v2/system/services"})
+	if status != 500 || r.Code != codeInternal || strings.Contains(body, "SECRET") {
+		t.Fatalf("%d %s", status, body)
 	}
 }
 
-// TestServiceRestartAnswersFirst: the answer is out before systemctl runs.
+// A burst of polls within the TTL makes one read, and nothing races on it.
+func TestServicesCacheConcurrent(t *testing.T) {
+	f := useFakeBus(t)
+	f.SetUnit("calaos-server.service", loadedUnit)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if states, err := serviceStates(); err != nil || len(states) != len(models.Services) {
+				t.Errorf("%d states: %v", len(states), err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := f.Reads("UnitProperties"); n != 1 {
+		t.Fatalf("%d reads", n)
+	}
+}
+
+// TestServiceRestartAnswersFirst: the answer is out before the bus is called.
 func TestServiceRestartAnswersFirst(t *testing.T) {
-	resolve := "show --no-pager -p LoadState --value chrony.service systemd-timesyncd.service"
-	cases := []struct {
-		id, show string
-		want     []string
-	}{
-		{"calaos-server", "", []string{"restart --no-block calaos-server.service"}},
-		{"ntp", "loaded\n\nnot-found\n", []string{resolve, "restart --no-block chrony.service"}},
-		{"ntp", "not-found\n\nloaded\n", []string{resolve, "restart --no-block systemd-timesyncd.service"}},
+	cases := []struct{ id, installed, want string }{
+		{"calaos-server", "calaos-server.service", "RestartUnit calaos-server.service"},
+		{"ntp", "chrony.service", "RestartUnit chrony.service"},
+		{"ntp", "systemd-timesyncd.service", "RestartUnit systemd-timesyncd.service"},
 	}
 	for _, tc := range cases {
 		id := tc.id
 		t.Run(id, func(t *testing.T) {
-			f := useFakeSystemctl(t)
-			if err := os.WriteFile(f.show, []byte(tc.show), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			f := useFakeBus(t)
+			f.SetUnit(tc.installed, loadedUnit)
 			done := trackGuard(t)
 			(&stubBackend{}).install(t)
 			a := newHandlerTestApp(t)
@@ -187,43 +174,305 @@ func TestServiceRestartAnswersFirst(t *testing.T) {
 			if status != 200 || body != `{"error":false,"msg":"ok","data":{"id":"`+id+`","state":"restarting"}}` {
 				t.Fatalf("%d %s", status, body)
 			}
-			if c := f.calls(t); c != nil {
-				t.Fatalf("systemctl ran before the answer: %q", c)
+			if c := f.Calls(); len(c) != 0 || f.Reads("UnitProperties") != 0 {
+				t.Fatalf("bus reached before the answer: %q", c)
 			}
 			waitRestart(t, done)
 			if time.Since(start) < restartDelay || answered >= restartDelay {
 				t.Fatalf("answered after %v, restarted before %v", answered, restartDelay)
 			}
-			if c := f.calls(t); strings.Join(c, ";") != strings.Join(tc.want, ";") {
+			if c := f.Calls(); len(c) != 1 || c[0] != tc.want {
 				t.Fatalf("calls %q, want %q", c, tc.want)
 			}
 		})
 	}
 }
 
-// TestServiceRestartReleasesLock: a failed or successful restart gives the
-// upgrade lock back.
+// TestServiceRestartReleasesLock: whatever becomes of the restart, the upgrade
+// lock comes back.
 func TestServiceRestartReleasesLock(t *testing.T) {
-	for _, rc := range []string{"0", "1"} {
-		f := useFakeSystemctl(t)
-		t.Setenv("FAKE_SYSTEMCTL_RC", rc)
-		done := trackGuard(t)
-		(&stubBackend{}).install(t)
-		a := newHandlerTestApp(t)
+	for name, breakIt := range map[string]func(*sysbustest.Bus){
+		"ok":          func(*sysbustest.Bus) {},
+		"job failed":  func(f *sysbustest.Bus) { f.SetJobResult("mosquitto.service", "failed") },
+		"not queued":  func(f *sysbustest.Bus) { f.Fail("RestartUnit", errors.New("boom")) },
+		"not found":   func(f *sysbustest.Bus) { f.SetUnit("mosquitto.service", sysbus.UnitProperties{LoadState: "not-found"}) },
+		"read failed": func(f *sysbustest.Bus) { f.Fail("UnitProperties", errors.New("boom")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("mosquitto.service", loadedUnit)
+			breakIt(f)
+			done := trackGuard(t)
+			(&stubBackend{}).install(t)
+			a := newHandlerTestApp(t)
 
-		if status, _, body := v2Do2(t, a, httpCase{method: "POST", path: "/api/v2/system/services/restart",
-			ctype: "application/json", body: `{"unit":"mosquitto"}`}); status != 200 {
-			t.Fatalf("rc %s: %d %s", rc, status, body)
+			if status, _, body := v2Do2(t, a, httpCase{method: "POST", path: "/api/v2/system/services/restart",
+				ctype: "application/json", body: `{"unit":"mosquitto"}`}); status != 200 {
+				t.Fatalf("%d %s", status, body)
+			}
+			waitRestart(t, done)
+			release, err := models.ServiceGuard()
+			if err != nil {
+				t.Fatalf("lock kept: %v", err)
+			}
+			release()
+		})
+	}
+}
+
+// An unavailable unit never reaches systemd, and the refusal is logged since
+// the client has already had its answer.
+func TestServiceRestartUnavailableUnit(t *testing.T) {
+	for name, p := range map[string]sysbus.UnitProperties{
+		"not found":     {LoadState: "not-found"},
+		"masked":        {LoadState: "masked", ActiveState: "inactive", UnitFileState: "masked"},
+		"masked in run": {LoadState: "loaded", ActiveState: "active", UnitFileState: "masked-runtime"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("mosquitto.service", p)
+			logs := captureLogs(t)
+
+			restartService(models.Service{ID: "mosquitto", Unit: "mosquitto.service", Kind: models.ServiceKindService}, func() {}, 0, f)
+
+			if c := f.Calls(); len(c) != 0 {
+				t.Fatalf("calls %q", c)
+			}
+			if !strings.Contains(logs.String(), "restarting mosquitto") {
+				t.Fatalf("not logged: %s", logs.String())
+			}
+		})
+	}
+}
+
+// A job that does not end done is reported as a failure, never as a success.
+func TestServiceRestartJobResult(t *testing.T) {
+	svc, _ := models.LookupService("mosquitto")
+	for _, result := range []string{"done", "failed", "timeout", "canceled", "dependency", "skipped"} {
+		t.Run(result, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("mosquitto.service", loadedUnit)
+			f.SetJobResult("mosquitto.service", result)
+			logs := captureLogs(t)
+
+			restartService(svc, func() {}, 0, f)
+
+			logged := strings.Contains(logs.String(), "job "+result)
+			if logged != (result != sysbus.JobDone) {
+				t.Fatalf("logged %v: %s", logged, logs.String())
+			}
+		})
+	}
+}
+
+// The lock comes back as soon as systemd has the job, and jobs ending out of
+// order each get their own result.
+func TestServiceRestartConcurrentJobs(t *testing.T) {
+	f := useFakeBus(t)
+	f.HoldJobs()
+	logs := captureLogs(t)
+	results := map[string]string{"mosquitto": "failed", "grafana": "done", "influxdb": "timeout", "envoy": "canceled"}
+
+	var wg sync.WaitGroup
+	for id := range results {
+		svc, ok := models.LookupService(id)
+		if !ok {
+			t.Fatal(id)
 		}
-		waitRestart(t, done)
-		release, err := models.ServiceGuard()
+		f.SetUnit(svc.Unit, loadedUnit)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			restartService(svc, func() {}, 0, f)
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(f.Calls()) < len(results) {
+		if time.Now().After(deadline) {
+			t.Fatalf("calls %q", f.Calls())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	release, err := models.ServiceGuard()
+	if err != nil {
+		t.Fatalf("lock held through the job: %v", err)
+	}
+	release()
+
+	for id, result := range results {
+		f.FinishJob(id+".service", result)
+	}
+	wg.Wait()
+	for id, result := range results {
+		line := id + ".service: job " + result
+		if logged := strings.Contains(logs.String(), line); logged != (result != sysbus.JobDone) {
+			t.Fatalf("%s logged %v:\n%s", line, logged, logs.String())
+		}
+	}
+}
+
+// The restart of the kiosk waits for its job: its result is the HTTP answer.
+func TestSystemRestartJobResult(t *testing.T) {
+	routes := []string{"/api/system/restart", "/api/v2/system/restart"}
+	cases := []struct {
+		name  string
+		setup func(*sysbustest.Bus)
+		want  int
+		calls int
+	}{
+		{"done", func(*sysbustest.Bus) {}, 200, 1},
+		{"failed", func(f *sysbustest.Bus) { f.SetJobResult("calaos-home.service", "failed") }, 500, 1},
+		{"timeout", func(f *sysbustest.Bus) { f.SetJobResult("calaos-home.service", "timeout") }, 500, 1},
+		{"not found", func(f *sysbustest.Bus) {
+			f.SetUnit("calaos-home.service", sysbus.UnitProperties{LoadState: "not-found"})
+		}, 500, 0},
+		{"masked", func(f *sysbustest.Bus) { f.SetUnit("calaos-home.service", sysbus.UnitProperties{LoadState: "masked"}) }, 500, 0},
+		{"not queued", func(f *sysbustest.Bus) { f.Fail("RestartUnit", errors.New(secretDetail)) }, 500, 1},
+	}
+	for _, route := range routes {
+		for _, tc := range cases {
+			t.Run(route+" "+tc.name, func(t *testing.T) {
+				f := useFakeBus(t)
+				f.SetUnit("calaos-home.service", loadedUnit)
+				tc.setup(f)
+				(&stubBackend{}).install(t)
+				released := trackGuard(t)
+				a := newHandlerTestApp(t)
+
+				resp, body := doCase(t, a, httpCase{method: "POST", path: route})
+				if resp.StatusCode != tc.want {
+					t.Fatalf("%d %s", resp.StatusCode, body)
+				}
+				if c := f.Calls(); len(c) != tc.calls {
+					t.Fatalf("calls %q", c)
+				}
+				if n := len(released); n != 1 {
+					t.Fatalf("guard released %d times", n)
+				}
+			})
+		}
+	}
+}
+
+func TestSystemRestartDuringUpgrade(t *testing.T) {
+	answers := map[string]string{
+		"/api/system/restart":    `{"error":true,"msg":"upgrade already in progress"}`,
+		"/api/v2/system/restart": `{"error":true,"code":"upgrade_in_progress","msg":"an upgrade is already in progress"}`,
+	}
+	for route, want := range answers {
+		t.Run(route, func(t *testing.T) {
+			f := useFakeBus(t)
+			f.SetUnit("calaos-home.service", loadedUnit)
+			(&stubBackend{}).install(t)
+			guards := countGuard(t, models.ErrUpgradeInProgress)
+			a := newHandlerTestApp(t)
+
+			resp, body := doCase(t, a, httpCase{method: "POST", path: route})
+			if resp.StatusCode != http.StatusConflict || string(body) != want {
+				t.Fatalf("%d %s", resp.StatusCode, body)
+			}
+			if *guards != 1 {
+				t.Fatalf("%d guards", *guards)
+			}
+			if c := f.Calls(); len(c) != 0 || f.Reads("UnitProperties") != 0 {
+				t.Fatalf("bus reached: %q", c)
+			}
+		})
+	}
+}
+
+// guardProbe records the bus calls made without the guard, and how long each
+// call was allowed to last.
+type guardProbe struct {
+	sysbus.SystemdBus
+	held atomic.Bool
+
+	mu        sync.Mutex
+	unguarded []string
+	longest   time.Duration
+}
+
+func (p *guardProbe) record(ctx context.Context, method string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.held.Load() {
+		p.unguarded = append(p.unguarded, method)
+	}
+	if d, ok := ctx.Deadline(); !ok {
+		p.longest = serviceJobLimit
+	} else if left := time.Until(d); left > p.longest {
+		p.longest = left
+	}
+}
+
+func (p *guardProbe) UnitProperties(ctx context.Context, units ...string) ([]sysbus.UnitProperties, error) {
+	p.record(ctx, "UnitProperties")
+	return p.SystemdBus.UnitProperties(ctx, units...)
+}
+
+func (p *guardProbe) RestartUnit(ctx context.Context, unit string) (*sysbus.Job, error) {
+	p.record(ctx, "RestartUnit")
+	return p.SystemdBus.RestartUnit(ctx, unit)
+}
+
+// The guard covers every bus call up to the queueing, each bounded by
+// serviceCallLimit, and is back before the job ends: the answer can wait up
+// to serviceJobLimit, the other guarded routes must not.
+func TestSystemRestartReleasesGuardBeforeTheJobEnds(t *testing.T) {
+	f := useFakeBus(t)
+	f.SetUnit("calaos-home.service", loadedUnit)
+	f.HoldJobs()
+	probe := &guardProbe{SystemdBus: f}
+	models.Bus = probe
+
+	released := make(chan struct{})
+	prev := serviceGuard
+	serviceGuard = func() (func(), error) {
+		release, err := prev()
 		if err != nil {
-			t.Fatalf("rc %s: lock kept: %v", rc, err)
+			return nil, err
 		}
-		release()
-		if len(f.calls(t)) != 1 {
-			t.Fatalf("rc %s: calls %q", rc, f.calls(t))
+		probe.held.Store(true)
+		return func() {
+			probe.held.Store(false)
+			release()
+			close(released)
+		}, nil
+	}
+	t.Cleanup(func() { serviceGuard = prev })
+
+	answer := make(chan error, 1)
+	go func() { answer <- restartHome() }()
+
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Error("guard still held while the job runs")
+	}
+	select {
+	case err := <-answer:
+		t.Errorf("answered before the job ended: %v", err)
+	default:
+	}
+	f.FinishJob("calaos-home.service", "failed")
+	select {
+	case err := <-answer:
+		if err == nil {
+			t.Error("a failed job answered success")
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer after the job ended")
+	}
+
+	if c := f.Calls(); len(c) != 1 || c[0] != "RestartUnit calaos-home.service" {
+		t.Fatalf("calls %q", c)
+	}
+	if len(probe.unguarded) != 0 {
+		t.Fatalf("outside the guard: %q", probe.unguarded)
+	}
+	if probe.longest > serviceCallLimit {
+		t.Fatalf("a bus call may last %s under the guard", probe.longest)
 	}
 }
 
@@ -238,7 +487,7 @@ func TestServiceRestartRefused(t *testing.T) {
 		`{"unit":"--force"}`, `{"unit":"chrony"}`, `{"unit":"chrony.service"}`, `{"unit":"timesyncd"}`, `{"unit":"sshd"}`, `{"unit":"calaos-ddns"}`, `{"unit":"*"}`, `{"unit":""}`, `{}`,
 		`{"id":"calaos-server"}`,
 	}
-	f := useFakeSystemctl(t)
+	f := useFakeBus(t)
 	(&stubBackend{}).install(t)
 	a := newHandlerTestApp(t)
 	for _, b := range bodies {
@@ -256,13 +505,13 @@ func TestServiceRestartRefused(t *testing.T) {
 		}
 	}
 	time.Sleep(restartDelay + 200*time.Millisecond)
-	if c := f.calls(t); c != nil {
-		t.Fatalf("systemctl ran: %q", c)
+	if c := f.Calls(); len(c) != 0 || f.Reads("UnitProperties") != 0 {
+		t.Fatalf("bus reached: %q", c)
 	}
 }
 
 func TestServiceRestartDuringUpgrade(t *testing.T) {
-	f := useFakeSystemctl(t)
+	f := useFakeBus(t)
 	(&stubBackend{}).install(t)
 	prev := serviceGuard
 	serviceGuard = func() (func(), error) { return nil, models.ErrUpgradeInProgress }
@@ -280,13 +529,14 @@ func TestServiceRestartDuringUpgrade(t *testing.T) {
 		}
 	}
 	time.Sleep(restartDelay + 200*time.Millisecond)
-	if c := f.calls(t); c != nil {
-		t.Fatalf("systemctl ran: %q", c)
+	if c := f.Calls(); len(c) != 0 || f.Reads("UnitProperties") != 0 {
+		t.Fatalf("bus reached: %q", c)
 	}
 }
 
 func TestServiceRestartAudit(t *testing.T) {
-	useFakeSystemctl(t)
+	f := useFakeBus(t)
+	f.SetUnit("calaos-home.service", loadedUnit)
 	done := trackGuard(t)
 	c := newAdminApp(t)
 	c.expect("POST", "/api/v2/admin/set", `{"password":"`+adminPw+`"}`, nil, 200, "")

@@ -16,6 +16,7 @@ import (
 	"github.com/calaos/calaos-container/events"
 	"github.com/calaos/calaos-container/models"
 	"github.com/calaos/calaos-container/models/structs"
+	"github.com/calaos/calaos-container/sysbus/sysbustest"
 )
 
 const (
@@ -24,31 +25,6 @@ const (
 	netUnit       = "[Match]\nName=eth0\n\n[Network]\nDHCP=no\nAddress=192.168.1.10/24\nGateway=192.168.1.1\nDNS=192.168.1.1\nDomains=lan\n"
 	sharedUnit    = "[Match]\nName=en*\n\n[Network]\nDHCP=yes\n"
 )
-
-type fakeNetworkctl struct {
-	mu    sync.Mutex
-	calls []string
-	fail  map[string]bool
-}
-
-func (f *fakeNetworkctl) run(args ...string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cmd := strings.Join(args, " ")
-	f.calls = append(f.calls, cmd)
-	if f.fail[cmd] {
-		return errors.New("networkctl " + cmd + " failed")
-	}
-	return nil
-}
-
-func (f *fakeNetworkctl) take() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	c := f.calls
-	f.calls = nil
-	return c
-}
 
 type fakeTimer struct {
 	d       time.Duration
@@ -77,7 +53,7 @@ type netEnv struct {
 	clk      *testClock
 	s        string
 	etc, run string
-	nc       *fakeNetworkctl
+	nc       *sysbustest.Bus
 	timers   *fakeTimers
 	sub      *events.Subscriber
 
@@ -93,10 +69,10 @@ func (e *netEnv) advanceBoot(d time.Duration) {
 }
 
 // newNetEnv: an admin with an approver, networkd's directories in a temp
-// dir, a fake networkctl and fake timers. The host network is never touched.
+// dir, a fake bus and fake timers. The host network is never touched.
 func newNetEnv(t *testing.T) *netEnv {
 	c, clk, s, _ := adminWithApprover(t)
-	e := &netEnv{t: t, c: c, clk: clk, s: s, nc: &fakeNetworkctl{fail: map[string]bool{}}, timers: &fakeTimers{}}
+	e := &netEnv{t: t, c: c, clk: clk, s: s, nc: sysbustest.New(), timers: &fakeTimers{}}
 	root := t.TempDir()
 	e.etc, e.run = filepath.Join(root, "etc"), filepath.Join(root, "run")
 	if err := os.MkdirAll(e.etc, 0o750); err != nil {
@@ -105,7 +81,7 @@ func newNetEnv(t *testing.T) *netEnv {
 	if err := os.WriteFile(filepath.Join(e.etc, "config.network"), []byte(sharedUnit), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	prevEtc, prevRun, prevCtl := models.NetworkEtcDir, models.NetworkRunDir, models.Networkctl
+	prevEtc, prevRun, prevBus := models.NetworkEtcDir, models.NetworkRunDir, models.Bus
 	prevAfter, prevUpgrade, prevBoot := netAfterFunc, upgradeRunning, netBootClock
 	e.boot = time.Hour
 	netBootClock = func() (time.Duration, error) {
@@ -113,7 +89,7 @@ func newNetEnv(t *testing.T) *netEnv {
 		defer e.bootMu.Unlock()
 		return e.boot, nil
 	}
-	models.NetworkEtcDir, models.NetworkRunDir, models.Networkctl = e.etc, e.run, e.nc.run
+	models.NetworkEtcDir, models.NetworkRunDir, models.Bus = e.etc, e.run, e.nc
 	netAfterFunc = func(d time.Duration, f func()) func() bool {
 		ft := &fakeTimer{d: d, f: f}
 		e.timers.mu.Lock()
@@ -123,7 +99,7 @@ func newNetEnv(t *testing.T) *netEnv {
 	}
 	upgradeRunning = func() bool { return false }
 	t.Cleanup(func() {
-		models.NetworkEtcDir, models.NetworkRunDir, models.Networkctl = prevEtc, prevRun, prevCtl
+		models.NetworkEtcDir, models.NetworkRunDir, models.Bus = prevEtc, prevRun, prevBus
 		netAfterFunc, upgradeRunning, netBootClock = prevAfter, prevUpgrade, prevBoot
 	})
 
@@ -276,8 +252,8 @@ func TestNetworkApplyConfirm(t *testing.T) {
 	e := newNetEnv(t)
 	p, ref := e.apply(e.c, e.s, map[string]string{headerClientIP: "192.168.1.5"})
 	e.trialOnly()
-	if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := e.nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 	ev := e.event(evNetworkPending)
 	if ev["change_id"] != p.ChangeID || ev["intf"] != "eth0" || ev["applied_at"] != p.AppliedAt || ev["confirm_within"] != float64(120) {
@@ -311,8 +287,8 @@ func TestNetworkApplyConfirm(t *testing.T) {
 	if got := e.read(filepath.Join(e.etc, "calaos_eth0.network")); got != netUnit {
 		t.Fatalf("confirmed unit:\n%s", got)
 	}
-	if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := e.nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload"}) {
+		t.Fatalf("network calls %v", got)
 	}
 	ev = e.event(evNetworkApplied)
 	if len(ev) != 2 || ev["change_id"] != p.ChangeID || ev["intf"] != "eth0" {
@@ -354,15 +330,15 @@ func TestNetworkApplyConfirm(t *testing.T) {
 func TestNetworkApplyTimeout(t *testing.T) {
 	e := newNetEnv(t)
 	p, _ := e.apply(e.c, e.s, map[string]string{headerClientIP: "192.168.1.5"})
-	e.nc.take()
+	e.nc.Take()
 	e.clk.Advance(netConfirmWindow)
 	e.timers.last(t).f()
 
 	e.noTrial()
 	e.etcOnly()
 	e.noRecord()
-	if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := e.nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 	ev := e.event(admin.EventNetworkRolledBack)
 	if len(ev) != 3 || ev["intf"] != "eth0" || ev["id"] == "" || ev["ts"] == "" {
@@ -403,7 +379,7 @@ func TestNetworkConfirmPastDeadline(t *testing.T) {
 func TestNetworkRevert(t *testing.T) {
 	e := newNetEnv(t)
 	p, _ := e.apply(e.c, e.s, nil)
-	e.nc.take()
+	e.nc.Take()
 	e.c.expect("POST", "/api/v2/network/revert", `{"change_id":"0123456789abcdef"}`, session(e.s), 400, codeInvalidRequest)
 	e.c.expect("POST", "/api/v2/network/revert", `{"change_id":"nothex"}`, session(e.s), 400, codeInvalidRequest)
 	r := e.c.expect("POST", "/api/v2/network/revert", changeBody(p.ChangeID), session(e.s), 200, "")
@@ -413,8 +389,8 @@ func TestNetworkRevert(t *testing.T) {
 	e.noTrial()
 	e.etcOnly()
 	e.noRecord()
-	if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := e.nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 	if !e.timers.last(t).stopped {
 		t.Fatal("timer still armed")
@@ -461,7 +437,7 @@ func TestNetworkRestartPastDeadline(t *testing.T) {
 	r := e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 200, "")
 	var p applied
 	_ = json.Unmarshal(r.Data, &p)
-	e.nc.take()
+	e.nc.Take()
 	e.clk.Advance(netConfirmWindow + time.Second)
 
 	restarted, err := NewApp()
@@ -477,8 +453,8 @@ func TestNetworkRestartPastDeadline(t *testing.T) {
 	e.noTrial()
 	e.etcOnly()
 	e.noRecord()
-	if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := e.nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 	if ev := e.event(admin.EventNetworkRolledBack); ev["intf"] != "eth0" {
 		t.Fatalf("network_rolled_back %v", ev)
@@ -515,8 +491,8 @@ func TestNetworkCodeBinding(t *testing.T) {
 	}
 	e.noTrial()
 	e.etcOnly()
-	if got := e.nc.take(); got != nil {
-		t.Fatalf("networkctl ran: %v", got)
+	if got := e.nc.Take(); len(got) != 0 {
+		t.Fatalf("network calls ran: %v", got)
 	}
 	r := e.c.expect("POST", "/api/v2/network/apply", `{`+netFields+`,`+ref.body()+`}`, session(e.s), 200, "")
 	if !strings.Contains(string(r.Data), `"confirm_within":120`) {
@@ -559,14 +535,14 @@ func TestNetworkApplyChecks(t *testing.T) {
 	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, session(e.s), 403, codeNotAllowed)
 
 	// A failed reconfigure reverts at once.
-	e.nc.fail["reconfigure eth0"] = true
+	e.nc.Fail("NetworkReconfigure eth0", errors.New("boom"))
 	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 500, codeInternal)
 	e.noTrial()
 	e.noRecord()
 	if !e.timers.empty() {
 		t.Fatal("timer armed for a failed change")
 	}
-	delete(e.nc.fail, "reconfigure eth0")
+	e.nc.Fail("NetworkReconfigure eth0", nil)
 	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 200, "")
 	e.trialOnly()
 }
@@ -670,23 +646,23 @@ func (e *netEnv) blockTrial() func() {
 
 func TestNetworkApplyReloadFails(t *testing.T) {
 	e := newNetEnv(t)
-	e.nc.fail["reload"] = true
+	e.nc.Fail("NetworkReload", errors.New("boom"))
 	e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 500, codeInternal)
 	e.noTrial()
 	e.etcOnly()
 	e.noRecord()
-	if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reload", "reconfigure eth0"}) {
-		t.Fatalf("networkctl %v", got)
+	if got := e.nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReload", "NetworkReconfigure eth0"}) {
+		t.Fatalf("network calls %v", got)
 	}
 	if !e.timers.empty() || e.hasAlert() {
 		t.Fatal("a failed apply left a timer or an alert")
 	}
 }
 
-func TestNetworkRollbackNetworkctlFails(t *testing.T) {
+func TestNetworkRollbackReconfigureFails(t *testing.T) {
 	e := newNetEnv(t)
 	p, _ := e.apply(e.c, e.s, nil)
-	e.nc.fail["reconfigure eth0"] = true
+	e.nc.Fail("NetworkReconfigure eth0", errors.New("boom"))
 	e.clk.Advance(netConfirmWindow)
 	e.timers.last(t).f()
 	// The trial is gone, so the change is over even if networkd lags.
@@ -705,14 +681,14 @@ func TestNetworkRollbackTrialKept(t *testing.T) {
 	e := newNetEnv(t)
 	p, _ := e.apply(e.c, e.s, nil)
 	unblock := e.blockTrial()
-	e.nc.take()
+	e.nc.Take()
 	e.clk.Advance(netConfirmWindow)
 	e.timers.last(t).f()
 	if !e.hasRecord() || e.hasAlert() {
 		t.Fatal("a rollback that kept the trial cleared the record or raised the alert")
 	}
-	if got := e.nc.take(); got != nil {
-		t.Fatalf("networkctl ran: %v", got)
+	if got := e.nc.Take(); len(got) != 0 {
+		t.Fatalf("network calls ran: %v", got)
 	}
 	if tm := e.timers.last(t); tm.d != netRetryDelay || tm.stopped {
 		t.Fatalf("retry timer %+v", tm)
@@ -790,7 +766,7 @@ func TestNetworkRestartWithoutValidRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newNetEnv(t)
 			e.c.expect("POST", "/api/v2/network/trial", `{`+netFields+`}`, nil, 200, "")
-			e.nc.take()
+			e.nc.Take()
 			if err := tc.breakRecord(filepath.Join(adminRuntimeDir, netPendingFile)); err != nil {
 				t.Fatal(err)
 			}
@@ -803,8 +779,8 @@ func TestNetworkRestartWithoutValidRecord(t *testing.T) {
 			e.noRecord()
 			e.noTrial()
 			e.etcOnly()
-			if got := e.nc.take(); !reflect.DeepEqual(got, []string{"reload", "reconfigure eth0"}) {
-				t.Fatalf("networkctl %v", got)
+			if got := e.nc.Take(); !reflect.DeepEqual(got, []string{"NetworkReload", "NetworkReconfigure eth0"}) {
+				t.Fatalf("network calls %v", got)
 			}
 			if ev := e.event(admin.EventNetworkRolledBack); ev["intf"] != "eth0" {
 				t.Fatalf("network_rolled_back %v", ev)
@@ -850,7 +826,7 @@ func TestNetworkRestartClockSteppedBack(t *testing.T) {
 func TestNetworkRetryState(t *testing.T) {
 	e := newNetEnv(t)
 	p, _ := e.apply(e.c, e.s, nil)
-	e.nc.take()
+	e.nc.Take()
 	unblock := e.blockTrial()
 	e.clk.Advance(netConfirmWindow)
 	n := len(e.timers.list)
@@ -861,8 +837,8 @@ func TestNetworkRetryState(t *testing.T) {
 	if !e.timers.list[n-1].stopped {
 		t.Error("expired timer not stopped")
 	}
-	if got := e.nc.take(); got != nil {
-		t.Fatalf("networkctl ran with the trial still in place: %v", got)
+	if got := e.nc.Take(); len(got) != 0 {
+		t.Fatalf("network calls ran with the trial still in place: %v", got)
 	}
 	e.noEvent(admin.EventNetworkRolledBack)
 	r := e.c.expect("GET", "/api/v2/network/state", "", session(e.s), 200, "")
@@ -886,8 +862,8 @@ func TestNetworkRetryState(t *testing.T) {
 	e.timers.last(t).f()
 	e.noRecord()
 	e.event(admin.EventNetworkRolledBack)
-	if got := e.nc.take(); len(got) != 2 {
-		t.Fatalf("networkctl %v", got)
+	if got := e.nc.Take(); len(got) != 2 {
+		t.Fatalf("network calls %v", got)
 	}
 	if audit := readAudit(t); !strings.Contains(audit, "action=network_rollback intf=eth0 change_id="+p.ChangeID+" reason=timeout") {
 		t.Fatalf("audit:\n%s", audit)

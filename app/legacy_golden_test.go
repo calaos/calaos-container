@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/calaos/calaos-container/models"
 	"github.com/calaos/calaos-container/models/structs"
+	"github.com/calaos/calaos-container/sysbus"
+	"github.com/calaos/calaos-container/sysbus/sysbustest"
 )
 
 // The legacy unprefixed routes are frozen: old kiosks and old CLIs parse
@@ -91,6 +94,30 @@ type stubResult struct {
 	err error
 }
 
+// stubBus keeps the reboot and the kiosk restart under the keys of
+// stubBackend.commands, which the goldens share with the routes that do exec.
+// A failure carries the stub's text, so the goldens do not pin the msg of a
+// real bus failure: docs/API.md lists those.
+type stubBus struct{ *sysbustest.Bus }
+
+func newStubBus() *stubBus {
+	b := sysbustest.New()
+	b.SetUnit("calaos-home.service", sysbus.UnitProperties{LoadState: "loaded"})
+	return &stubBus{b}
+}
+
+func (b *stubBus) Reboot(ctx context.Context) error {
+	_, err := runCommand("systemctl", "reboot")
+	return err
+}
+
+func (b *stubBus) RestartUnit(ctx context.Context, unit string) (*sysbus.Job, error) {
+	if _, err := runCommand("systemctl", "restart", "calaos-home"); err != nil {
+		return nil, err
+	}
+	return b.Bus.RestartUnit(ctx, unit)
+}
+
 func (s *stubBackend) install(t *testing.T) {
 	t.Helper()
 
@@ -103,6 +130,12 @@ func (s *stubBackend) install(t *testing.T) {
 	prevProc := installProc
 	installProc = nil
 	installMu.Unlock()
+
+	// A test that brought its own fake bus keeps it.
+	prevBus := models.Bus
+	if _, own := models.Bus.(*sysbustest.Bus); !own {
+		models.Bus = newStubBus()
+	}
 
 	runCommand = func(command string, args ...string) (string, error) {
 		key := strings.Join(append([]string{command}, args...), " ")
@@ -179,6 +212,7 @@ func (s *stubBackend) install(t *testing.T) {
 		installExitCodeFile = prev[12].(string)
 		rebootGuard = prev[13].(func(func() error) error)
 		startLoggedCommand = prev[14].(func(models.LoggedCommand) (models.Process, error))
+		models.Bus = prevBus
 		setInstallProc(prevProc)
 	})
 }

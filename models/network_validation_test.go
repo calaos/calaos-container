@@ -261,7 +261,7 @@ func TestValidateNetInterfaceConfig(t *testing.T) {
 
 // TestConfigureNetInterfaceRejectsBadInput makes sure ConfigureNetInterface
 // refuses invalid input on its own, i.e. even if a caller forgets to validate.
-// It must fail before running networkctl or creating any file.
+// It must fail before any bus call or creating any file.
 func TestConfigureNetInterfaceRejectsBadInput(t *testing.T) {
 	tests := []struct {
 		name   string
