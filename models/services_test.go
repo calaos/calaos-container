@@ -44,12 +44,13 @@ func TestParseResolvedUnit(t *testing.T) {
 		t.Fatalf("args %q", got)
 	}
 	for out, want := range map[string]string{
-		"loaded\nnot-found\n":    "chrony.service",
-		"not-found\nloaded\n":    "systemd-timesyncd.service",
-		"not-found\nmasked\n":    "systemd-timesyncd.service",
-		"not-found\nnot-found\n": "chrony.service",
-		"loaded\n":               "chrony.service",
-		"":                       "chrony.service",
+		"loaded\n\nnot-found\n":    "chrony.service",
+		"loaded\n\nloaded\n":       "chrony.service",
+		"not-found\n\nloaded\n":    "systemd-timesyncd.service",
+		"not-found\n\nmasked\n":    "systemd-timesyncd.service",
+		"not-found\n\nnot-found\n": "chrony.service",
+		"loaded\n":                 "chrony.service",
+		"":                         "chrony.service",
 	} {
 		if got := ParseResolvedUnit("chrony.service", out); got != want {
 			t.Fatalf("%q: %q, want %q", out, got, want)
@@ -89,17 +90,37 @@ func TestParseServiceStatesFallback(t *testing.T) {
 	}
 }
 
+func TestParseServiceStatesFirstCandidateWins(t *testing.T) {
+	var b strings.Builder
+	for _, s := range Services {
+		for _, u := range UnitCandidates(s.Unit) {
+			b.WriteString("LoadState=loaded\nActiveState=active\nSubState=" + u + "\n\n")
+		}
+	}
+	states, err := ParseServiceStates(b.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range states {
+		if st.ID == "ntp" && (st.Unit != "chrony.service" || st.SubState != "chrony.service") {
+			t.Fatalf("%+v", st)
+		}
+	}
+}
+
 func TestParseServiceStatesNotFound(t *testing.T) {
 	var b strings.Builder
-	for _, s := range ServiceStateArgs()[5:] {
-		b.WriteString("Id=" + s + "\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nActiveEnterTimestamp=\n\n")
+	for _, s := range Services {
+		for _, u := range UnitCandidates(s.Unit) {
+			b.WriteString("Id=" + u + "\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nActiveEnterTimestamp=\n\n")
+		}
 	}
 	states, err := ParseServiceStates(b.String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, st := range states {
-		if st.ID != Services[i].ID || st.ActiveState != "not-found" || st.SubState != "" || st.Enabled != "" || st.Since != nil {
+		if st.ID != Services[i].ID || st.Unit != Services[i].Unit || st.ActiveState != "not-found" || st.SubState != "" || st.Enabled != "" || st.Since != nil {
 			t.Fatalf("%+v", st)
 		}
 	}
@@ -107,8 +128,10 @@ func TestParseServiceStatesNotFound(t *testing.T) {
 
 func TestParseServiceStatesBadTimestamp(t *testing.T) {
 	var b strings.Builder
-	for range ServiceStateArgs()[5:] {
-		b.WriteString("LoadState=loaded\nActiveEnterTimestamp=Sat 2026-10-25 07:41:12 CET\n\n")
+	for _, s := range Services {
+		for range UnitCandidates(s.Unit) {
+			b.WriteString("LoadState=loaded\nActiveEnterTimestamp=Sat 2026-10-25 07:41:12 CET\n\n")
+		}
 	}
 	if _, err := ParseServiceStates(b.String()); err == nil {
 		t.Fatal("a non-unix timestamp was accepted")

@@ -166,8 +166,8 @@ func TestServiceRestartAnswersFirst(t *testing.T) {
 		want     []string
 	}{
 		{"calaos-server", "", []string{"restart --no-block calaos-server.service"}},
-		{"ntp", "loaded\nnot-found\n", []string{resolve, "restart --no-block chrony.service"}},
-		{"ntp", "not-found\nloaded\n", []string{resolve, "restart --no-block systemd-timesyncd.service"}},
+		{"ntp", "loaded\n\nnot-found\n", []string{resolve, "restart --no-block chrony.service"}},
+		{"ntp", "not-found\n\nloaded\n", []string{resolve, "restart --no-block systemd-timesyncd.service"}},
 	}
 	for _, tc := range cases {
 		id := tc.id

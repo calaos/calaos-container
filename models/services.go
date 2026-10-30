@@ -57,21 +57,22 @@ func UnitCandidates(unit string) []string {
 func HasUnitFallbacks(unit string) bool { return len(unitFallbacks[unit]) > 0 }
 
 // ResolveUnitArgs is the systemctl argv printing the LoadState of every
-// candidate of unit, one per line.
+// candidate of unit, in order.
 func ResolveUnitArgs(unit string) []string {
 	return append([]string{"show", "--no-pager", "-p", "LoadState", "--value"}, UnitCandidates(unit)...)
 }
 
 // ParseResolvedUnit picks the first candidate that is installed, or unit
-// itself when none is or the output is not understood.
+// itself when none is or the output is not understood. systemctl separates
+// the units with a blank line, even with --value.
 func ParseResolvedUnit(unit, out string) string {
 	cands := UnitCandidates(unit)
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) != len(cands) {
+	states := strings.Fields(out)
+	if len(states) != len(cands) {
 		return unit
 	}
-	for i, l := range lines {
-		if st := strings.TrimSpace(l); st != "" && st != "not-found" {
+	for i, st := range states {
+		if st != "not-found" {
 			return cands[i]
 		}
 	}

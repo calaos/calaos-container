@@ -221,8 +221,8 @@ func TestLogsQueryNTPUnit(t *testing.T) {
 	a := newHandlerTestApp(t)
 
 	for _, tc := range []struct{ show, unit string }{
-		{"not-found\nloaded\n", "systemd-timesyncd.service"},
-		{"loaded\nnot-found\n", "chrony.service"},
+		{"not-found\n\nloaded\n", "systemd-timesyncd.service"},
+		{"loaded\n\nnot-found\n", "chrony.service"},
 	} {
 		resetServicesCache()
 		if err := os.WriteFile(f.show, []byte(tc.show), 0o600); err != nil {
