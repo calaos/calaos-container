@@ -18,8 +18,7 @@ const (
 	ActionAdminPassword  = "admin_password"
 	ActionApproverEnroll = "approver_enroll"
 	ActionApproverRemove = "approver_remove"
-	// ActionNetworkConfig is reserved: no route consumes it yet.
-	ActionNetworkConfig = "network_config"
+	ActionNetworkConfig  = "network_config"
 
 	actionApproverConfirm = "approver_confirm"
 
@@ -77,6 +76,7 @@ var actionParams = map[string][]string{
 	ActionAdminPassword:  {"password"},
 	ActionApproverEnroll: nil,
 	ActionApproverRemove: {"approver_id"},
+	ActionNetworkConfig:  {"intf", "dhcp", "ipv4", "gateway", "dns_servers", "search_domains"},
 }
 
 // Grant actions are consumed outside a REST body (the console WebSocket), so
@@ -89,6 +89,7 @@ var codePurpose = map[string]string{
 	ActionApproverEnroll:  "add an approver phone",
 	ActionApproverRemove:  "remove an approver phone",
 	actionApproverConfirm: "enroll this phone as the admin approver",
+	ActionNetworkConfig:   "change the network configuration",
 }
 
 type pushCode struct {
@@ -229,9 +230,6 @@ func ValidCode(s string) bool {
 }
 
 func checkActionParams(action string, p Params) error {
-	if action == ActionNetworkConfig {
-		return &InvalidError{Msg: "action not available yet: " + action}
-	}
 	keys, ok := actionParams[action]
 	if !ok {
 		return &InvalidError{Msg: "unknown action"}
@@ -430,6 +428,24 @@ func (m *Manager) RequestCode(session, action string, p Params, approverID strin
 	return CodeInfo{CodeID: c.id, ApproverID: dest.ID, ExpiresIn: int(CodeTTL / time.Second)}, nil
 }
 
+// UseCode consumes a code of action bound to p, for a route outside this
+// package (network/apply).
+func (m *Manager) UseCode(session, action string, p Params, ref CodeRef) error {
+	if err := m.requireApprover(); err != nil {
+		return err
+	}
+	if ref.ID == "" {
+		return ErrCodeRequired
+	}
+	s, err := m.lockSession(session)
+	if err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	_, err = m.useCodeLocked(s, ref, action, p, useConsume)
+	return err
+}
+
 // VerifyCode turns a grant action's code into a grant for TakeGrant.
 func (m *Manager) VerifyCode(session string, ref CodeRef) (string, int, error) {
 	s, err := m.lockSession(session)
@@ -600,11 +616,20 @@ func (m *Manager) RemoveApprover(session, approverID string, ref CodeRef) error 
 	return nil
 }
 
-// PushPayload hands the token and the message of a code to calaos_server,
-// once.
-func (m *Manager) PushPayload(codeID string) (token, message string, err error) {
+// PushPayload is what calaos_server needs to push a code. Code is in clear so
+// it can encrypt it for phones registered with a push key.
+type PushPayload struct {
+	Token     string `json:"token"`
+	Message   string `json:"message"`
+	Action    string `json:"action"`
+	Code      string `json:"code"`
+	ExpiresIn int    `json:"expires_in"`
+}
+
+// PushPayload hands a code to calaos_server, once.
+func (m *Manager) PushPayload(codeID string) (PushPayload, error) {
 	if m.initErr != nil {
-		return "", "", m.initErr
+		return PushPayload{}, m.initErr
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -612,8 +637,14 @@ func (m *Manager) PushPayload(codeID string) (token, message string, err error) 
 	m.codes.prune(now)
 	c := m.codes.byID[codeID]
 	if c == nil || c.fetched || !c.grantUntil.IsZero() || !m.sessions.liveHash(now, c.session) {
-		return "", "", ErrNotFound
+		return PushPayload{}, ErrNotFound
 	}
 	c.fetched = true
-	return c.token, c.message, nil
+	return PushPayload{
+		Token:     c.token,
+		Message:   c.message,
+		Action:    c.action,
+		Code:      c.digits,
+		ExpiresIn: ceilSeconds(c.expires.Sub(now)),
+	}, nil
 }

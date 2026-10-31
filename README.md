@@ -62,6 +62,11 @@ calaos-os list                       # installed calaos-* packages and available
 calaos-os check-update               # ask the mirrors for new versions
 calaos-os upgrade [PKG]              # upgrade one package, or all of them, with live progress
 calaos-os network list
+calaos-os network state              # interfaces and the pending change, if any
+calaos-os network apply --intf eth0 --ipv4 192.168.1.10/24 [--gateway IP] [--dns IP]... [--search DOMAIN]...
+calaos-os network apply --intf eth0 --dhcp
+calaos-os network confirm [CHANGE_ID]   # keep an applied change
+calaos-os network revert [CHANGE_ID]    # undo it now
 calaos-os network configure dhcp INTERFACE
 calaos-os network configure static INTERFACE IPV4 NETMASK [GATEWAY] [DNS...]
 ```

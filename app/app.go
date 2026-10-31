@@ -21,6 +21,7 @@ import (
 	"github.com/calaos/calaos-container/config"
 	"github.com/calaos/calaos-container/events"
 	logger "github.com/calaos/calaos-container/log"
+	"github.com/calaos/calaos-container/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -54,6 +55,8 @@ type AppServer struct {
 	sessions sessionValidator
 
 	admin *admin.Manager
+	net   *netChanges
+	logs  *logLimits
 
 	now         func() time.Time
 	consoles    *console.Manager
@@ -116,6 +119,7 @@ func NewApp() (a *AppServer, err error) {
 		},
 	})
 	a.sessions = a.admin
+	a.logs = newLogLimits()
 	a.now = adminNow
 	if a.now == nil {
 		a.now = time.Now
@@ -233,13 +237,23 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Post("/system/restart", s, a.v2SystemRestart)
 	v2.Get("/system/info", s, a.v2SystemInfo)
 	v2.Get("/system/fs_status", s, a.v2SystemFsStatus)
+	v2.Get("/system/services", s, a.v2Services)
+	v2.Post("/system/services/restart", s, a.v2ServiceAction(models.ActionRestart))
+	v2.Post("/system/services/start", s, a.v2ServiceAction(models.ActionStart))
+	v2.Post("/system/services/stop", s, a.v2ServiceAction(models.ActionStop))
+	v2.Post("/system/services/enable", s, a.v2ServiceAction(models.ActionEnable))
+	v2.Post("/system/services/disable", s, a.v2ServiceAction(models.ActionDisable))
+	v2.Get("/system/time", s, a.v2SystemTime)
+	v2.Post("/system/time", s, a.v2SystemTimeSet)
+	v2.Get("/system/timezones", s, a.v2SystemTimezones)
+	v2.Get("/logs/sources", s, a.v2LogSources)
+	v2.Post("/logs/query", s, a.v2LogsQuery)
 	v2.Post("/system/rollback_snapshot", bearerOnly, a.v2SystemRollbackSnapshot)
 	v2.Get("/system/install/list_devices", bearerOnly, a.v2InstallListDevices)
 	v2.Post("/system/install/start", bearerOnly, a.v2InstallStart)
 	v2.Get("/system/install/status", bearerOnly, a.v2InstallStatus)
 
-	v2.Get("/network/list", bearerOnly, a.v2NetList)
-	v2.Post("/network/:intf", bearerOnly, a.v2NetConfigure)
+	a.registerNetwork(v2)
 
 	a.registerAdmin(v2)
 
@@ -278,6 +292,8 @@ func (a *AppServer) Start() <-chan error {
 	logging.Infoln("\u21D2 Server listening on", addr)
 
 	a.wgDone.Add(1)
+
+	a.resumeNetChange()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.stopConsole = cancel

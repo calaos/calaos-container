@@ -39,19 +39,27 @@ var rebootLockWait = 30 * time.Second
 // holder that does not release in time is treated as an upgrade that has not
 // raised its flag yet.
 func RebootGuard(fn func() error) error {
-	if !upgradeLock.TryAcquire(1) {
-		if upgrading.Load() {
-			return ErrUpgradeInProgress
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), rebootLockWait)
-		defer cancel()
-		if err := upgradeLock.Acquire(ctx, 1); err != nil {
-			return ErrUpgradeInProgress
-		}
+	if err := acquireUpgradeLock(); err != nil {
+		return err
 	}
 	if err := fn(); err != nil {
 		upgradeLock.Release(1)
 		return err
+	}
+	return nil
+}
+
+func acquireUpgradeLock() error {
+	if upgradeLock.TryAcquire(1) {
+		return nil
+	}
+	if upgrading.Load() {
+		return ErrUpgradeInProgress
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rebootLockWait)
+	defer cancel()
+	if err := upgradeLock.Acquire(ctx, 1); err != nil {
+		return ErrUpgradeInProgress
 	}
 	return nil
 }

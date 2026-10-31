@@ -33,6 +33,14 @@ func TestValidateInterfaceName(t *testing.T) {
 		{"short option like", "-h", true},
 		{"nul byte", "eth0\x00", true},
 		{"unicode", "éth0", true},
+		{"route word apply", "apply", true},
+		{"route word confirm", "confirm", true},
+		{"route word revert", "revert", true},
+		{"route word state", "state", true},
+		{"route word list", "list", true},
+		{"route word trial", "trial", true},
+		{"route word upper case", "Apply", true},
+		{"route word prefix", "applyx", false},
 	}
 
 	for _, tc := range tests {
@@ -253,7 +261,7 @@ func TestValidateNetInterfaceConfig(t *testing.T) {
 
 // TestConfigureNetInterfaceRejectsBadInput makes sure ConfigureNetInterface
 // refuses invalid input on its own, i.e. even if a caller forgets to validate.
-// It must fail before running networkctl or creating any file.
+// It must fail before any bus call or creating any file.
 func TestConfigureNetInterfaceRejectsBadInput(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -301,7 +309,12 @@ func TestNetworkTemplateRendersLiterally(t *testing.T) {
 				DNSServers:    []string{"192.168.1.1", "9.9.9.9"},
 				SearchDomains: []string{"calaos.fr"},
 			},
-			want: "[Match]\nName=eth0\n\n[Network]\nAddress=192.168.1.10/24\nGateway=192.168.1.1\nDNS=192.168.1.1\nDNS=9.9.9.9\nDomains=calaos.fr\n",
+			want: "[Match]\nName=eth0\n\n[Network]\nDHCP=no\nAddress=192.168.1.10/24\nGateway=192.168.1.1\nDNS=192.168.1.1\nDNS=9.9.9.9\nDomains=calaos.fr\n",
+		},
+		{
+			name:   "no gateway",
+			config: structs.NetInterface{Name: "eth0", IPv4: "192.168.1.10/24"},
+			want:   "[Match]\nName=eth0\n\n[Network]\nDHCP=no\nAddress=192.168.1.10/24\n",
 		},
 		{
 			name:   "dhcp",
@@ -319,7 +332,7 @@ func TestNetworkTemplateRendersLiterally(t *testing.T) {
 				Gateway:       "192.168.1.1",
 				SearchDomains: []string{"a&b.example.com", "x'y<z>.example.com"},
 			},
-			want: "[Match]\nName=eth0\n\n[Network]\nAddress=192.168.1.10/24\nGateway=192.168.1.1\nDomains=a&b.example.com\nDomains=x'y<z>.example.com\n",
+			want: "[Match]\nName=eth0\n\n[Network]\nDHCP=no\nAddress=192.168.1.10/24\nGateway=192.168.1.1\nDomains=a&b.example.com\nDomains=x'y<z>.example.com\n",
 		},
 	}
 

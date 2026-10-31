@@ -88,16 +88,16 @@ ignored.
 | `bad_password` | 403 | wrong admin password on `admin/verify` | none |
 | `not_allowed` | 403 | a session-bearing request on a bearer-only route (see Sessions) | none |
 | `password_too_short` | 400 | admin password under 10 characters | `{"min_length": 10}` |
-| `invalid_request` | 400 | malformed JSON, missing or invalid field, invalid `package` or interface name | none |
+| `invalid_request` | 400 | malformed JSON, missing or invalid field, invalid `package`, interface name, service id, log query or time value, unknown or finished `change_id` | none |
 | `package_not_found` | 404 | the package has no pending update | none |
 | `package_held` | 409 | single-package upgrade of a package on hold (`apt-mark hold`) | none |
 | `not_found` | 404 | unknown `/api/v2/` route | none |
 | `method_not_allowed` | 405 | known route, wrong method | none |
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
-| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot | `{"job_id": "..."}` when the run is a job (absent behind a version check or a reboot) |
+| `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, kiosk restart, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check, a reboot or a service action) |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
-| `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes) | `{"retry_after": <seconds>}` |
+| `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes), log query limits (see Logs) | `{"retry_after": <seconds>}` |
 | `approver_required` | 409 | the action needs a push code and no approver is enrolled | none |
 | `approver_limit` | 409 | enrolment while 2 approvers exist | `{"max": 2}` |
 | `approver_exists` | 409 | enrolment of a token that is already an approver | none |
@@ -107,6 +107,8 @@ ignored.
 | `bad_code` | 403 | wrong push code, or a code requested for another action or other parameters | `{"attempts_left": <int>}` |
 | `code_expired` | 410 | the push code is unknown to this session, expired, used, replaced or dropped | none |
 | `console_limit` | 409 | a console is opened while 2 are open or opening | `{"max": 2}` |
+| `network_pending` | 409 | a network change is already waiting for its confirmation, or `calaos-container` is restarted while one waits (see Network configuration, Services) | `{"change_id": "<16 hex>", "expires_in": <seconds>}` |
+| `service_unavailable` | 409 | the unit of a service action is not installed or is masked (see Services) | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -140,14 +142,30 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/update/upgrade-all` | bearer, session allowed | 202 | `<Job>` |
 | POST | `/api/v2/update/upgrade` | bearer, session allowed | 202 | `<Job>`; body `{"package": "<name>"}` |
 | POST | `/api/v2/system/reboot` | bearer, session allowed | 200 | `null`; `409 upgrade_in_progress` while a job runs |
-| POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk) |
+| POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
+| GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
+| POST | `/api/v2/system/services/restart` | bearer, session allowed | 200 | `{"id", "state": "restarting"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/start` | bearer, session allowed | 200 | `{"id", "state": "starting"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/stop` | bearer, session allowed | 200 | `{"id", "state": "stopping"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/enable` | bearer, session allowed | 200 | `{"id", "state": "enabling"}`; body `{"unit": "<id>"}` |
+| POST | `/api/v2/system/services/disable` | bearer, session allowed | 200 | `{"id", "state": "disabling"}`; body `{"unit": "<id>"}` |
+| GET | `/api/v2/system/time` | bearer, session allowed | 200 | `<BoxTime>` (see Box time) |
+| POST | `/api/v2/system/time` | bearer, session allowed | 200 | `<BoxTime>` plus `restart_required`; body `{"timezone", "ntp", "time"}`, each optional, at least one |
+| GET | `/api/v2/system/timezones` | bearer, session allowed | 200 | `{"timezones": ["Africa/Abidjan", ...]}` |
+| GET | `/api/v2/logs/sources` | bearer, session allowed | 200 | `{"sources": [{"id", "label"}]}` (see Logs) |
+| POST | `/api/v2/logs/query` | bearer, session allowed | 200 | `{"entries", "truncated", "complete", "next_cursor"}`; body in Logs |
 | POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, then reboots); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/install/list_devices` | bearer only | 200 | `lsblk --json --output-all` output |
 | POST | `/api/v2/system/install/start` | bearer only | 200 | `text/plain` log stream; body `{"device": "/dev/...", "confirm": true}` |
 | GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}`; `exit_code` is `-1` when the installer ended without an exit status (failed start, daemon restarted under it) |
 | GET | `/api/v2/network/list` | bearer only | 200 | array of interfaces |
+| GET | `/api/v2/network/state` | bearer, session allowed | 200 | `{"interfaces": [<NetInterface>], "pending": {...} or null}` (see Network configuration) |
+| POST | `/api/v2/network/apply` | session only, push code | 200 | `{"change_id", "intf", "applied_at", "confirm_within"}`; body in Network configuration |
+| POST | `/api/v2/network/confirm` | bearer, session allowed | 200 | `{"change_id", "intf", "state": "confirmed"}`; body `{"change_id"}` |
+| POST | `/api/v2/network/revert` | bearer, session allowed | 200 | `{"change_id", "intf", "state": "reverted"}`; body `{"change_id"}` |
+| POST | `/api/v2/network/trial` | bearer only | 200 | as `apply`; body as `apply` without `code_id` and `code` |
 | POST | `/api/v2/network/{intf}` | bearer only | 200 | `null`; body `{ipv4, gateway, dns_servers, search_domains, dhcp}` |
 | GET | `/api/v2/admin/status` | bearer, session allowed | 200 | `{"admin_set": <bool>}` |
 | POST | `/api/v2/admin/verify` | bearer, session allowed | 200 | `{"session": "<hex>", "expires_in": <seconds>}` |
@@ -161,13 +179,14 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/admin/approvers/remove` | session only | 200 | `{"approver_id"}`; body `{"approver_id", "code_id", "code"}` |
 | POST | `/api/v2/admin/codes` | session only | 200 | `{"code_id", "approver_id", "expires_in"}`; body `{"action", "params", "approver_id"}` |
 | POST | `/api/v2/admin/codes/verify` | session only | 200 | `{"action", "expires_in"}`; body `{"code_id", "code"}` |
-| GET | `/api/v2/admin/push/{code_id}` | bearer only | 200 | `{"token": "<push token>", "message": "<text>"}`, single use |
+| GET | `/api/v2/admin/push/{code_id}` | bearer only | 200 | `{"token": "<push token>", "message": "<text>", "action": "<action>", "code": "<6 digits>", "expires_in": <seconds>}`, single use |
 | POST | `/api/v2/admin/console` | session only | 200 | `<ConsoleOpened>`; body `{"code_id", "term"}` (see Console) |
 
 "Bearer only" routes refuse a request that carries `X-Calaos-Admin-Session` (`403 not_allowed`):
 the session path (calaos_server) never reaches them. "Session only" routes need a valid
 `X-Calaos-Admin-Session`; without it they answer `401 bad_session`, since a push code is bound to a
-session and the bearer alone has none.
+session and the bearer alone has none. `network/apply` is the one session-only route outside
+`admin/*`.
 
 `<Status>` is the upgrade progress object of the legacy `GET /api/update/status`, unchanged
 (`status`, `total_percent`, `current_pkg`, `current_step`, `current_percent`, `pkg_index`,
@@ -208,15 +227,15 @@ keeps none: it relays the session the browser holds, in `X-Calaos-Admin-Session`
   itself, and die at reboot. The daemon stores a SHA-256 of each session, never the session.
 - **Bound:** at most 32 live sessions; issuing one more drops the oldest.
 - **Validation:** whenever the header is present, on any `/api/v2/` route, before the route runs:
-  - on a bearer-only route (`system/install/*`, `system/rollback_snapshot`, `network/*`,
-    `admin/reset`, `admin/alerts/ack`, `admin/push/*`, recovery
+  - on a bearer-only route (`system/install/*`, `system/rollback_snapshot`, `network/list`,
+    `network/trial`, `network/{intf}`, `admin/reset`, `admin/alerts/ack`, `admin/push/*`, recovery
     `admin/set`): `403 not_allowed`,
     without looking the session up;
   - elsewhere, empty, unknown, expired or invalidated: `401 bad_session`;
   - otherwise the route runs.
 
-  On a session-only route (`admin/approvers*`, `admin/codes*`, `admin/console`) an absent header is also
-  `401 bad_session`.
+  On a session-only route (`admin/approvers*`, `admin/codes*`, `admin/console`, `network/apply`) an
+  absent header is also `401 bad_session`.
 
   A header present with an empty value counts as present. calaos_server never sends an empty
   header.
@@ -335,9 +354,11 @@ it to an approver, the user types it back in the webapp.
 | `admin_password` | `POST admin/set`, change mode | `{"password": "<new password>"}` |
 | `approver_enroll` | `POST admin/approvers/enroll` while an approver exists | `{}` |
 | `approver_remove` | `POST admin/approvers/remove` | `{"approver_id": "<id>"}` |
-| `network_config` | reserved for the network routes (phase 3); refused today with `invalid_request` | |
+| `approver_confirm` | `POST admin/approvers/confirm` | `{}`; issued by `admin/approvers/enroll` to the new phone, not requestable through `admin/codes` |
+| `network_config` | `POST network/apply` | the six strings `intf`, `dhcp`, `ipv4`, `gateway`, `dns_servers`, `search_domains`, see Network configuration |
 
-Updates, reboot, restart and every other admin action need the admin password only.
+Updates, reboot, restart, services, logs, box time and every other admin action need the admin
+password only.
 `approver_enroll` is bound to `{}`: the client never sees the new token (calaos_server adds it),
 and the new phone proves itself with its own code.
 
@@ -379,13 +400,34 @@ offers `approver_candidates`, its `push_tokens` entries as `{token_id, device_na
 1. The daemon publishes `push_code {"approver_id", "code_id"}` on the event bus (see Events). It
    carries neither the token nor the code.
 2. calaos_server calls `GET /api/v2/admin/push/{code_id}` (bearer only) and gets
-   `{"token": "<push token>", "message": "<text>"}`. The message is
-   `Calaos admin code NNNNNN: <purpose>. Valid 60 s, never share it.`, `NNNNNN` being the code and
-   `<purpose>` one of `open the web console`, `change the admin password`, `add an approver phone`,
-   `remove an approver phone`, or `enroll this phone as the admin approver` (the enrolment code
-   sent to the new token). One fetch per code: a second one, an unknown or an expired code
-   answers `404 not_found`.
-3. calaos_server pushes the message to that one token and never forwards `push_code` to a client.
+   `{"token": "<push token>", "message": "<text>", "action": "<action>", "code": "NNNNNN", "expires_in": <seconds>}`.
+   - `message` is `Calaos admin code NNNNNN: <purpose>. Valid 60 s, never share it.`, `NNNNNN` being
+     the code and `<purpose>` the one of `action` in the table below.
+   - `action` is one of `console_open`, `admin_password`, `approver_enroll`, `approver_remove`,
+     `approver_confirm` (the enrolment code sent to the new token) or `network_config`.
+   - `code` is the 6 digits and `expires_in` the seconds left before the code expires.
+
+   | `action` | `<purpose>` |
+   |---|---|
+   | `console_open` | `open the web console` |
+   | `admin_password` | `change the admin password` |
+   | `approver_enroll` | `add an approver phone` |
+   | `approver_remove` | `remove an approver phone` |
+   | `approver_confirm` | `enroll this phone as the admin approver` |
+   | `network_config` | `change the network configuration` |
+
+   One fetch per code: a second one, an unknown or an expired code answers `404 not_found`.
+3. calaos_server pushes one of two forms to that one token and never forwards `push_code` to a
+   client:
+   - a token registered with a push key gets the notice
+     `Calaos admin code to <purpose>. Open the Calaos app to read it.`, built by calaos_server from
+     `action` only (`<purpose>` taken from the table above, never from `message`), plus the code
+     encrypted with that key as push `data` (format and test vectors in `08_http_api.md`). The code
+     is not in the text;
+   - a token without a push key gets `message` as received, which carries the code in clear.
+
+   In both forms calaos_server refuses a `message` that does not have the code message shape, so a
+   process squatting on the daemon's port cannot word a push.
 
 Events are best effort: a user who receives nothing requests a new code after 10 s.
 
@@ -548,10 +590,12 @@ The native bridge needs no separate terminal-server package.
   seconds until the oldest failure leaves the window, before any hashing.
 - The budget is global, not per client: every remote client arrives through calaos_server. A
   third party failing in a loop can therefore delay legitimate unlocks; this is accepted.
+- Log queries have their own limits (see Logs).
 
 ### Alerts
 
-`admin_set`, `admin_reset`, `approver_set`, `approver_removed` and `console_opened` are persisted in
+`admin_set`, `admin_reset`, `approver_set`, `approver_removed`, `console_opened` and
+`network_rolled_back` are persisted in
 `/mnt/calaos/admin/` when they happen, then
 published on the event bus and replayed to every new `/events` subscriber until acknowledged. A
 connected subscriber that missed one (full buffer) gets it again at the next ping (30 s).
@@ -572,12 +616,467 @@ The approver and code routes add, when known, `action=`, `approver=` (id), `code
 `bad_code`, `attempts_left=`, before the method. Never the code, the token, the device name or
 `params`.
 
+The other routes add these fields before the method, and never a value that could carry a secret:
+
+| Route | Fields |
+|---|---|
+| `POST system/services/{restart,start,stop,enable,disable}` | `unit=<id>`, set once the `unit` is an `id` of the table and the verb is allowed for it |
+| `POST logs/query` | `sources=<ids joined by +>`, `lines=`, `dir=`, `text=yes` or `text=no`; never the text. Not written for a follow poll (`forward` with a `cursor`) |
+| `POST system/time` | `tz=`, `ntp=`, `time=set`; never the time |
+| `POST network/apply`, `POST network/trial` | `intf=`, `change_id=`; `code_id=` on `apply` |
+| `POST network/confirm` | `change_id=` |
+| `POST network/revert` | `change_id=`, `intf=`, `reason=revert` |
+
+A rollback of a pending network change by the timeout or by a daemon restart past the deadline
+writes one more line, in the form of the `console_close` line, with the `client` and the session
+audit id kept in the pending record:
+`<time> client=<client> result=ok session=<audit id> action=network_rollback intf=<intf> change_id=<id> reason=<reason> - "-"`,
+`reason` being `timeout` or `restart`. An explicit `POST network/revert` is its own audit line,
+with `reason=revert`.
+`POST network/trial`, `network/confirm` and `network/revert` are audited with the bearer alone
+too (the CLI), as `client=local session=-` unless `X-Calaos-Client-IP` is set.
+
 A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
 second: anything on the host can send the first, calaos_server relays a household client's guessed
 session on `update_status`, and in `audit.log` they would rotate the real entries away.
 
-`GET admin/status` without a session is not audited (calaos_server polls it). `audit.log` is
-rotated at 1 MiB, one old file kept.
+`GET admin/status` without a session is not audited (calaos_server polls it). Nor are the
+read-only routes the webapp polls, with or without a session: `GET logs/sources`,
+`GET system/services`, `GET system/time`, `GET system/timezones`, `GET network/state`, and the
+follow polls of `POST logs/query` (`forward` with a `cursor`, every 2 s): a line each would rotate
+the real entries away. Any other `logs/query` (a search, a page of history) is audited. A refused
+`bad_bearer` or `bad_session` call to them still goes to the daemon log as above, and every route
+that changes something stays audited. `audit.log` is rotated at 1 MiB, one old file kept.
+
+## Services
+
+The daemon reports the state of a closed list of Calaos OS units and acts on some of them. The
+list is a static table in the daemon: a client names an `id`, never a unit.
+
+| `id` | Unit | `kind` | `actions` |
+|---|---|---|---|
+| `calaos-server` | `calaos-server.service` | `service` | `restart` |
+| `calaos-home` | `calaos-home.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `mosquitto` | `mosquitto.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `zigbee2mqtt` | `zigbee2mqtt.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `influxdb` | `influxdb.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `grafana` | `grafana.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `hue2mqtt` | `hue2mqtt.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `envoy` | `envoy.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `olad` | `olad.service` | `service` | `restart`, `start`, `stop`, `enable`, `disable` |
+| `ntp` | `chrony.service`, else `systemd-timesyncd.service` | `service` | `restart` |
+| `calaos-container` | `calaos-container.service` | `service` | `restart` |
+| `haproxy` | `haproxy.service` | `service` | `restart` |
+| `networkd` | `systemd-networkd.service` | `service` | none (status only) |
+| `ssh` | `ssh.service` | `service` | `restart` (`reload-or-restart`) |
+
+`ntp` is the NTP client: Calaos OS runs chrony (the `calaos` package depends on it, which removes
+`systemd-timesyncd`). The daemon uses the first candidate whose `LoadState` is not `not-found`, or
+`chrony.service` when none is installed. The candidates are constants: no unit name comes from a
+client. The NTP client is switched on and off by `ntp` in `POST system/time` (see Box time), which
+is why it has no `start`, `stop`, `enable` or `disable`.
+
+Why some rows have fewer verbs:
+
+- `calaos-server`, `haproxy`, `calaos-container` and `ssh` are the way back in. A `stop` or a
+  `disable` of any of them leaves a box that no client can repair, so they only restart.
+- `networkd` has no `KeepConfiguration=`: a restart drops the DHCP lease and the static addresses,
+  with no rollback. The network routes are the guarded path.
+
+### `GET /api/v2/system/services`
+
+```json
+{"error": false, "msg": "ok", "data": {"services": [{"id": "zigbee2mqtt", "unit": "zigbee2mqtt.service", "kind": "service", "actions": ["restart", "start", "stop", "enable", "disable"], "restartable": true, "active_state": "inactive", "sub_state": "dead", "enabled": "disabled", "startup": "disabled", "boot_unit": "zigbee2mqtt.service", "since": null}]}}
+```
+
+- One entry per table row, in the order of the table above. `kind` is `"service"`.
+- `actions` is the row's static list of verbs, in the order `restart`, `start`, `stop`, `enable`,
+  `disable`; `[]` for a status-only row. `restartable` is a boolean, true when `restart` is in
+  `actions`.
+- `active_state` is systemd's `ActiveState` (`active`, `inactive`, `failed`, `activating`,
+  `deactivating`, `reloading`), or `"not-found"` when the unit is not installed (`LoadState` is
+  `not-found`). `sub_state` is systemd's `SubState`, `""` for `not-found`.
+- `enabled` is systemd's `UnitFileState` string (`enabled`, `disabled`, `static`, `indirect`,
+  `generated`, ...), `""` when empty or `not-found`.
+- `startup` tells whether `boot_unit` starts at boot, as one of four words:
+  - `enabled`: `UnitFileState` is `enabled`, `enabled-runtime`, `linked`, `linked-runtime` or
+    `alias`;
+  - `disabled`;
+  - `masked`: `masked` or `masked-runtime`;
+  - `static`: any other value.
+
+  It is `""` for `not-found`. For a unit whose `UnitFileState` is `generated` (`olad`, which has a
+  SysV script only), `startup` is `enabled` when `systemd-sysv-install is-enabled olad` exits 0,
+  `disabled` otherwise, read in the same 1 s cache.
+- `boot_unit` is the unit that `enable` and `disable` act on. It is `unit` for every row.
+- `since` is when the unit last entered the `active` state (`ActiveEnterTimestamp`), RFC 3339 UTC,
+  or `null` when it never did.
+- `unit` is the resolved unit (for `ntp`, the installed candidate, or the first candidate when none
+  is installed).
+- The state of all units and of every `ntp` candidate is read in one go over D-Bus, and cached
+  for 1 s. The daemon keeps no state of its own: systemd is the source of truth, read at
+  each call.
+
+### Actions: `POST /api/v2/system/services/{restart,start,stop,enable,disable}`
+
+All five routes are `bearer, session allowed`, take the body `{"unit": "<id>"}` and answer
+`{"id": "<id>", "state": "<state>"}`.
+
+| Route | `state` | Runs |
+|---|---|---|
+| `restart` | `restarting` | after the answer, about 500 ms later: `RestartUnit` on `<unit>` (`ReloadOrRestartUnit` for `ssh`) |
+| `start` | `starting` | before the answer: `StartUnit` on `<unit>` |
+| `stop` | `stopping` | before the answer: `StopUnit` on `<unit>` |
+| `enable` | `enabling` | before the answer: `EnableUnitFiles`, `Reload`, then `StartUnit` on `<boot_unit>` |
+| `disable` | `disabling` | before the answer: `DisableUnitFiles`, `Reload`, then `StopUnit` on `<boot_unit>` |
+
+- Every D-Bus call has a 10 s limit, which covers the queuing of the job and not its outcome. The
+  answer says nothing about the outcome: a client reads it by polling `GET system/services`, and
+  the daemon logs a job that ends in anything but `done`. A client that restarts `calaos-server`,
+  `haproxy` or `calaos-container` loses its connection within seconds.
+- `restart` starts a stopped unit. For `ntp` it first resolves the unit (`LoadState`, cached
+  for 1 min). A `reload` of `ssh` runs `sshd -t` first, so a broken
+  `sshd_config` leaves the running daemon alone, and open sessions survive.
+- `enable` and `disable` act now and at boot: "start now and at every boot", "stop now and
+  at every boot". Enabling without starting, or disabling without stopping, is not offered.
+- `olad` has a SysV script only, and `EnableUnitFiles` does not act on it: its `enable` and
+  `disable` run `systemd-sysv-install enable|disable olad` in place of `EnableUnitFiles` and
+  `DisableUnitFiles`. `Reload`, then `StartUnit` or `StopUnit`, follow as for any other row.
+- A `stop` lasts until the next reboot, or the next update of the package when the unit is
+  enabled. A unit that is not enabled is not started by an update, nor by a reboot: `start` and
+  `restart` do not change that, `enable` does. An update keeps a disabled unit disabled.
+- The daemon clears a `failed` state with `ResetFailedUnit`: always before `start`, `restart` and
+  `enable`, which also clears the start rate limit, and once the stop is queued for `stop` and
+  `disable` of a unit that was `failed` before the call; a unit that ends `failed` from a stop
+  stays `failed`, and a failed reset is only logged.
+- A unit whose `startup` is `masked`, or that is not installed, refuses every verb (below).
+
+Checks, in this order, on every one of the five routes:
+
+1. The body: valid JSON, with `unit` a string.
+2. `unit` is an `id` of the table and the route's verb is in its `actions`; anything else,
+   including a unit name or a status-only id, is `400 invalid_request` ("action not allowed for
+   this service"; for `restart`, "unknown or non-restartable service"). Nothing is asked of
+   systemd.
+3. The audit field `unit=<id>` is set. The path names the verb.
+4. `409 upgrade_in_progress` while an upgrade run is in progress, for every unit and every verb
+   (the same guard as `system/reboot`).
+5. `409 service_unavailable` when the unit is not installed (`active_state` is `not-found`, `msg`
+   "the unit is not installed") or masked (`startup` is `masked`, `msg` "the unit is masked"). The
+   state is read afresh from systemd, not from the 1 s cache. Masking stays a decision made
+   over SSH.
+6. `restart` of `calaos-container` while a network change waits for its confirmation: `409
+   network_pending`, with the usual `data`.
+7. For `start`, `stop`, `enable` and `disable`, a D-Bus call that fails is `500 internal`. The
+   detail goes to the daemon log, not to the client. The 1 s state cache is reset after each
+   action.
+
+A restart of `calaos-container` is safe: sessions are on disk, a pending network change is
+re-armed at start, and the upgrade guard refuses it during a job.
+
+Each call that passes check 2 writes an audit line with `unit=<id>`; a refusal at check 1 or 2 has
+no `unit=` (see Audit). `POST /api/v2/system/restart` and the legacy `POST /api/system/restart`
+(restart of the `calaos-home` kiosk) are not part of these routes, but take the same upgrade
+guard: they answer `409` during a run, before anything is asked of systemd. Unlike
+`services/restart`, they answer once the job has ended. The guard is released as soon as systemd
+has the job, so that a slow restart holds up no other action.
+
+## Logs
+
+The daemon reads the systemd journal (`journalctl -o json`, as root) and returns bounded,
+filtered, redacted entries. It never streams. The journal is only read.
+
+### `GET /api/v2/logs/sources`
+
+`{"sources": [{"id", "label"}]}`, in the order of the table below. `label` is a fixed English text,
+for a client that has no translation of the `id`:
+
+| `id` | `label` |
+|---|---|
+| `calaos-server` | Calaos server |
+| `calaos-home` | Calaos Home (kiosk) |
+| `haproxy` | haproxy |
+| `mosquitto` | Mosquitto |
+| `zigbee2mqtt` | Zigbee2MQTT |
+| `influxdb` | InfluxDB |
+| `grafana` | Grafana |
+| `hue2mqtt` | hue2mqtt |
+| `envoy` | Envoy |
+| `calaos-container` | calaos-container |
+| `olad` | OLA (olad) |
+| `ntp` | Time sync (NTP) |
+| `networkd` | Network (networkd) |
+| `ssh` | SSH |
+| `kernel` | Kernel |
+| `system` | Whole system |
+
+Entries are matched as follows.
+
+| `id` | Journal entries |
+|---|---|
+| `calaos-server`, `calaos-home`, `haproxy`, `mosquitto`, `zigbee2mqtt`, `influxdb`, `grafana`, `hue2mqtt`, `envoy` | the unit of the same name, and the container of the same name |
+| `calaos-container`, `olad`, `ntp`, `networkd`, `ssh` | the unit of the Services table (for `ntp`, the installed candidate, resolved as for a restart) |
+| `kernel` | kernel messages (`_TRANSPORT=kernel`, every boot) |
+| `system` | no unit filter |
+
+The daemon passes the matches as `_SYSTEMD_UNIT=<unit>`, plus `CONTAINER_NAME=<id>` for the
+container sources, joined by `+` (OR) across every requested source; `system` drops them all.
+
+The haproxy process logs to a UDP port with no listener on the box: only the lines of its container
+runtime appear under `haproxy`.
+
+### `POST /api/v2/logs/query`
+
+```json
+{"sources": ["calaos-server"], "priority": "warning", "since": "2026-10-25T08:00:00Z", "until": "2026-10-25T09:00:00Z",
+ "text": "wago", "lines": 200, "cursor": "<journal cursor>", "direction": "backward"}
+```
+
+Every field is optional.
+
+| Field | Rule |
+|---|---|
+| `sources` | 1 to 8 ids of the list above; default `["system"]`; unknown id: `invalid_request` |
+| `priority` | the maximum level shown: a name (`emerg`, `alert`, `crit`, `err`, `warning`, `notice`, `info`, `debug`) or a JSON number `0` to `7`; a numeric string such as `"3"` is refused |
+| `since`, `until` | RFC 3339 times, years 1970 to 2100; `since` at or after `until` is `invalid_request`. The daemon parses them and passes its own formatting to `journalctl`; with a `cursor`, `journalctl` refuses `--since`, so the daemon applies `since` itself (and `until` too): going away from the start point, the first entry past the far bound ends the page (`complete: true`), and the entries past the near bound are skipped |
+| `text` | at most 256 characters, matched as a case-insensitive substring by the daemon: never a regular expression, never on a command line |
+| `lines` | 1 to 1000; default 200 |
+| `cursor` | a journal cursor from an earlier answer, at most 512 printable ASCII characters, passed to `journalctl` as the single argument `--after-cursor=<value>` (with `-r` for `backward`, where it means "older than the cursor": `journalctl` has no `--before-cursor`) |
+| `direction` | `backward` (default): the newest `lines` entries before `until` or `cursor`; `forward`: the oldest `lines` entries after `cursor` |
+
+- A `backward` query without `since` covers the last 7 days, with or without a `cursor`. A `forward`
+  query without `cursor` and without `since` is `invalid_request`.
+- A cursor only continues the query it came from: after a change of `sources` or `priority`, start
+  again without a cursor (`journalctl` skips one entry when the cursor entry does not match the new
+  filter). `text`, `since` and `until` may change.
+- An unknown source, a bad `priority`, `cursor`, `lines` or time, a `text` that is too long: all
+  `400 invalid_request`.
+
+Answer:
+
+```json
+{"error": false, "msg": "ok", "data": {"entries": [{"cursor": "s=...", "ts": "2026-10-25T08:12:03.412Z", "source": "calaos-server", "unit": "calaos-server.service", "priority": 4, "pid": 812, "message": "..."}], "truncated": false, "complete": true, "next_cursor": "s=..."}}
+```
+
+- `entries` are oldest first, in both directions. `ts` is RFC 3339 UTC with milliseconds,
+  `priority` an integer 0 to 7, `source` the id the entry matched, `unit` the systemd unit or
+  `kernel`, `pid` is present when the journal has one.
+- `message` is cut at 2048 bytes, and then the entry carries `"cut": true`. It is redacted
+  (below).
+- `priority` in the answer is always a number.
+- The answer is at most 1 MiB: `truncated: true` when that budget cut it. The cut drops the entries
+  farthest from the start point (the newest for `forward`, the oldest for `backward`).
+- Every query scans at most 5000 journal entries or 5 s. `complete: false` when the scan ended
+  before `lines` entries matched; the answer is still `200` with the entries read so far, never
+  `internal`.
+- `next_cursor` is the cursor of the last journal entry scanned in the direction of the query
+  (the newest for `forward`, the oldest for `backward`), matching or not, so that a client always
+  makes progress; `null` when nothing was scanned. When `truncated` is true it is the cursor of the
+  last entry kept. A client continues with `cursor: next_cursor` and the same `direction`.
+- `complete` only reports the scan window: a `truncated` answer is `complete: true`.
+- A journal line over 256 KiB is skipped (it still counts as scanned). A `MESSAGE` that
+  `journalctl` prints as `null` (over 4096 bytes) gives `"message": ""` with `"cut": true`.
+- To follow the journal, a client repeats a `forward` query with the `next_cursor` it received.
+
+**Limits**
+
+- 2 queries per second per session, one more bucket of 2 per second shared by every call without a
+  session (the CLI), and 4 `journalctl` processes at a time for the whole daemon: beyond,
+  `429 rate_limited` with `retry_after: 1`. A refusal for the process cap costs no query of the
+  bucket.
+- A query that outlives 5 s is stopped, with its whole process group, and answers as above
+  (`complete: false`).
+- A `journalctl` failure is `500 internal`; its stderr goes to the daemon log only.
+
+**Redaction**
+
+The daemon masks `message` before anything leaves. It is best effort: it catches the credentials a
+driver prints in a URL, a header or a `key=value` pair, not every secret (an SMTP `AUTH` payload, a
+key in a URL path or a value with a blank are missed). In this order, case-insensitive unless said:
+
+1. userinfo in a URL, `://user:pass@` becomes `://***@`; neither part may hold a raw `/` (as in
+   calaos_server's own masking), an `@` in them is masked too;
+2. a query parameter whose name contains `pass`, `pwd`, `token`, `key`, `secret`, `session`, `auth`
+   or `user`: the value becomes `***`;
+3. a key followed by `=` or `:` (a JSON `"key": "value"` included), the value becoming `***`, for
+   `cn_pass`, `cn_user`, `calaos_password`, `calaos_user`, `password`, `passwd`, `pass`, `pwd`,
+   `secret`, `token`, `api_key`, `apikey`, `auth_token`, `mcp_token`, `mcp_service_token`,
+   `smtp_password`, `influxdb_token`, `admin_pass`, `new_pass`, `admin_session`,
+   `x-calaos-admin-session`, `session`, `psk`, `private_key`, `push_key`, each also with a prefix
+   ending in `_` or `-` (`mqtt_password`, `device_token`, `wifi-psk`), plus `key` with such a prefix
+   only (`network_key`) and `code` alone;
+4. the same for camelCase keys (case-sensitive): a lowercase word ending in `Password`, `Passwd`,
+   `Pass`, `Pwd`, `Secret`, `Token`, `Key`, `Session` or `Psk` (`adminPassword`, `"apiToken":`);
+5. `Authorization:` or `Proxy-Authorization:` with `Bearer`, `Basic` or `Digest`: the rest of the
+   line becomes `***`;
+6. `Cookie:` and `Set-Cookie:`: the rest of the line becomes `***`;
+7. `Calaos admin code NNNNNN` becomes `Calaos admin code ******`.
+
+The query `text` is matched against the redacted message and is never logged.
+
+## Box time
+
+`<BoxTime>`:
+
+```json
+{"now": "2026-10-25T09:12:03Z", "timezone": "Europe/Paris", "ntp": true, "synchronized": true, "rtc": "2026-10-25T09:12:03Z"}
+```
+
+`ntp` tells whether the NTP client (chrony on Calaos OS) is enabled, `synchronized` whether the
+clock is synchronized (timedated's `NTPSynchronized`, the kernel flag that chrony sets with
+`rtcsync`, on in Debian's `chrony.conf`), `rtc` is the hardware clock or `null`.
+
+`GET /api/v2/system/time` answers a `<BoxTime>` (timedated's properties cached for 1 s; `now` is read
+at each call). `GET /api/v2/system/timezones` answers
+`{"timezones": [...]}`, the answer of timedated's `ListTimezones` (cached).
+
+`POST /api/v2/system/time`, body `{"timezone": "Europe/Paris", "ntp": false, "time": "2026-10-25T09:12:03Z"}`,
+each field optional, at least one (an empty body is `400 invalid_request`, "no field to set").
+Answer: the new `<BoxTime>` plus `"restart_required": <bool>`, true when `timezone` changed.
+
+- The changes apply in this order: `timezone` (it must be in the list of `timezones`), then `ntp`
+  (timedated's `SetNTP`, which enables and starts, or disables and stops, the first unit listed in
+  `/usr/lib/systemd/ntp-units.d/`: `50-chrony.list` names `chrony.service`), then `time`.
+- `time` is RFC 3339 with a year from 2020 to 2100. It is refused with `invalid_request`
+  ("ntp is active") when NTP is still on after the `ntp` step.
+- Each timedated call has 10 s. The first step that fails stops the sequence and answers
+  `500 internal` with `data: {"applied": ["timezone"], "failed": "ntp"}`; the steps before it stay
+  applied, and `GET system/time` shows the real state. If every step applied but reading the new
+  state fails, the answer is `500 internal` with `data: {"applied": [...]}` and no `failed`; a
+  client derives `restart_required` from `applied` holding `timezone`.
+- The daemon does not write `/etc/timezone` and sets no `TZ`: the processes of the box read the
+  zone from `/etc/localtime`, and a container sees the change when it is recreated, hence
+  `restart_required`.
+- Audit fields `tz=`, `ntp=`, `time=set`, for the applied steps only.
+
+Sessions, push codes, consoles and the pending network change measure their deadlines on the
+monotonic clock: stepping the box time does not stretch or shorten them.
+
+## Network configuration
+
+A change of the network configuration is applied as a trial, and kept only when a client confirms
+it from the new address: otherwise it reverts by itself, and a reboot reverts it too.
+
+**Model** (systemd-networkd; Calaos OS has no Wi-Fi stack)
+
+- **Trial:** `/run/systemd/network/00-calaos-trial-<intf>.network` with `[Match] Name=<intf>`.
+  networkd reads `/run/systemd/network` and the `00-` prefix sorts before `calaos_*` and
+  `config.network`, so the trial wins. `/run` is empty after a reboot or a power cut, which reverts
+  the change.
+- **Confirm:** the same content is written atomically (temporary file in the same directory,
+  `fsync`, `rename`) to `/etc/systemd/network/calaos_<intf>.network`, the trial is removed and
+  networkd reloads (`Reload`).
+- **Revert** (explicit, timeout or restart past the deadline): the trial is removed, then
+  networkd reloads and reconfigures `<intf>` (`Reload`, `ReconfigureLink`).
+- The daemon only writes `00-calaos-trial-<intf>.network` and `calaos_<intf>.network`. It never
+  edits a file whose `[Match]` is not exactly the interface, and never touches `config.network`.
+- The static template writes `DHCP=no` and a static IPv4 address, which also stops DHCPv6;
+  router advertisements are still accepted.
+
+**Pending change**
+
+- One change at a time. It is recorded in `/run/calaos-container/network-pending.json`
+  (`change_id`, `intf`, `applied_at`, `deadline`, `boot_deadline`, `session_audit`, `client`),
+  mounted in no
+  container. `session_audit` is the audit id of the applying session (`-` for the CLI) and `client`
+  the `X-Calaos-Client-IP` of the apply (`local` for the CLI).
+- The window is 120 s from `applied_at` (`confirm_within`). A daemon that restarts re-arms the timer
+  with the remaining time and publishes `network_pending` once more, with the original `applied_at`
+  and `confirm_within` set to the seconds left; one that finds the deadline passed rolls back at
+  once. The remaining time is the earlier of the wall-clock `deadline` and `boot_deadline`
+  (`CLOCK_BOOTTIME`), capped at 120 s, so stepping the box time back does not extend the window.
+- A restarted daemon that finds a trial without a valid record reverts it, with the same alert and
+  a `network_rollback` audit line with `client=-`, `session=-` and `change_id=-`.
+- A rollback that cannot remove the trial keeps the change pending and retries every 10 s; no alert
+  is raised until the trial is gone. Calls to networkd time out after 30 s.
+- At the end of the window, and when a restarted daemon finds the deadline already passed, the
+  daemon reverts, deletes the record and raises the persisted alert
+  `network_rolled_back {id, ts, intf}` (see Alerts).
+- While a change is pending, `POST /api/v2/network/{intf}` and `POST network/trial` answer
+  `409 network_pending`. The legacy `POST /api/network/{intf}` is not refused: it writes
+  `/etc`, and the trial keeps winning until the confirmation or the rollback.
+
+**Interface names**
+
+`apply`, `confirm`, `revert`, `state`, `list` and `trial` are not valid interface names (nor `.`,
+`..`): `POST network/{intf}` answers `400 invalid_request` for them, and the five static routes
+below (`GET state`; `POST apply`, `confirm`, `revert` and `trial`) are registered before it, so that
+`POST network/apply` with a session reaches `apply`.
+
+### `GET /api/v2/network/state`
+
+```json
+{"error": false, "msg": "ok", "data": {"interfaces": [{"name": "eth0", "ipv4": "192.168.1.10/24", "gateway": "192.168.1.1", "mac": "...", "state": "routable", "dhcp": false, "dns_servers": ["192.168.1.1"], "search_domains": ["lan"]}], "pending": {"change_id": "5d0c8e1f2a3b4c6d", "intf": "eth0", "applied_at": "2026-10-25T09:12:03Z", "expires_in": 87}}}
+```
+
+`interfaces` holds the objects of `GET network/list`; `pending` is `null` when no change waits.
+`expires_in` is the seconds left.
+
+### `POST /api/v2/network/apply`
+
+Session only, with a push code of the action `network_config`.
+
+```json
+{"intf": "eth0", "dhcp": false, "ipv4": "192.168.1.10/24", "gateway": "192.168.1.1",
+ "dns_servers": ["192.168.1.1"], "search_domains": ["lan"], "code_id": "...", "code": "..."}
+```
+
+Answer `{"change_id": "<16 hex>", "intf": "eth0", "applied_at": "<RFC 3339 UTC>", "confirm_within": 120}`.
+
+Checks run in this order:
+
+1. the body (`invalid_request`): the validators of `network/{intf}`, plus: `intf` exists and is not
+   the loopback; IPv4 only, with no leading zero in any octet: `ipv4` is a CIDR with an explicit
+   prefix (`a.b.c.d/n`; a bare address is refused here, unlike `network/{intf}`), `gateway` and
+   each `dns_servers` entry an IPv4 address; at most 4 `dns_servers` and at most 4
+   `search_domains`; `ipv4` is required when `dhcp` is false; `gateway` is optional (no `Gateway=` line is written when it is empty); with
+   `dhcp: true`, `ipv4`, `gateway`, `dns_servers` and `search_domains` must be absent or empty;
+2. the session (`bad_session`);
+3. no other pending change: `409 network_pending` with `{change_id, expires_in}`. The code stays
+   usable;
+4. no upgrade run: `409 upgrade_in_progress`;
+5. the code: `approver_required`, `code_required`, `bad_code`, `code_expired`.
+
+The code is bound to the **verbatim validated strings** of the body, six keys, all always present
+(`""` when absent), no normalisation of an address on either side:
+
+| Key | Value |
+|---|---|
+| `intf` | as sent |
+| `dhcp` | `"true"` or `"false"` |
+| `ipv4`, `gateway` | as sent |
+| `dns_servers` | the list joined by `,` |
+| `search_domains` | the list joined by `,` |
+
+Applying: the trial is written and recorded, networkd reloads and reconfigures `<intf>`, the
+timer starts from `applied_at`, and `network_pending {change_id, intf, applied_at, confirm_within}`
+is published. If either fails the daemon reverts at once and answers
+`500 internal`. The box may switch address before the answer reaches the client.
+
+### `POST /api/v2/network/confirm`, `POST /api/v2/network/revert`
+
+Body `{"change_id": "<16 hex>"}`. Any **live** session may call them, not only the one that applied (it may have
+lost its connection with the old address and unlocked again from the new one); no code. So may the
+bearer alone (the CLI).
+
+- `confirm` makes the change permanent as above, deletes the record and publishes
+  `network_applied {change_id, intf}`. Answer `{"change_id", "intf", "state": "confirmed"}`.
+- `revert` reverts it and answers `{"change_id", "intf", "state": "reverted"}`.
+- A `change_id` that is unknown, finished (confirmed, reverted or rolled back) or not 16 hex is
+  `400 invalid_request`.
+
+### `POST /api/v2/network/trial`
+
+Bearer only (`403 not_allowed` with a session), never relayed. For `calaos-os network`, run as root
+on the box: no code. Body as `apply` without `code_id` and `code`; same checks, trial, timer,
+events, rollback and answer as `apply`. The CLI then calls `state`, `confirm` and `revert` with the
+bearer alone.
+
+CLI: `calaos-os network state`, `apply --intf I (--dhcp | --ipv4 CIDR [--gateway IP] [--dns IP]...
+[--search DOMAIN]...)`, `confirm [CHANGE_ID]` and `revert [CHANGE_ID]` (the pending change when the
+id is omitted). Exit codes: 1 invalid arguments (`invalid_request` on `apply`), 2 token unreadable,
+3 daemon unreachable, 4 other daemon failures (`network_pending`, `upgrade_in_progress`), 5 the
+change to confirm or revert is gone (rolled back after its deadline, or already finished).
 
 ## Upgrade jobs
 
@@ -610,13 +1109,14 @@ synchronous behaviour: they answer when apt ends.
 - One upgrade at a time, whatever started it (versioned job, legacy synchronous route, CLI,
   kiosk). Every run is recorded as a job, so `update/status` shows a run started from the kiosk.
 - While a run is in progress, `POST update/upgrade*`, `GET update/check`,
-  `POST system/reboot` and `POST system/rollback_snapshot` answer `409 upgrade_in_progress`
-  (with `data.job_id`).
+  `POST system/reboot`, `POST system/restart` and `POST system/rollback_snapshot` answer
+  `409 upgrade_in_progress` (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
-  `"package not found"` unchanged. One deliberate exception: the legacy `POST /api/system/reboot`
-  answers `409 {"error": true, "msg": "upgrade already in progress"}` during a run, so that an old
-  kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and ignore the reboot result.
+  `"package not found"` unchanged. Two deliberate exceptions: the legacy `POST /api/system/reboot`
+  and `POST /api/system/restart` answer `409 {"error": true, "msg": "upgrade already in progress"}`
+  during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
+  ignore the result of both.
   The legacy `POST /api/system/rollback_snapshot` is unchanged.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
@@ -694,6 +1194,9 @@ On connect the daemon sends, in order: one `upgrade_progress` with the current `
 | `approver_set` | `{"id", "ts", "device_name", "token_id"}` | Alert, replayed until acknowledged: an approver was enrolled. Never the token |
 | `approver_removed` | `{"id", "ts", "device_name", "token_id"}` | Alert, replayed until acknowledged: an approver was removed. Never the token |
 | `console_opened` | `{"id", "ts", "session_audit_id"}` | Alert, replayed until acknowledged: a console was opened by the session with that audit id |
+| `network_pending` | `{"change_id", "intf", "applied_at", "confirm_within"}` | A network change was applied and waits for its confirmation. Not replayed |
+| `network_applied` | `{"change_id", "intf"}` | The pending network change was confirmed. Not replayed |
+| `network_rolled_back` | `{"id", "ts", "intf"}` | Alert, replayed until acknowledged: a network change was reverted |
 | `push_code` | `{"approver_id": "...", "code_id": "..."}` | Carries neither token nor code; calaos_server fetches the message with `GET /api/v2/admin/push/{code_id}`. Not replayed |
 
 - Clients ignore types they do not know.
@@ -730,22 +1233,37 @@ validated `package`.
 | `admin {action: code_request, params: {code_action, code_params, approver_id}}` | `POST /api/v2/admin/codes {"action", "params", "approver_id"}`; `params` rebuilt per action from the Push codes table | yes |
 | `admin {action: code_verify, params: {code_id, code}}` | `POST /api/v2/admin/codes/verify {"code_id", "code"}` | yes |
 | `admin {action: console_open}` | `POST /api/v2/admin/console {"code_id", "term"}`, then the console socket (see Console); the session is the one that verified the code | yes |
+| `admin {action: services_list}` | `GET /api/v2/system/services` | yes |
+| `admin {action: services_restart, params: {unit}}` | `POST /api/v2/system/services/restart {"unit"}` | yes |
+| `admin {action: services_start, params: {unit}}` | `POST /api/v2/system/services/start {"unit"}` | yes |
+| `admin {action: services_stop, params: {unit}}` | `POST /api/v2/system/services/stop {"unit"}` | yes |
+| `admin {action: services_enable, params: {unit}}` | `POST /api/v2/system/services/enable {"unit"}` | yes |
+| `admin {action: services_disable, params: {unit}}` | `POST /api/v2/system/services/disable {"unit"}` | yes |
+| `admin {action: logs_sources}` | `GET /api/v2/logs/sources` | yes |
+| `admin {action: logs_query, params}` | `POST /api/v2/logs/query`, body rebuilt field by field from the fields of Logs | yes |
+| `admin {action: time_get}` | `GET /api/v2/system/time` | yes |
+| `admin {action: time_zones}` | `GET /api/v2/system/timezones` | yes |
+| `admin {action: time_set, params: {timezone, ntp, time}}` | `POST /api/v2/system/time {"timezone", "ntp", "time"}` | yes |
+| `admin {action: network_state}` | `GET /api/v2/network/state` | yes |
+| `admin {action: network_apply, params: {intf, dhcp, ipv4, gateway, dns_servers, search_domains, code_id, code}}` | `POST /api/v2/network/apply` with the same fields | yes |
+| `admin {action: network_confirm, params: {change_id}}` | `POST /api/v2/network/confirm {"change_id"}` | yes |
+| `admin {action: network_revert, params: {change_id}}` | `POST /api/v2/network/revert {"change_id"}` | yes |
 
 calaos_server's own calls, outside the table: `GET /api/v2/admin/status`,
 `POST /api/v2/admin/alerts/ack`, `GET /api/v2/events` and `GET /api/v2/admin/push/{code_id}`.
 For a console it only tunnels `GET /ws` with subprotocol `calaos-console.v1` (see Console).
 
 Actions calaos_server serves itself while admin is set (`config get/put`, `get_mcp_info`,
-`mcp_regenerate`) validate the session with `GET /api/v2/admin/status` carrying
+`mcp_regenerate`, `config_list`, `config_set`, `config_backup`) validate the session with `GET /api/v2/admin/status` carrying
 `X-Calaos-Admin-Session`, and proceed only on `200` with `admin_set: true`. For every row marked
 "yes" and for these actions, a missing or empty `admin_session` from the client is answered
 `bad_session` by calaos_server itself: the daemon call is never made without the header, because
 without it the bearer alone authorizes.
 
 Never relayed, whatever the client sends: `system/install/*`, `system/rollback_snapshot`,
-`system/fs_status`, `network/*`, `update/installed`, `admin/reset`, `admin/alerts/ack`,
-`admin/push/*` and `admin/set` with `recovery`. The daemon refuses a session on the bearer-only
-ones as a second barrier.
+`system/fs_status`, `network/list`, `network/trial`, `network/{intf}`, `update/installed`,
+`admin/reset`, `admin/alerts/ack`, `admin/push/*` and `admin/set` with `recovery`. The daemon
+refuses a session on the bearer-only ones as a second barrier.
 
 `package` is checked by calaos_server with the same rule as the daemon (regex
 `^[A-Za-z0-9.+-]+$`, first character a letter or a digit, no `..`, at most 128 characters) and
@@ -759,6 +1277,10 @@ the fields above and drops anything else the client sent.
 calaos_server forwards to household clients, as `admin_event {type, ts, data}`, only:
 
 - `upgrade_progress`, `data` = `<Status>`;
+- `network_pending`, with `ts`, `intf`, `change_id`, `applied_at` and `confirm_within`;
+  `network_applied`, with `ts`, `intf` and `change_id`;
+- `network_rolled_back`, with `ts` and `intf`, acknowledged like the other alerts and stored as the
+  `EventPushNotification` shown at login for the banner; no phone push;
 - `admin_set`, `admin_reset`, `approver_set`, `approver_removed` and `console_opened`, with `ts`
   only (`id` stripped, no `data`). For the approver alerts calaos_server also pushes "approver
   phone <device_name> enrolled" (or removed) to every token and stores the
@@ -776,12 +1298,14 @@ never forwarded. Every other type is dropped.
 | connection refused, timeout, invalid answer | `daemon_unreachable` or `admin_unavailable`, per `AdminState` |
 | `401` without `code: bad_session`, after re-reading the token and one retry | `daemon_unreachable` |
 | `404` on `GET /api/v2/admin/status` (any body), or any `/api/v2/` `404` whose body is not an envelope with a `code` | `daemon_too_old` |
-| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired`, `console_limit` | same code |
+| `bad_session`, `bad_password`, `rate_limited`, `password_too_short`, `admin_not_set`, `admin_already_set`, `upgrade_in_progress`, `not_allowed`, `approver_required`, `approver_limit`, `approver_exists`, `approver_not_found`, `approver_last`, `code_required`, `bad_code`, `code_expired`, `console_limit`, `network_pending`, `service_unavailable` | same code |
 | `invalid_request`, `package_not_found`, `package_held` | same code, with the daemon `msg` (safe to display) |
-| `internal`, `not_found`, `method_not_allowed`, any unknown code | `internal` |
+| `not_found` on a relay-table route (the path is fixed by the table, so the route does not exist in a daemon that predates it) | `daemon_too_old`, for that action only |
+| `internal`, `not_found` on any other call (`admin/push/{code_id}`, ...), `method_not_allowed`, any unknown code | `internal` |
 
 `rate_limited` copies `retry_after`; `upgrade_in_progress` copies `job_id`; `bad_code` copies
-`attempts_left`; `approver_limit` and `console_limit` copy `max`. The calaos_server
+`attempts_left`; `approver_limit` and `console_limit` copy `max`; `network_pending` copies
+`change_id` and `expires_in`. The calaos_server
 vocabulary (`08_http_api.md`, CB0) therefore gains `invalid_request`, `package_not_found`,
 `package_held` and `internal`, and cites this file's `package` rule rather than the bare regex.
 
@@ -810,7 +1334,7 @@ Go error text.
 | Method | Path | Success | Error |
 |---|---|---|---|
 | POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
-| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
@@ -826,6 +1350,27 @@ Go error text.
 | POST | `/api/update/upgrade?package=<name>` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("package not found", "upgrade already in progress") |
 | GET | `/api/update/status` | 200 raw `<Status>` | none |
 | GET (WS) | `/api/events` | 101, frames as in Events | 426 `Upgrade Required` (text) on a plain `GET` |
+
+`POST /api/network/{intf}` and `POST /api/v2/network/{intf}` write
+`/etc/systemd/network/calaos_<intf>.network` for that interface, atomically, and never the file
+shared by every interface (`en*`). Their bodies and statuses are unchanged. They stay bearer only,
+apply at once and have no confirmation or rollback.
+The words `apply`, `confirm`, `revert`, `state`, `list` and `trial` are refused as interface names
+by the validator the legacy route shares: it still answers `400`, with the raw error text of the
+validator as `msg` for those six words.
+A failed write or networkd call still answers `500`. The `msg` of a failed write is the raw error
+text, `failed to write network config file: ...`; that of a failed call is a fixed text,
+`failed to reload networkd: reload networkd failed` or
+`failed to reconfigure interface: reconfigure interface failed`, the D-Bus detail going to the
+daemon log.
+
+The other legacy routes that reach systemd keep their `500` too, with a fixed `msg`:
+`reboot failed` on `POST /api/system/reboot` and on `POST /api/system/rollback_snapshot` when the
+reboot fails, and `describe network failed` on `GET /api/network/list` and on the interface check of
+`POST /api/network/{intf}`. On `POST /api/system/restart` it is `read unit state failed`,
+`<n> unit states for calaos-home.service`, `unit not available: calaos-home.service`,
+`restart calaos-home.service failed` or `calaos-home.service: job <result>`, `<result>` being
+anything but `done`.
 
 Unknown legacy paths answer fiber's plain-text `404 Cannot GET ...` and `405 Method Not Allowed`.
 A bearer failure answers `401 {"error":true,"msg":"wrong token"}`, or `"unauthorized"` when no
