@@ -814,13 +814,14 @@ Entries are matched as follows.
 
 | `id` | Journal entries |
 |---|---|
-| `calaos-server`, `calaos-home`, `haproxy`, `mosquitto`, `zigbee2mqtt`, `influxdb`, `grafana`, `hue2mqtt`, `envoy` | the unit of the same name, and the container of the same name |
+| `calaos-server`, `calaos-home`, `haproxy`, `mosquitto`, `zigbee2mqtt`, `influxdb`, `grafana`, `hue2mqtt`, `envoy` | the unit of the same name, and the container of the same name (`CONTAINER_NAME` or `SYSLOG_IDENTIFIER`) |
 | `calaos-container`, `olad`, `ntp`, `networkd`, `ssh` | the unit of the Services table (for `ntp`, the installed candidate, resolved as for a restart) |
 | `kernel` | kernel messages (`_TRANSPORT=kernel`, every boot) |
 | `system` | no unit filter |
 
-The daemon passes the matches as `_SYSTEMD_UNIT=<unit>`, plus `CONTAINER_NAME=<id>` for the
-container sources, joined by `+` (OR) across every requested source; `system` drops them all.
+The daemon passes the matches as `_SYSTEMD_UNIT=<unit>`, plus `CONTAINER_NAME=<id>` and
+`SYSLOG_IDENTIFIER=<id>` for the container sources (the latter finds the lines of a container run
+with `--log-driver=passthrough`, whatever its `_SYSTEMD_UNIT`), joined by `+` (OR) across every requested source; `system` drops them all.
 
 The haproxy process logs to a UDP port with no listener on the box: only the lines of its container
 runtime appear under `haproxy`.
