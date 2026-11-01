@@ -50,7 +50,7 @@ func TestJournalArgs(t *testing.T) {
 		"--output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER,CONTAINER_NAME,_PID,_TRANSPORT,__CURSOR,__REALTIME_TIMESTAMP",
 		"-r", "--after-cursor=-s=abc;i=1", "--until=2026-10-25 09:00:00.000000 UTC",
 		"--priority=4",
-		"_SYSTEMD_UNIT=calaos-server.service", "+", "CONTAINER_NAME=calaos-server", "+",
+		"_SYSTEMD_UNIT=calaos-server.service", "+", "CONTAINER_NAME=calaos-server", "+", "SYSLOG_IDENTIFIER=calaos-server", "+",
 		"_SYSTEMD_UNIT=ssh.service", "+", "_TRANSPORT=kernel"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args\n got %q\nwant %q", got, want)
@@ -132,6 +132,9 @@ func TestAttribute(t *testing.T) {
 	}{
 		{JournalRecord{Unit: "mosquitto.service"}, "mosquitto"},
 		{JournalRecord{Unit: "libpod-x.scope", Container: "mosquitto"}, "mosquitto"},
+		{JournalRecord{Unit: "libpod-x.scope", Identifier: "mosquitto"}, "mosquitto"},
+		{JournalRecord{Unit: "mosquitto.service", Identifier: "mosquitto"}, "mosquitto"},
+		{JournalRecord{Unit: "cron.service", Identifier: "CRON"}, "system"},
 		{JournalRecord{Kernel: true}, "kernel"},
 		{JournalRecord{Unit: "cron.service"}, "system"},
 	} {
@@ -149,5 +152,23 @@ func TestCutMessage(t *testing.T) {
 	s, cut := CutMessage(long)
 	if !cut || len(s) != LogMessageMax-1 {
 		t.Fatalf("cut %v len %d", cut, len(s))
+	}
+}
+
+func TestPassthroughRecords(t *testing.T) {
+	q := JournalQuery{Sources: src(t, "calaos-server", "system")}
+	for _, tc := range []struct{ name, line, want string }{
+		{"unit", `{"__CURSOR":"a","_SYSTEMD_UNIT":"calaos-server.service","SYSLOG_IDENTIFIER":"calaos-server","MESSAGE":"x"}`, "calaos-server"},
+		{"scope", `{"__CURSOR":"a","_SYSTEMD_UNIT":"libpod-0123.scope","SYSLOG_IDENTIFIER":"calaos-server","MESSAGE":"x"}`, "calaos-server"},
+		{"old format", `{"__CURSOR":"a","_SYSTEMD_UNIT":"libpod-0123.scope","CONTAINER_NAME":"calaos-server","SYSLOG_IDENTIFIER":"abcdef","MESSAGE":"x"}`, "calaos-server"},
+		{"other", `{"__CURSOR":"a","_SYSTEMD_UNIT":"cron.service","SYSLOG_IDENTIFIER":"CRON","MESSAGE":"x"}`, "system"},
+	} {
+		r, err := ParseJournalLine([]byte(tc.line))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := q.Attribute(r); got != tc.want {
+			t.Errorf("%s: %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }

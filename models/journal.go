@@ -114,6 +114,12 @@ func JournalArgs(q JournalQuery) []string {
 
 // journalMatches ORs every source with "+". -k is not used for the kernel:
 // it implies -b and is ANDed with the other matches.
+//
+// A container source matches three ways: the unit, CONTAINER_NAME (journald
+// log driver), and SYSLOG_IDENTIFIER. With --log-driver=passthrough the
+// container writes to the unit's own stream, which carries the unit's
+// SyslogIdentifier (the unit name) but no CONTAINER_NAME, and whose
+// _SYSTEMD_UNIT may be a libpod-*.scope under --cgroups=split.
 func journalMatches(sources []LogSource) []string {
 	var m []string
 	add := func(term string) {
@@ -132,6 +138,7 @@ func journalMatches(sources []LogSource) []string {
 			add("_SYSTEMD_UNIT=" + s.Unit)
 			if s.Container != "" {
 				add("CONTAINER_NAME=" + s.Container)
+				add("SYSLOG_IDENTIFIER=" + s.Container)
 			}
 		}
 	}
@@ -170,9 +177,11 @@ type JournalRecord struct {
 	Realtime  time.Time
 	Unit      string
 	Container string
-	Kernel    bool
-	Priority  int
-	PID       *int
+	// Identifier is SYSLOG_IDENTIFIER.
+	Identifier string
+	Kernel     bool
+	Priority   int
+	PID        *int
 	// Message is redacted, not cut yet.
 	Message string
 	// TooLong: journalctl printed null, as it does above 4096 bytes.
@@ -200,6 +209,7 @@ func ParseJournalLine(line []byte) (JournalRecord, error) {
 	}
 	r.Unit, _ = journalString(raw["_SYSTEMD_UNIT"])
 	r.Container, _ = journalString(raw["CONTAINER_NAME"])
+	r.Identifier, _ = journalString(raw["SYSLOG_IDENTIFIER"])
 	transport, _ := journalString(raw["_TRANSPORT"])
 	r.Kernel = transport == "kernel"
 
@@ -263,7 +273,7 @@ func (q JournalQuery) Attribute(r JournalRecord) string {
 				return s.ID
 			}
 		case s.ID == LogSourceSystem:
-		case r.Unit == s.Unit || (s.Container != "" && r.Container == s.Container):
+		case r.Unit == s.Unit || (s.Container != "" && (r.Container == s.Container || r.Identifier == s.Container)):
 			return s.ID
 		}
 	}
