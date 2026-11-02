@@ -276,6 +276,16 @@ func TestServiceRestartJobResult(t *testing.T) {
 	}
 }
 
+func countCalls(calls []string, prefix string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
 // The lock comes back as soon as systemd has the job, and jobs ending out of
 // order each get their own result.
 func TestServiceRestartConcurrentJobs(t *testing.T) {
@@ -298,7 +308,8 @@ func TestServiceRestartConcurrentJobs(t *testing.T) {
 		}()
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for len(f.Calls()) < len(results) {
+	// Each restart also records a ResetFailedUnit: only RestartUnit means a held job exists.
+	for countCalls(f.Calls(), "RestartUnit ") < len(results) {
 		if time.Now().After(deadline) {
 			t.Fatalf("calls %q", f.Calls())
 		}
