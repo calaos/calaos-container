@@ -24,6 +24,7 @@ const (
 	localAuditFields   = "calaos.audit_fields"
 	localSessionLive   = "calaos.session_live"
 	localAuditSkip     = "calaos.audit_skip"
+	localLogoutNoop    = "calaos.logout_noop"
 )
 
 // Overridden by tests so they never touch the box directories.
@@ -210,6 +211,9 @@ func (a *AppServer) v2AdminLogout(c *fiber.Ctx) error {
 	if err != nil {
 		return errInternal(err)
 	}
+	if !ended {
+		c.Locals(localLogoutNoop, true)
+	}
 	return sendOK(c, fiber.StatusOK, struct {
 		Ended bool `json:"ended"`
 	}{ended})
@@ -316,6 +320,9 @@ func (a *AppServer) auditMiddleware(c *fiber.Ctx) error {
 	// its console started) keeps its line. Not e.Fields: admin/set sets them
 	// before it checks the session.
 	refused := (e.Result == codeBadBearer || e.Result == codeBadSession) && c.Locals(localSessionLive) == nil
+	// A logout of a session that was not live answers ok but is as free to
+	// forge as a refusal.
+	refused = refused || c.Locals(localLogoutNoop) != nil
 	switch {
 	case refused:
 		a.admin.AuditRefused(e)

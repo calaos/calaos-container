@@ -488,6 +488,8 @@ func (m *Manager) End(session string) (ended bool, err error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// liveSession is nil too while the password hash is unreadable: ended is
+	// then false and the session stays until the hash reads again.
 	s := m.liveSession(session)
 	if s == nil {
 		return false, nil
