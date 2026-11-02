@@ -1246,6 +1246,7 @@ validated `package`.
 | `admin {action: system_restart}` | `POST /api/v2/system/restart` | yes |
 | `admin {action: system_info}` | `GET /api/v2/system/info` | yes |
 | `admin {action: mcp_regenerate}` | none: handled by calaos_server (see below) | yes |
+| `admin {action: admin_logout}` | `POST /api/v2/admin/logout`, no body; ends the session it carries and no other (`ended:false` when it is not live) | yes |
 | `admin {action: approver_list}` | `GET /api/v2/admin/approvers` | yes |
 | `admin {action: approver_candidates}` | none: served by calaos_server from `push_tokens` and `GET /api/v2/admin/approvers`, `[{"token_id", "device_name", "approver"}]` | yes |
 | `admin {action: approver_enroll, params: {token_id, code_id, code}}` | `POST /api/v2/admin/approvers/enroll {"token", "device_name", "code_id", "code"}`; calaos_server resolves `token_id` against its `push_tokens` and sends that entry's token and stored device name. An unknown `token_id` is `invalid_request`; the client never sends a token or a device name | yes |
