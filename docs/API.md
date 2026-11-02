@@ -170,6 +170,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/admin/status` | bearer, session allowed | 200 | `{"admin_set": <bool>}` |
 | POST | `/api/v2/admin/verify` | bearer, session allowed | 200 | `{"session": "<hex>", "expires_in": <seconds>}` |
 | POST | `/api/v2/admin/set` | see the three modes | 200 | `{"mode": "bootstrap" or "change" or "recovery"}` |
+| POST | `/api/v2/admin/logout` | bearer, session header required | 200 | `{"ended": <bool>}` |
 | POST | `/api/v2/admin/reset` | bearer only | 200 | `{"was_set": <bool>}` |
 | POST | `/api/v2/admin/alerts/ack` | bearer only | 200 | `{"acked": <int>}`; body `{"ids": ["..."]}` |
 | GET (WS) | `/api/v2/events` | bearer header only | 101 | event stream, see Events |
@@ -220,7 +221,7 @@ keeps none: it relays the session the browser holds, in `X-Calaos-Admin-Session`
   time and the remaining time is capped at 900 s, so a clock step backwards never lengthens a
   session.
 - **Invalidation:** every `admin/set` (all three modes) and every `admin/reset` invalidate all
-  sessions. 5 wrong push codes in a session invalidate that session (see Push codes). An
+  sessions. `admin/logout` invalidates the session it carries and no other. 5 wrong push codes in a session invalidate that session (see Push codes). An
   invalidated session answers `401 bad_session` at its next use, and its push codes die with it.
 - **Storage:** in `/run/calaos-container/` (0700, created by the daemon, mounted in no
   container). Sessions survive a daemon restart, including the restart after the daemon upgrades
@@ -236,6 +237,9 @@ keeps none: it relays the session the browser holds, in `X-Calaos-Admin-Session`
 
   On a session-only route (`admin/approvers*`, `admin/codes*`, `admin/console`, `network/apply`) an
   absent header is also `401 bad_session`.
+
+  `admin/logout` is the one route that skips the lookup: a session that is not live answers
+  `200`, so ending a session twice is not an error. An absent header is still `401 bad_session`.
 
   A header present with an empty value counts as present. calaos_server never sends an empty
   header.
@@ -293,6 +297,17 @@ approver (`approver_required`, `code_required`), the argon2id slot (`rate_limite
 Every successful mode invalidates all sessions and publishes the `admin_set` alert. Response:
 `{"mode": "bootstrap"}` (or `change`, `recovery`). No session is returned: the client unlocks
 with `admin/verify`.
+
+### `POST /api/v2/admin/logout`
+
+No body. Needs the bearer and `X-Calaos-Admin-Session`: the session it names is the one it ends,
+with its pending push codes and its open consoles (see Console). Every other session, the
+password and the approvers are untouched. The ended session answers `401 bad_session` at its next
+use.
+
+Answer `{"ended": true}`; `{"ended": false}` when the session was not live (unknown, expired,
+already ended), so a client can repeat the call. Without the header: `401 bad_session`. The
+password and the alerts are not touched, so no alert is raised.
 
 ### `POST /api/v2/admin/reset`
 

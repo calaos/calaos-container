@@ -33,6 +33,9 @@ const (
 	EventConsoleOpened     = "console_opened"
 	EventNetworkRolledBack = "network_rolled_back"
 
+	// ReasonLogout is the SessionsEnded reason of a session closed by its owner.
+	ReasonLogout = "logout"
+
 	hashFileName    = "password.hash"
 	alertsFileName  = "alerts.json"
 	auditFileName   = "audit.log"
@@ -475,6 +478,23 @@ func (m *Manager) PushCodeFailed(session string) (bool, error) {
 	}
 	left, err := m.pushCodeFailedLocked(s)
 	return left == 0, err
+}
+
+// End invalidates this session only, with its push codes and consoles. ended
+// is false when the session was not live: ending twice is not an error.
+func (m *Manager) End(session string) (ended bool, err error) {
+	if m.initErr != nil {
+		return false, m.initErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.liveSession(session)
+	if s == nil {
+		return false, nil
+	}
+	m.ended(s.Hash, ReasonLogout)
+	m.codes.dropSession(s.Hash)
+	return true, m.sessions.remove(s)
 }
 
 // Ack drops the acknowledged alerts and returns how many were removed.

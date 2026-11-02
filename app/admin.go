@@ -44,6 +44,8 @@ func (a *AppServer) registerAdmin(v2 fiber.Router) {
 	v2.Post("/admin/verify", s, a.v2AdminVerify)
 	// admin/set checks the body before the session (docs/API.md).
 	v2.Post("/admin/set", a.v2AdminSet)
+	// No session guard: ending an already ended session must answer 200.
+	v2.Post("/admin/logout", a.v2AdminLogout)
 	v2.Post("/admin/reset", bearerOnly, a.v2AdminReset)
 	v2.Post("/admin/alerts/ack", bearerOnly, a.v2AdminAlertsAck)
 
@@ -195,6 +197,22 @@ func (a *AppServer) v2AdminSet(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, struct {
 		Mode admin.Mode `json:"mode"`
 	}{mode})
+}
+
+// v2AdminLogout ends the session it carries and no other. Without the header
+// there is nothing to end: the bearer alone cannot name a session.
+func (a *AppServer) v2AdminLogout(c *fiber.Ctx) error {
+	session, present := adminSession(c)
+	if !present {
+		return errBadSession()
+	}
+	ended, err := a.admin.End(session)
+	if err != nil {
+		return errInternal(err)
+	}
+	return sendOK(c, fiber.StatusOK, struct {
+		Ended bool `json:"ended"`
+	}{ended})
 }
 
 func (a *AppServer) v2AdminReset(c *fiber.Ctx) error {
