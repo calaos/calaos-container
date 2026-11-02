@@ -395,6 +395,18 @@ func TestTunnelDisconnectEndsTheConsole(t *testing.T) {
 	f.expectShellGone(info, ReasonClosed)
 }
 
+// The bridge's pty close must never let the shell's own exit record the
+// reason first: the hook holds the bridge until runShell has finished.
+func TestTunnelDisconnectReasonBeatsShellHangup(t *testing.T) {
+	f := newFixture(t)
+	f.m.afterBridgePTYClose = func(c *console) { <-c.shellDone }
+	info := f.open("aaaaaaaa")
+	conn := f.attach(info)
+	consoletest.ReadPid(t, info.Socket+".child")
+	_ = conn.Close()
+	f.expectShellGone(info, ReasonClosed)
+}
+
 func TestKillFallsBackToSigkill(t *testing.T) {
 	f := newFixture(t)
 	if err := os.WriteFile(filepath.Join(f.dir, "fake-mode"), []byte(consoletest.ModeIgnoreHUP), 0o600); err != nil {
