@@ -135,7 +135,7 @@ func (m *Manager) bridge(c *console, conn *websocket.Conn, term string) {
 		close(stopClosed)
 		<-watcherDone
 		m.kill(c, ReasonClosed)
-		c.closePTY()
+		m.closeBridgePTY(c)
 		_ = conn.Close()
 	}()
 
@@ -178,7 +178,6 @@ func (m *Manager) bridge(c *console, conn *websocket.Conn, term string) {
 		m.kill(c, ReasonExited)
 		return
 	}
-	defer c.closePTY()
 
 	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	conn.SetPongHandler(func(string) error {
