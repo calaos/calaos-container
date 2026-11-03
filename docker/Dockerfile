@@ -11,7 +11,7 @@ RUN apt -y update && \
 # Go toolchain from go.dev — keep GO_VERSION in sync with .devcontainer/Dockerfile.
 # NOTE: `apt-get build-dep` (run by build-deb.sh) may still install Debian's golang
 # because debian/control lists it in Build-Depends; PATH below makes this Go win.
-ARG GO_VERSION=1.26.5
+ARG GO_VERSION=1.26.10
 RUN arch="$(dpkg --print-architecture)" && \
     case "$arch" in \
         amd64) goarch=amd64 ;; \
