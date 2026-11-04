@@ -143,6 +143,17 @@ type Manager struct {
 
 	mu       sync.Mutex
 	consoles map[string]*console
+
+	// afterBridgePTYClose lets a test order the shell's exit against the
+	// bridge's own pty close.
+	afterBridgePTYClose func(*console)
+}
+
+func (m *Manager) closeBridgePTY(c *console) {
+	c.closePTY()
+	if m.afterBridgePTYClose != nil {
+		m.afterBridgePTYClose(c)
+	}
 }
 
 // New prepares the socket directory and removes the sockets of a previous

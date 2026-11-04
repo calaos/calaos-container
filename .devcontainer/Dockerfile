@@ -13,7 +13,7 @@ RUN apt -y update && \
 
 # Go toolchain from go.dev (Debian bookworm only ships golang 1.19, go.mod requires >= 1.20).
 # Keep GO_VERSION in sync with docker/Dockerfile (the CI deb build image).
-ARG GO_VERSION=1.26.5
+ARG GO_VERSION=1.26.10
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" | tar -C /usr/local -xz
 ENV PATH=/usr/local/go/bin:$PATH
 

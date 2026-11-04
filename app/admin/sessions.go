@@ -167,7 +167,20 @@ func (st *sessionStore) remove(target *session) error {
 		}
 	}
 	st.list = kept
-	return st.save()
+	return st.saveOrRemove()
+}
+
+// saveOrRemove returns the save error after deleting the file: a revoked
+// session must not come back from a stale file at the next start.
+func (st *sessionStore) saveOrRemove() error {
+	err := st.save()
+	if err == nil {
+		return nil
+	}
+	if rerr := os.Remove(st.path); rerr != nil && !os.IsNotExist(rerr) {
+		return rerr
+	}
+	return err
 }
 
 // invalidateAll empties the store. If the file cannot be rewritten it is
