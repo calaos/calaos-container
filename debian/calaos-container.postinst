@@ -18,6 +18,20 @@ remove_docker_policy_rc() {
     rm -f "$f" || true
 }
 
+# The base image's Docker leftover turns on force-unsafe-io (no fsync): after a
+# power cut during an upgrade dpkg says "ii" while files are old or missing.
+# Only the exact stock content goes; an edited file is the admin's.
+remove_docker_apt_speedup() {
+    local f="${DPKG_ROOT:-}/etc/dpkg/dpkg.cfg.d/docker-apt-speedup"
+    [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    if [ "$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$f")" = "force-unsafe-io" ]; then
+        rm -f "$f" || true
+    else
+        echo "calaos-container: $f was modified, left in place;" \
+            "it may disable fsync in dpkg (force-unsafe-io)." >&2
+    fi
+}
+
 # Takes over the debhelper "deb-systemd-invoke start" of our unit below: its
 # plain "systemctl start" blocks dpkg, and when dpkg runs from the unit's own
 # ExecStartPre it waits on that very start job until TimeoutStartSec. There,
@@ -41,7 +55,10 @@ deb-systemd-invoke() {
 
 # Must run before the debhelper start below, which consults policy-rc.d.
 case "$1" in
-configure) remove_docker_policy_rc || true ;;
+configure)
+    remove_docker_policy_rc || true
+    remove_docker_apt_speedup || true
+    ;;
 esac
 
 #DEBHELPER#
