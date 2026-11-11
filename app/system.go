@@ -401,9 +401,11 @@ func (a *AppServer) v2SystemInfo(c *fiber.Ctx) error {
 }
 
 func (a *AppServer) v2SystemVersions(c *fiber.Ctx) error {
+	// A dpkg failure must not hide the other fields: packages and container
+	// come out empty instead.
 	installed, err := getInstalledPackages()
 	if err != nil {
-		return errInternal(err)
+		installed = nil
 	}
 	return sendOK(c, fiber.StatusOK, models.BuildSystemVersions(versionSources, installed))
 }

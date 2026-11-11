@@ -215,8 +215,34 @@ func TestV2SystemVersions(t *testing.T) {
 		t.Fatalf("got %d %s\nwant 200 %s", status, body, want)
 	}
 
-	status, _, _ = v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions", backend: stubBackend{installedErr: errors.New(secretDetail)}})
-	if status != 500 {
-		t.Fatalf("dpkg failure: got %d", status)
+	wantEmpty := `{"error":false,"msg":"ok","data":{"calaos_os":"4.5.1","debian":"","kernel":"6.12.48-amd64","container":"","packages":[]}}`
+	for name, b := range map[string]stubBackend{
+		"dpkg-query failure":         {installedErr: errors.New(secretDetail)},
+		"dpkg exit 1 without output": {installed: structs.ImageMap{}},
+	} {
+		status, _, body = v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions", backend: b})
+		if status != 200 || body != wantEmpty {
+			t.Fatalf("%s: got %d %s\nwant 200 %s", name, status, body, wantEmpty)
+		}
+	}
+}
+
+func TestV2SystemVersionsAuth(t *testing.T) {
+	(&stubBackend{installed: structs.ImageMap{}}).install(t)
+	a := newHandlerTestApp(t)
+	a.sessions = acceptSessions{ok: "live"}
+
+	for name, tc := range map[string]struct {
+		hc   httpCase
+		want int
+	}{
+		"no bearer":    {httpCase{method: "GET", path: "/api/v2/system/versions", auth: "-"}, 401},
+		"dead session": {httpCase{method: "GET", path: "/api/v2/system/versions", headers: map[string]string{headerAdminSession: "dead"}}, 401},
+		"live session": {httpCase{method: "GET", path: "/api/v2/system/versions", headers: map[string]string{headerAdminSession: "live"}}, 200},
+	} {
+		resp, body := doCase(t, a, tc.hc)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s: got %d %s, want %d", name, resp.StatusCode, body, tc.want)
+		}
 	}
 }
