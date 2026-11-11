@@ -2,8 +2,14 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/calaos/calaos-container/models"
+	"github.com/calaos/calaos-container/models/structs"
 )
 
 // canned lsblk-style inventory modeling a typical target machine:
@@ -178,5 +184,39 @@ func TestParseLsblkInventoryJSON(t *testing.T) {
 
 	if findLsblkDevice(inv.BlockDevices, "/dev/nonexistent") != nil {
 		t.Fatalf("expected /dev/nonexistent to not be found")
+	}
+}
+
+func TestV2SystemVersions(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	prev := versionSources
+	t.Cleanup(func() { versionSources = prev })
+	versionSources = models.VersionSources{
+		OSRelease:     write("os-release", "VERSION_ID=4.5.1\n"),
+		DebianVersion: filepath.Join(dir, "absent"),
+		KernelRelease: write("osrelease", "6.12.48-amd64\n"),
+	}
+	installed := structs.ImageMap{
+		"calaos-server":    {Name: "calaos-server", Version: "4.8.1"},
+		"calaos-container": {Name: "calaos-container", Version: "1.9.1"},
+	}
+
+	status, _, body := v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions", backend: stubBackend{installed: installed}})
+	want := `{"error":false,"msg":"ok","data":{"calaos_os":"4.5.1","debian":"","kernel":"6.12.48-amd64","container":"1.9.1",` +
+		`"packages":[{"name":"calaos-container","version":"1.9.1"},{"name":"calaos-server","version":"4.8.1"}]}}`
+	if status != 200 || body != want {
+		t.Fatalf("got %d %s\nwant 200 %s", status, body, want)
+	}
+
+	status, _, _ = v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions", backend: stubBackend{installedErr: errors.New(secretDetail)}})
+	if status != 500 {
+		t.Fatalf("dpkg failure: got %d", status)
 	}
 }

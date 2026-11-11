@@ -400,6 +400,14 @@ func (a *AppServer) v2SystemInfo(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, info)
 }
 
+func (a *AppServer) v2SystemVersions(c *fiber.Ctx) error {
+	installed, err := getInstalledPackages()
+	if err != nil {
+		return errInternal(err)
+	}
+	return sendOK(c, fiber.StatusOK, models.BuildSystemVersions(versionSources, installed))
+}
+
 func (a *AppServer) v2SystemFsStatus(c *fiber.Ctx) error {
 	parsed, err := runJSONCommand("findmnt", "--json", "/")
 	if err != nil {
