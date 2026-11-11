@@ -65,42 +65,19 @@ This document lists all third-party code vendored in the calaos-container reposi
 - **Lines:** 147
 - **File Encoding:** Text (bash configuration)
 
-## Initramfs Extensions (Btrfs Overlay Support)
-
-### `initramfs/hooks/grub-btrfs-overlay`
-
-- **Upstream Source:** Custom extension created for calaos-container
-- **License:** GPLv2+ (aligns with calaos-container license and parent grub-btrfs GPLv3)
-- **Version:** N/A (custom code)
-- **Modification Status:** N/A
-- **Lines:** 15
-- **File Encoding:** Text (shell script hook for initramfs-tools)
-- **Purpose:** Adds the overlay kernel module to initramfs to support writable overlays on read-only Btrfs snapshots.
-
-### `initramfs/scripts/local-bottom/grub-btrfs-overlay`
-
-- **Upstream Source:** Custom extension created for calaos-container
-- **License:** GPLv2+ (aligns with calaos-container license and parent grub-btrfs GPLv3)
-- **Version:** N/A (custom code)
-- **Modification Status:** N/A
-- **Lines:** 32
-- **File Encoding:** Text (shell script for initramfs-tools local-bottom phase)
-- **Purpose:** At boot time, detects read-only Btrfs subvolumes and remounts them as writable overlays (lower=snapshot, upper=tmpfs, workdir=tmpfs) to allow system modifications during boot without persisting to snapshots.
-
 ## CI/Linting Exclusions
 
 The following files are excluded from shellcheck linting in `.github/workflows/ci.yml` (they are third-party or custom extensions with build-specific or non-standard patterns):
 
 ```bash
 git ls-files \
-  | grep -vE '^(scripts/genfstab|scripts/arch-chroot|grub-btrfs/|initramfs/)' \
+  | grep -vE '^(scripts/genfstab|scripts/arch-chroot|grub-btrfs/)' \
   | ...
 ```
 
 Rationale:
 - **scripts/genfstab, scripts/arch-chroot:** Vendored from upstream with M4 macros expanded; patterns may not conform to calaos-container's shellcheck configuration.
 - **grub-btrfs/:** Third-party project files with their own linting standards.
-- **initramfs/:** Initramfs-tools hooks/scripts have special syntax and behavior requirements specific to the initramfs environment.
 
 ## Summary Table
 
@@ -111,8 +88,6 @@ Rationale:
 | `grub-btrfs/grub-btrfsd` | Antynea/grub-btrfs | GPLv3 | Unknown | No | Original unmodified |
 | `grub-btrfs/41_snapshots-btrfs` | Antynea/grub-btrfs | GPLv3 | Unknown | No | Original unmodified |
 | `grub-btrfs/config` | Antynea/grub-btrfs | GPLv3 | 4.12-master-2023-04-28 | Yes | Custom menu name, version drift |
-| `initramfs/hooks/grub-btrfs-overlay` | calaos-container | GPLv2+ | N/A | N/A | Custom extension |
-| `initramfs/scripts/local-bottom/grub-btrfs-overlay` | calaos-container | GPLv2+ | N/A | N/A | Custom extension |
 
 ## Security & Maintenance Notes
 
