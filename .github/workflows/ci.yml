@@ -62,6 +62,9 @@ jobs:
       - name: postinst docker-apt-speedup
         run: scripts/tests/postinst_speedup_test.sh
 
+      - name: preinst misplaced grub-btrfs-overlay dirs
+        run: scripts/tests/preinst_overlay_test.sh
+
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
