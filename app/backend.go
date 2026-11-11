@@ -15,6 +15,7 @@ var (
 	runningJobID          = models.RunningJobID
 	updateStatus          = models.UpdateStatus
 	getSystemInfo         = models.GetSystemInfo
+	versionSources        = models.DefaultVersionSources
 	getNetInterfaces      = models.GetAllNetInterfaces
 	interfaceExists       = models.InterfaceExists
 	configureNetInterface = models.ConfigureNetInterface

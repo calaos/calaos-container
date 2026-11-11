@@ -144,6 +144,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | POST | `/api/v2/system/reboot` | bearer, session allowed | 200 | `null`; `409 upgrade_in_progress` while a job runs |
 | POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
+| GET | `/api/v2/system/versions` | bearer, session allowed | 200 | `{calaos_os, debian, kernel, container, packages}`; `packages` is `[{name, version}]` of the installed `calaos-*` debs sorted by name (same source as `update/installed`); `container` is the version of the `calaos-container` deb; an unreadable field is `""`, and when `dpkg-query` fails `packages` is `[]` and `container` is `""` (still 200) |
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
 | POST | `/api/v2/system/services/restart` | bearer, session allowed | 200 | `{"id", "state": "restarting"}`; body `{"unit": "<id>"}` |

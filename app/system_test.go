@@ -2,8 +2,14 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/calaos/calaos-container/models"
+	"github.com/calaos/calaos-container/models/structs"
 )
 
 // canned lsblk-style inventory modeling a typical target machine:
@@ -178,5 +184,65 @@ func TestParseLsblkInventoryJSON(t *testing.T) {
 
 	if findLsblkDevice(inv.BlockDevices, "/dev/nonexistent") != nil {
 		t.Fatalf("expected /dev/nonexistent to not be found")
+	}
+}
+
+func TestV2SystemVersions(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	prev := versionSources
+	t.Cleanup(func() { versionSources = prev })
+	versionSources = models.VersionSources{
+		OSRelease:     write("os-release", "VERSION_ID=4.5.1\n"),
+		DebianVersion: filepath.Join(dir, "absent"),
+		KernelRelease: write("osrelease", "6.12.48-amd64\n"),
+	}
+	installed := structs.ImageMap{
+		"calaos-server":    {Name: "calaos-server", Version: "4.8.1"},
+		"calaos-container": {Name: "calaos-container", Version: "1.9.1"},
+	}
+
+	status, _, body := v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions", backend: stubBackend{installed: installed}})
+	want := `{"error":false,"msg":"ok","data":{"calaos_os":"4.5.1","debian":"","kernel":"6.12.48-amd64","container":"1.9.1",` +
+		`"packages":[{"name":"calaos-container","version":"1.9.1"},{"name":"calaos-server","version":"4.8.1"}]}}`
+	if status != 200 || body != want {
+		t.Fatalf("got %d %s\nwant 200 %s", status, body, want)
+	}
+
+	wantEmpty := `{"error":false,"msg":"ok","data":{"calaos_os":"4.5.1","debian":"","kernel":"6.12.48-amd64","container":"","packages":[]}}`
+	for name, b := range map[string]stubBackend{
+		"dpkg-query failure":         {installedErr: errors.New(secretDetail)},
+		"dpkg exit 1 without output": {installed: structs.ImageMap{}},
+	} {
+		status, _, body = v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions", backend: b})
+		if status != 200 || body != wantEmpty {
+			t.Fatalf("%s: got %d %s\nwant 200 %s", name, status, body, wantEmpty)
+		}
+	}
+}
+
+func TestV2SystemVersionsAuth(t *testing.T) {
+	(&stubBackend{installed: structs.ImageMap{}}).install(t)
+	a := newHandlerTestApp(t)
+	a.sessions = acceptSessions{ok: "live"}
+
+	for name, tc := range map[string]struct {
+		hc   httpCase
+		want int
+	}{
+		"no bearer":    {httpCase{method: "GET", path: "/api/v2/system/versions", auth: "-"}, 401},
+		"dead session": {httpCase{method: "GET", path: "/api/v2/system/versions", headers: map[string]string{headerAdminSession: "dead"}}, 401},
+		"live session": {httpCase{method: "GET", path: "/api/v2/system/versions", headers: map[string]string{headerAdminSession: "live"}}, 200},
+	} {
+		resp, body := doCase(t, a, tc.hc)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s: got %d %s, want %d", name, resp.StatusCode, body, tc.want)
+		}
 	}
 }

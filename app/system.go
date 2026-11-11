@@ -400,6 +400,16 @@ func (a *AppServer) v2SystemInfo(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, info)
 }
 
+func (a *AppServer) v2SystemVersions(c *fiber.Ctx) error {
+	// A dpkg failure must not hide the other fields: packages and container
+	// come out empty instead.
+	installed, err := getInstalledPackages()
+	if err != nil {
+		installed = nil
+	}
+	return sendOK(c, fiber.StatusOK, models.BuildSystemVersions(versionSources, installed))
+}
+
 func (a *AppServer) v2SystemFsStatus(c *fiber.Ctx) error {
 	parsed, err := runJSONCommand("findmnt", "--json", "/")
 	if err != nil {

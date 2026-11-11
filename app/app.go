@@ -236,6 +236,7 @@ func (a *AppServer) registerV2(v2 fiber.Router) {
 	v2.Post("/system/reboot", s, a.v2SystemReboot)
 	v2.Post("/system/restart", s, a.v2SystemRestart)
 	v2.Get("/system/info", s, a.v2SystemInfo)
+	v2.Get("/system/versions", s, a.v2SystemVersions)
 	v2.Get("/system/fs_status", s, a.v2SystemFsStatus)
 	v2.Get("/system/services", s, a.v2Services)
 	v2.Post("/system/services/restart", s, a.v2ServiceAction(models.ActionRestart))
