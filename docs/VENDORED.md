@@ -100,10 +100,6 @@ Rationale:
    - If updating, verify compatibility with current grub-btrfs version.
    - GPLv3 licensing must be respected; see `grub-btrfs/` files for license text.
 
-3. **Initramfs extensions**:
-   - Custom code; no upstream tracking required.
-   - Depend on grub-btrfs and Btrfs kernel support; maintain compatibility with target kernel versions.
-
 ## References
 
 - [Arch Linux arch-install-scripts Repository](https://github.com/archlinux/arch-install-scripts)
