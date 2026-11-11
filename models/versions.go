@@ -57,7 +57,7 @@ func BuildSystemVersions(src VersionSources, installed structs.ImageMap) SystemV
 }
 
 func readTrimmed(path string) string {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // fixed system paths, overridable only by tests
 	if err != nil {
 		return ""
 	}
@@ -66,11 +66,11 @@ func readTrimmed(path string) string {
 
 // osReleaseVersion prefers VERSION_ID and falls back to VERSION.
 func osReleaseVersion(path string) string {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // fixed system paths, overridable only by tests
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var versionID, version string
 	sc := bufio.NewScanner(f)
