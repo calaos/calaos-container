@@ -20,7 +20,6 @@ func writeFile(t *testing.T, dir, name, content string) string {
 func TestBuildSystemVersions(t *testing.T) {
 	dir := t.TempDir()
 	src := VersionSources{
-		OSRelease:     writeFile(t, dir, "os-release", "PRETTY_NAME=\"Calaos\"\nVERSION_ID=\"4.5.1\"\nVERSION=\"4.5.1 (x)\"\n"),
 		DebianVersion: writeFile(t, dir, "debian_version", "12.12\n"),
 		KernelRelease: writeFile(t, dir, "osrelease", "6.12.48-amd64\n"),
 	}
@@ -28,11 +27,12 @@ func TestBuildSystemVersions(t *testing.T) {
 		"calaos-server":    {Name: "calaos-server", Version: "4.8.1"},
 		"calaos-container": {Name: "calaos-container", Version: "1.9.1"},
 		"calaos-haproxy":   {Name: "calaos-haproxy", Version: "2.0"},
+		"calaos":           {Name: "calaos", Version: "2026.11"},
 	}
 
-	got := BuildSystemVersions(src, installed)
+	got := BuildSystemVersions(src, "2026.11.1\n", installed)
 
-	if got.CalaosOS != "4.5.1" || got.Debian != "12.12" || got.Kernel != "6.12.48-amd64" || got.Container != "1.9.1" {
+	if got.CalaosOS != "2026.11.1" || got.Debian != "12.12" || got.Kernel != "6.12.48-amd64" || got.Container != "1.9.1" {
 		t.Fatalf("unexpected versions: %+v", got)
 	}
 	want := []string{"calaos-container", "calaos-haproxy", "calaos-server"}
@@ -48,7 +48,7 @@ func TestBuildSystemVersions(t *testing.T) {
 
 func TestBuildSystemVersionsMissingSources(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nope")
-	got := BuildSystemVersions(VersionSources{OSRelease: missing, DebianVersion: missing, KernelRelease: missing}, structs.ImageMap{})
+	got := BuildSystemVersions(VersionSources{DebianVersion: missing, KernelRelease: missing}, "", structs.ImageMap{})
 
 	if got.CalaosOS != "" || got.Debian != "" || got.Kernel != "" || got.Container != "" {
 		t.Fatalf("missing sources must give empty fields: %+v", got)
@@ -58,9 +58,22 @@ func TestBuildSystemVersionsMissingSources(t *testing.T) {
 	}
 }
 
-func TestOSReleaseVersionFallback(t *testing.T) {
-	p := writeFile(t, t.TempDir(), "os-release", "# c\nVERSION='4.6'\n")
-	if v := osReleaseVersion(p); v != "4.6" {
-		t.Fatalf("got %q", v)
+func TestCalaosOSVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"":              "",
+		"1.2.3":         "",
+		"12":            "",
+		"12.12":         "",
+		"2026.11":       "2026.11",
+		"2026.11.1":     "2026.11.1",
+		"2026.12~dev.1": "2026.12~dev.1",
+		"2026.11\n":     "2026.11",
+		"2026.11-1":     "",
+		"2026.1":        "",
+		"v2026.11":      "",
+	} {
+		if got := CalaosOSVersion(in); got != want {
+			t.Errorf("CalaosOSVersion(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
