@@ -199,7 +199,6 @@ func TestV2SystemVersions(t *testing.T) {
 	prev := versionSources
 	t.Cleanup(func() { versionSources = prev })
 	versionSources = models.VersionSources{
-		OSRelease:     write("os-release", "VERSION_ID=4.5.1\n"),
 		DebianVersion: filepath.Join(dir, "absent"),
 		KernelRelease: write("osrelease", "6.12.48-amd64\n"),
 	}
@@ -208,14 +207,38 @@ func TestV2SystemVersions(t *testing.T) {
 		"calaos-container": {Name: "calaos-container", Version: "1.9.1"},
 	}
 
-	status, _, body := v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions", backend: stubBackend{installed: installed}})
-	want := `{"error":false,"msg":"ok","data":{"calaos_os":"4.5.1","debian":"","kernel":"6.12.48-amd64","container":"1.9.1",` +
+	const dpkgCalaos = "dpkg-query -W -f=${Version} calaos"
+	osVersion := func(out string, err error) map[string]stubResult {
+		return map[string]stubResult{dpkgCalaos: {out: out, err: err}}
+	}
+
+	status, _, body := v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions",
+		backend: stubBackend{installed: installed, commands: osVersion("2026.11.1", nil)}})
+	want := `{"error":false,"msg":"ok","data":{"calaos_os":"2026.11.1","debian":"","kernel":"6.12.48-amd64","container":"1.9.1",` +
 		`"packages":[{"name":"calaos-container","version":"1.9.1"},{"name":"calaos-server","version":"4.8.1"}]}}`
 	if status != 200 || body != want {
 		t.Fatalf("got %d %s\nwant 200 %s", status, body, want)
 	}
 
-	wantEmpty := `{"error":false,"msg":"ok","data":{"calaos_os":"4.5.1","debian":"","kernel":"6.12.48-amd64","container":"","packages":[]}}`
+	for in, wantOS := range map[string]string{"2026.11": "2026.11", "2026.12~dev.1": "2026.12~dev.1", "1.2.3": ""} {
+		_, _, body = v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions",
+			backend: stubBackend{installed: installed, commands: osVersion(in, nil)}})
+		if !strings.Contains(body, `"calaos_os":"`+wantOS+`"`) {
+			t.Fatalf("dpkg %q: %s", in, body)
+		}
+	}
+	for name, cmds := range map[string]map[string]stubResult{
+		"package absent": osVersion("", errors.New("exit status 1")),
+		"dpkg failure":   osVersion("2026.11", errors.New(secretDetail)),
+	} {
+		_, _, body = v2Do(t, httpCase{method: "GET", path: "/api/v2/system/versions",
+			backend: stubBackend{installed: installed, commands: cmds}})
+		if !strings.Contains(body, `"calaos_os":""`) || strings.Contains(body, secretDetail) {
+			t.Fatalf("%s: %s", name, body)
+		}
+	}
+
+	wantEmpty := `{"error":false,"msg":"ok","data":{"calaos_os":"","debian":"","kernel":"6.12.48-amd64","container":"","packages":[]}}`
 	for name, b := range map[string]stubBackend{
 		"dpkg-query failure":         {installedErr: errors.New(secretDetail)},
 		"dpkg exit 1 without output": {installed: structs.ImageMap{}},

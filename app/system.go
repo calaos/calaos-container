@@ -407,7 +407,12 @@ func (a *AppServer) v2SystemVersions(c *fiber.Ctx) error {
 	if err != nil {
 		installed = nil
 	}
-	return sendOK(c, fiber.StatusOK, models.BuildSystemVersions(versionSources, installed))
+	// Any failure (package absent, dpkg error) leaves calaos_os empty.
+	calaosOS, err := runCommand("dpkg-query", "-W", "-f=${Version}", "calaos")
+	if err != nil {
+		calaosOS = ""
+	}
+	return sendOK(c, fiber.StatusOK, models.BuildSystemVersions(versionSources, calaosOS, installed))
 }
 
 func (a *AppServer) v2SystemFsStatus(c *fiber.Ctx) error {
