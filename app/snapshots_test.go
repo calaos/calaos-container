@@ -277,7 +277,6 @@ func TestSnapshotsAptSnapshots(t *testing.T) {
 		"SNAPPER_CONFIGS empty":       {"default", "SNAPPER_CONFIGS=\"\"\n"},
 		"default file missing":        {"default", ""},
 		"disabled in default file":    {"default", "SNAPPER_CONFIGS=\"root\"\nDISABLE_APT_SNAPSHOT=\"yes\"\n"},
-		"disabled in root config":     {"config", "DISABLE_APT_SNAPSHOT=\"yes\"\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newSnapEnv(t, normalBackend(nil))
@@ -294,6 +293,13 @@ func TestSnapshotsAptSnapshots(t *testing.T) {
 			}
 		})
 	}
+	t.Run("disabled in root config only is ignored", func(t *testing.T) {
+		e := newSnapEnv(t, normalBackend(nil))
+		snapperRootConfigPath = e.write(t, "c2", "DISABLE_APT_SNAPSHOT=\"yes\"\n")
+		if !get(t).AptSnapshots {
+			t.Fatal("apt_snapshots false: 80snapper does not read the root config")
+		}
+	})
 	t.Run("DISABLE_APT_SNAPSHOT no", func(t *testing.T) {
 		e := newSnapEnv(t, normalBackend(nil))
 		snapperDefaultPath = e.write(t, "d2", "SNAPPER_CONFIGS=\"root\"\nDISABLE_APT_SNAPSHOT=\"no\"\n")
@@ -940,21 +946,69 @@ func TestSnapshotTooOldTreeLinks(t *testing.T) {
 	}
 }
 
-func TestSnapshotProbesAreBounded(t *testing.T) {
-	prev := queryTimeout
-	queryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { queryTimeout = prev })
-	s := normalBackend(nil)
-	newSnapEnv(t, s)
-	var hadDeadline bool
-	runCommandCtx = func(ctx context.Context, command string, args ...string) (string, error) {
-		_, hadDeadline = ctx.Deadline()
-		<-ctx.Done()
-		return "", ctx.Err()
+// Every external command of the snapshot routes runs under queryTimeout; the
+// stub hangs only on the one command under test, the others answer normally.
+func TestSnapshotCommandsAreBounded(t *testing.T) {
+	cases := []struct {
+		name, hang string
+		backend    func(extra map[string]stubResult) *stubBackend
+		do         func(t *testing.T) int
+	}{
+		{"findmnt", "findmnt", normalBackend, func(t *testing.T) int {
+			status, _ := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+			return status
+		}},
+		{"snapper", "snapper", normalBackend, func(t *testing.T) int {
+			status, _ := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+			return status
+		}},
+		{"grub-reboot", "grub-reboot", normalBackend, func(t *testing.T) int {
+			status, _ := snapDo(t, bootCase(`{"id":5}`))
+			return status
+		}},
+		{"grub-editenv", "grub-editenv", normalBackend, func(t *testing.T) int {
+			grubEnvPath = filepath.Join(t.TempDir(), "grubenv")
+			if err := os.WriteFile(grubEnvPath, []byte("next_entry=x\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ClearBootOneShot()
+			return 0
+		}},
+		{"calaos_rollback", "calaos_rollback", rescueBackend, func(t *testing.T) int {
+			if err := os.WriteFile(procCmdlinePath, []byte(cmdlineSnap5), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			status, _ := snapDo(t, rollbackCase())
+			return status
+		}},
 	}
-	status, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
-	if !hadDeadline || status != 500 {
-		t.Fatalf("deadline %v, got %d %+v", hadDeadline, status, r)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := queryTimeout
+			queryTimeout = 20 * time.Millisecond
+			t.Cleanup(func() { queryTimeout = prev })
+			newSnapEnv(t, tc.backend(map[string]stubResult{
+				"grub-reboot " + snap5Path: {}, "calaos_rollback": {},
+			}))
+			next := runCommandCtx
+			var hung, bounded bool
+			runCommandCtx = func(ctx context.Context, command string, args ...string) (string, error) {
+				if command != tc.hang {
+					return next(ctx, command, args...)
+				}
+				hung = true
+				_, bounded = ctx.Deadline()
+				<-ctx.Done()
+				return "", ctx.Err()
+			}
+			status := tc.do(t)
+			if !hung || !bounded {
+				t.Fatalf("%s: reached %v, deadline %v", tc.hang, hung, bounded)
+			}
+			if status == 200 {
+				t.Fatalf("hung %s answered 200", tc.hang)
+			}
+		})
 	}
 }
 

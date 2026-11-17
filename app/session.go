@@ -35,8 +35,8 @@ func (a *AppServer) sessionAllowed(c *fiber.Ctx) error {
 	return c.Next()
 }
 
-// sessionRequired guards the routes a push code is bound to: the bearer alone
-// has no session to bind it to.
+// sessionRequired guards the routes only a live admin session may call: the
+// bearer alone (CLI path) is refused.
 func (a *AppServer) sessionRequired(c *fiber.Ctx) error {
 	s, present := adminSession(c)
 	if !present || !a.sessions.Valid(s) {

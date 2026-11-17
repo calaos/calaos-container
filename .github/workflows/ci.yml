@@ -72,6 +72,7 @@ jobs:
         # grub-common gives the test its grub-script-check syntax gate.
         run: |
           apt-get install -y --no-install-recommends grub-common
+          command -v grub-script-check
           scripts/tests/grub_snapshot_oneshot_test.sh
 
   shellcheck:

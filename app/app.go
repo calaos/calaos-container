@@ -222,7 +222,8 @@ func NewApp() (a *AppServer, err error) {
 }
 
 // registerV2 serves the versioned API (docs/API.md). Every route is either
-// sessionAllowed (calaos_server may relay it) or bearerOnly.
+// sessionAllowed (calaos_server may relay it), sessionRequired (a live admin
+// session is mandatory) or bearerOnly.
 func (a *AppServer) registerV2(v2 fiber.Router) {
 	s := a.sessionAllowed
 
