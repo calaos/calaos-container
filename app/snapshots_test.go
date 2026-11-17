@@ -80,6 +80,34 @@ func (e *snapEnv) write(t *testing.T, name, content string) string {
 	return p
 }
 
+// snapTree builds snapshot id's tree, with or without the overlay hook and
+// the enabled one-shot unit; an existing tree is replaced.
+func (e *snapEnv) snapTree(t *testing.T, id int, hook, unit bool) string {
+	t.Helper()
+	tree := filepath.Join(snapshotsRoot, fmt.Sprint(id), "snapshot")
+	if err := os.RemoveAll(tree); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{filepath.Dir(overlayHookRel), filepath.Dir(oneShotUnitRel)} {
+		if err := os.MkdirAll(filepath.Join(tree, d), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if hook {
+		if err := os.WriteFile(filepath.Join(tree, overlayHookRel), []byte("#!/bin/sh\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A dangling absolute link, as the snapshot's target is not under the
+	// running system's root.
+	if unit {
+		if err := os.Symlink("/lib/systemd/system/calaos-snapshot-oneshot.service", filepath.Join(tree, oneShotUnitRel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return tree
+}
+
 func (e *snapEnv) fire() {
 	for _, f := range e.deferred {
 		f()
@@ -99,20 +127,23 @@ func newSnapEnv(t *testing.T, s *stubBackend) *snapEnv {
 		return stubRun(command, args...)
 	}
 
-	prev := []any{procCmdlinePath, grubCfgPath, grubBtrfsCfgPath, overlayHookPath, snapLocation}
-	prevAfter := snapAfterFunc
+	prev := []string{procCmdlinePath, grubCfgPath, grubBtrfsCfgPath, grubEnvPath, espMountPath, espEnvPath, snapshotsRoot}
+	prevLoc, prevAfter := snapLocation, snapAfterFunc
 	t.Cleanup(func() {
-		procCmdlinePath = prev[0].(string)
-		grubCfgPath = prev[1].(string)
-		grubBtrfsCfgPath = prev[2].(string)
-		overlayHookPath = prev[3].(string)
-		snapLocation = prev[4].(*time.Location)
-		snapAfterFunc = prevAfter
+		procCmdlinePath, grubCfgPath, grubBtrfsCfgPath = prev[0], prev[1], prev[2]
+		grubEnvPath, espMountPath, espEnvPath, snapshotsRoot = prev[3], prev[4], prev[5], prev[6]
+		snapLocation, snapAfterFunc = prevLoc, prevAfter
 	})
 	procCmdlinePath = e.write(t, "cmdline", cmdlineNormal)
 	grubCfgPath = e.write(t, "grub.cfg", grubCfgWithMenu)
 	grubBtrfsCfgPath = e.write(t, "grub-btrfs.cfg", grubBtrfsCfg)
-	overlayHookPath = e.write(t, "grub-btrfs-overlay", "#!/bin/sh\n")
+	grubEnvPath = filepath.Join(e.dir, "grubenv")
+	espMountPath = "/efi"
+	espEnvPath = filepath.Join(e.dir, "esp", "calaos", "grubenv")
+	snapshotsRoot = filepath.Join(e.dir, "snapshots")
+	for _, id := range []int{3, 5} {
+		e.snapTree(t, id, true, true)
+	}
 	snapLocation = time.UTC
 	snapAfterFunc = func(d time.Duration, f func()) {
 		if d <= 0 {
@@ -322,8 +353,19 @@ func TestSnapshotBootRefusals(t *testing.T) {
 		{name: "not json", body: `id=5`, status: 400, code: codeInvalidRequest},
 		{name: "not bootable", body: `{"id":4}`, status: 409, code: codeNotBootable},
 		{name: "from rescue", body: `{"id":5}`, rescue: true, status: 409, code: codeNotBootable},
-		{name: "no overlay hook", body: `{"id":5}`, status: 503, code: codeRescueUnavailable,
-			setup: func(e *snapEnv, t *testing.T) { overlayHookPath = filepath.Join(e.dir, "absent") }},
+		{name: "no overlay hook in the snapshot", body: `{"id":5}`, status: 409, code: codeSnapshotTooOld,
+			setup: func(e *snapEnv, t *testing.T) { e.snapTree(t, 5, false, true) }},
+		{name: "pre-fix hook directory", body: `{"id":5}`, status: 409, code: codeSnapshotTooOld,
+			setup: func(e *snapEnv, t *testing.T) {
+				tree := e.snapTree(t, 5, false, true)
+				if err := os.MkdirAll(filepath.Join(tree, overlayHookRel, "grub-btrfs-overlay"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "no one-shot unit in the snapshot", body: `{"id":5}`, status: 409, code: codeSnapshotTooOld,
+			setup: func(e *snapEnv, t *testing.T) { e.snapTree(t, 5, true, false) }},
+		{name: "no snapshot tree", body: `{"id":5}`, status: 409, code: codeSnapshotTooOld,
+			setup: func(e *snapEnv, t *testing.T) { snapshotsRoot = filepath.Join(e.dir, "absent") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,7 +382,7 @@ func TestSnapshotBootRefusals(t *testing.T) {
 				t.Fatalf("got %d %+v, want %d %s", status, r, tc.status, tc.code)
 			}
 			for _, c := range e.ran {
-				if strings.HasPrefix(c, "grub-reboot") || c == "systemctl reboot" {
+				if strings.HasPrefix(c, "grub-reboot") || strings.HasPrefix(c, "grub-editenv") || c == "systemctl reboot" {
 					t.Fatalf("ran %q", c)
 				}
 			}
@@ -405,16 +447,18 @@ func TestSnapshotBootGrubRebootFails(t *testing.T) {
 // A reboot that fails after grub-reboot must not leave next_entry behind for
 // the next manual reboot.
 func TestSnapshotBootDeferredRebootFails(t *testing.T) {
-	e := newSnapEnv(t, normalBackend(map[string]stubResult{
-		"grub-reboot " + snap5Path:        {},
-		"systemctl reboot":                {err: errors.New("logind")},
-		"grub-editenv - unset next_entry": {},
-	}))
+	s := normalBackend(map[string]stubResult{
+		"grub-reboot " + snap5Path: {},
+		"systemctl reboot":         {err: errors.New("logind")},
+	})
+	e := newSnapEnv(t, s)
+	unset := "grub-editenv " + grubEnvPath + " unset next_entry"
+	s.commands[unset] = stubResult{}
 	if status, r := snapDo(t, bootCase(`{"id":5}`)); status != http.StatusOK {
 		t.Fatalf("got %d %+v", status, r)
 	}
 	e.fire()
-	if last := e.ran[len(e.ran)-1]; last != "grub-editenv - unset next_entry" {
+	if last := e.ran[len(e.ran)-1]; last != unset {
 		t.Fatalf("after a failed reboot ran %v", e.ran)
 	}
 }
@@ -523,5 +567,189 @@ func TestSnapshotRoutesAuth(t *testing.T) {
 func TestGrubPathEscapes(t *testing.T) {
 	if got := grubPath("a>b", "c", ">>"); got != "a>>b>c>>>>>" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSnapshotsListTooOld(t *testing.T) {
+	e := newSnapEnv(t, normalBackend(nil))
+	e.snapTree(t, 3, true, false)
+	_, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+	for _, s := range decodeList(t, r).Snapshots {
+		if s.Bootable != (s.ID == 5) {
+			t.Errorf("snapshot %d bootable %v", s.ID, s.Bootable)
+		}
+	}
+}
+
+const grubCfgESP = grubCfgWithMenu + `### BEGIN /etc/grub.d/41_calaos-snapshot-boot ###
+load_env --file "(${calaos_esp})/calaos/grubenv" calaos_oneshot
+`
+
+const findmntESP = "findmnt -n -o FSTYPE /efi"
+
+// With the ESP snippet in grub.cfg and a FAT /efi, GRUB clears the one-shot
+// itself: no next_entry, and no unit needed in the snapshot.
+func TestSnapshotBootESP(t *testing.T) {
+	s := normalBackend(map[string]stubResult{findmntESP: {out: "vfat\n"}, "systemctl reboot": {err: errors.New("logind")}})
+	e := newSnapEnv(t, s)
+	e.write(t, "grub.cfg", grubCfgESP)
+	e.snapTree(t, 5, true, false)
+	set := "grub-editenv " + espEnvPath + " set calaos_oneshot=" + snap5Path
+	unset := "grub-editenv " + espEnvPath + " unset calaos_oneshot"
+	s.commands[set] = stubResult{}
+	s.commands[unset] = stubResult{}
+
+	if status, r := snapDo(t, bootCase(`{"id":5}`)); status != http.StatusOK {
+		t.Fatalf("got %d %+v", status, r)
+	}
+	if last := e.ran[len(e.ran)-1]; last != set {
+		t.Fatalf("ran %v", e.ran)
+	}
+	if fi, err := os.Stat(filepath.Dir(espEnvPath)); err != nil || !fi.IsDir() {
+		t.Fatalf("ESP directory not created: %v", err)
+	}
+	e.fire()
+	if last := e.ran[len(e.ran)-1]; last != unset {
+		t.Fatalf("after a failed reboot ran %v", e.ran)
+	}
+	for _, c := range e.ran {
+		if strings.HasPrefix(c, "grub-reboot") || strings.Contains(c, "next_entry") {
+			t.Fatalf("ran %q in ESP mode", c)
+		}
+	}
+
+	// The overlay hook is still needed.
+	e.snapTree(t, 5, false, false)
+	if status, r := snapDo(t, bootCase(`{"id":5}`)); status != http.StatusConflict || r.Code != codeSnapshotTooOld {
+		t.Fatalf("no hook: %d %+v", status, r)
+	}
+}
+
+func TestSnapshotBootModeFallback(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg     string
+		findmnt *stubResult
+	}{
+		"ESP not FAT":        {grubCfgESP, &stubResult{out: "btrfs\n"}},
+		"ESP not mounted":    {grubCfgESP, &stubResult{err: errors.New("exit 1")}},
+		"grub.cfg not fresh": {grubCfgWithMenu, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := normalBackend(map[string]stubResult{"grub-reboot " + snap5Path: {}})
+			if tc.findmnt != nil {
+				s.commands[findmntESP] = *tc.findmnt
+			}
+			e := newSnapEnv(t, s)
+			e.write(t, "grub.cfg", tc.cfg)
+			if status, r := snapDo(t, bootCase(`{"id":5}`)); status != http.StatusOK {
+				t.Fatalf("got %d %+v", status, r)
+			}
+			if last := e.ran[len(e.ran)-1]; last != "grub-reboot "+snap5Path {
+				t.Fatalf("ran %v", e.ran)
+			}
+			if tc.findmnt == nil && strings.Contains(strings.Join(e.ran, ";"), findmntESP) {
+				t.Fatal("probed the ESP without the snippet")
+			}
+
+			// next_entry relies on the unit of the snapshot.
+			e.snapTree(t, 5, true, false)
+			if status, r := snapDo(t, bootCase(`{"id":5}`)); status != http.StatusConflict || r.Code != codeSnapshotTooOld {
+				t.Fatalf("no unit: %d %+v", status, r)
+			}
+		})
+	}
+}
+
+func TestClearBootOneShot(t *testing.T) {
+	const header = "# GRUB Environment Block\n"
+	cases := []struct {
+		name, grubenv, espenv string
+		want                  []string
+	}{
+		{"both armed", header + "saved_entry=0\nnext_entry=Calaos-OS snapshots>x\n", header + "calaos_oneshot=y\n",
+			[]string{"grub-editenv GRUBENV unset next_entry", "grub-editenv ESPENV unset calaos_oneshot"}},
+		{"already cleared", header + "next_entry=\n", header, nil},
+		{"next_entry prefix only", header + "next_entry_x=1\n", "", nil},
+		{"no files", "", "", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := normalBackend(nil)
+			e := newSnapEnv(t, s)
+			for _, f := range []struct{ path, content string }{{grubEnvPath, tc.grubenv}, {espEnvPath, tc.espenv}} {
+				if f.content == "" {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(f.path), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(f.path, []byte(f.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var want []string
+			for _, w := range tc.want {
+				w = strings.NewReplacer("GRUBENV", grubEnvPath, "ESPENV", espEnvPath).Replace(w)
+				s.commands[w] = stubResult{}
+				want = append(want, w)
+			}
+			ClearBootOneShot()
+			if fmt.Sprint(e.ran) != fmt.Sprint(want) {
+				t.Fatalf("ran %v, want %v", e.ran, want)
+			}
+		})
+	}
+}
+
+// From a snapshot, packages would land in the overlay and update-grub would
+// rewrite the shared grub.cfg: every upgrade route refuses before any job.
+func TestUpgradeRefusedInRescue(t *testing.T) {
+	routes := []struct {
+		tc     httpCase
+		legacy bool
+	}{
+		{httpCase{method: "POST", path: "/api/v2/update/upgrade-all"}, false},
+		{httpCase{method: "POST", path: "/api/v2/update/upgrade", ctype: "application/json", body: `{"package":"calaos-server"}`}, false},
+		{httpCase{method: "POST", path: "/api/update/upgrade-all"}, true},
+		{httpCase{method: "POST", path: "/api/update/upgrade?package=calaos-server"}, true},
+	}
+	for _, rt := range routes {
+		for name, findmnt := range map[string]stubResult{
+			"rescue":          {out: findmntRescue},
+			"normal":          {out: findmntBtrfs},
+			"findmnt failure": {err: errors.New("boom")},
+			"foreign overlay": {out: `{"filesystems":[{"source":"overlay","fstype":"overlay"}]}`},
+		} {
+			t.Run(rt.tc.path+" "+name, func(t *testing.T) {
+				newSnapEnv(t, normalBackend(map[string]stubResult{"findmnt --json /": findmnt}))
+				started := 0
+				inner := startUpgradeJob
+				startUpgradeJob = func(kind, pkg string) (upgradeRun, error) {
+					started++
+					return inner(kind, pkg)
+				}
+				a := newHandlerTestApp(t)
+				resp, body := doCase(t, a, rt.tc)
+				refused := name == "rescue"
+				if refused != (started == 0) {
+					t.Fatalf("%d jobs started, status %d %s", started, resp.StatusCode, body)
+				}
+				switch {
+				case !refused:
+					if resp.StatusCode >= 300 {
+						t.Fatalf("status %d %s", resp.StatusCode, body)
+					}
+				case rt.legacy:
+					if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(body), errUpgradeInRescue.Error()) {
+						t.Fatalf("legacy refusal %d %s", resp.StatusCode, body)
+					}
+				default:
+					var r v2Reply
+					if err := json.Unmarshal(body, &r); err != nil || resp.StatusCode != http.StatusConflict || r.Code != codeInRescue {
+						t.Fatalf("v2 refusal %d %s", resp.StatusCode, body)
+					}
+				}
+			})
+		}
 	}
 }

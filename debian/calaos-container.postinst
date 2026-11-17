@@ -55,12 +55,15 @@ deb-systemd-invoke() {
 
 # Existing boxes need grub.cfg regenerated once for the snapshot boot snippet
 # and GRUB_DEFAULT=saved; new ones get it from calaos_install. A failure only
-# delays snapshot boots, so it never fails the upgrade.
+# delays snapshot boots, so it never fails the upgrade. From a snapshot (rescue
+# overlay) grub.cfg, shared by every snapshot, would list that snapshot's
+# kernels: left alone.
 refresh_grub_cfg() {
     local cfg=/boot/grub/grub.cfg
     [ -z "${DPKG_ROOT:-}" ] && [ -f "$cfg" ] || return 0
     command -v update-grub >/dev/null 2>&1 || return 0
-    ! grep -q '^### BEGIN /etc/grub.d/41_calaos-snapshot-boot ###$' "$cfg" || return 0
+    [ "$(findmnt -n -o FSTYPE / 2>/dev/null)" != overlay ] || return 0
+    ! grep -q '^# calaos-snapshot-boot 2$' "$cfg" || return 0
     if ! update-grub >/dev/null 2>&1; then
         echo "calaos-container: update-grub failed; snapshot boot stays" \
             "unavailable until grub.cfg is regenerated." >&2

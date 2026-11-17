@@ -1,0 +1,19 @@
+# GRUB cannot clear next_entry on btrfs, so a snapshot boot armed with
+# grub-reboot would repeat on every reboot. Runs on every boot, normal or
+# rescue: by now the entry has been consumed. The snapshot API requires this
+# unit enabled inside the snapshot it boots.
+[Unit]
+Description=Clear the one-shot GRUB entry of a snapshot boot
+DefaultDependencies=no
+RequiresMountsFor=/boot/grub
+ConditionPathExists=/boot/grub/grubenv
+ConditionFileIsExecutable=/usr/bin/grub-editenv
+Conflicts=shutdown.target
+Before=sysinit.target shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/bin/grub-editenv /boot/grub/grubenv unset next_entry
+
+[Install]
+WantedBy=sysinit.target

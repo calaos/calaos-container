@@ -65,6 +65,9 @@ jobs:
       - name: initramfs grub-btrfs-overlay script
         run: scripts/tests/grub_btrfs_overlay_test.sh
 
+      - name: grub.d snapshot one-shot snippet
+        run: scripts/tests/grub_snapshot_oneshot_test.sh
+
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest

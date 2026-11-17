@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -24,16 +25,29 @@ const (
 	snapRebootDelay   = 2 * time.Second
 )
 
+// Inside a snapshot tree. Without the overlay hook a snapshot boots
+// read-only and most services fail. Without the unit (enabled by the package)
+// nothing clears next_entry once booted, as GRUB cannot write its grubenv on
+// btrfs: the box would come back to the snapshot on every reboot.
+const (
+	overlayHookRel = "usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay"
+	oneShotUnitRel = "etc/systemd/system/sysinit.target.wants/calaos-snapshot-oneshot.service"
+)
+
 // Test seams: the files read and the deferred reboot.
 var (
 	procCmdlinePath  = "/proc/cmdline"
 	grubCfgPath      = "/boot/grub/grub.cfg"
 	grubBtrfsCfgPath = "/boot/grub/grub-btrfs.cfg"
-	// Without the overlay hook a snapshot boots read-only and most services
-	// fail, so booting one is refused.
-	overlayHookPath = "/usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay"
-	snapAfterFunc   = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
-	snapLocation    = time.Local
+	// In subvolume @/boot/grub, shared by the system and every snapshot.
+	grubEnvPath = "/boot/grub/grubenv"
+	// On the FAT ESP, which GRUB can write: grub/41_calaos-snapshot-boot reads
+	// and clears calaos_oneshot there.
+	espMountPath  = "/efi"
+	espEnvPath    = "/efi/calaos/grubenv"
+	snapshotsRoot = "/.snapshots"
+	snapAfterFunc = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	snapLocation  = time.Local
 )
 
 // Same pattern as calaos_snapshot_number_from_subvol (scripts/lib).
@@ -227,19 +241,61 @@ func grubPath(titles ...string) string {
 	return strings.Join(titles, ">")
 }
 
+// bootTargets are the snapshots a one-shot boot may target, and how to arm it.
+type bootTargets struct {
+	paths  map[int]string // grub path of each bootable snapshot
+	tooOld map[int]bool   // in the menu, but missing what a safe boot needs
+	esp    bool
+}
+
+// espOneShot reports whether grub.cfg reads the one-shot from the ESP. Older
+// grub.cfg files, BIOS boxes and boxes without a FAT ESP use next_entry.
+func espOneShot() bool {
+	cfg, err := os.ReadFile(grubCfgPath)
+	if err != nil || !strings.Contains(string(cfg), "calaos_oneshot") {
+		return false
+	}
+	out, err := runCommand("findmnt", "-n", "-o", "FSTYPE", espMountPath)
+	return err == nil && strings.TrimSpace(out) == "vfat"
+}
+
+// snapshotTooOld checks the snapshot's own tree: it boots its own kernel,
+// initramfs and units, not the running system's.
+func snapshotTooOld(id int, esp bool) bool {
+	tree := filepath.Join(snapshotsRoot, strconv.Itoa(id), "snapshot")
+	// A directory stood there before the initramfs install was fixed.
+	fi, err := os.Lstat(filepath.Join(tree, overlayHookRel))
+	if err != nil || !fi.Mode().IsRegular() {
+		return true
+	}
+	if esp {
+		return false
+	}
+	_, err = os.Lstat(filepath.Join(tree, oneShotUnitRel))
+	return err != nil
+}
+
 // loadSnapshots returns the snapper list, newest first and capped, with the
-// grub paths of the bootable ones.
-func loadSnapshots(st rescueStatus) (snapshotList, map[int]string, error) {
+// snapshots a boot may target.
+func loadSnapshots(st rescueStatus) (snapshotList, bootTargets, error) {
+	targets := bootTargets{paths: map[int]string{}, tooOld: map[int]bool{}}
 	raw, err := listSnapper()
 	if err != nil {
-		return snapshotList{}, nil, err
+		return snapshotList{}, targets, err
 	}
-	// From the rescue overlay, grub-reboot would write a grubenv that does
-	// not survive the reboot: nothing is bootable there.
-	paths := map[int]string{}
+	// Booting a snapshot is only armed from the normal system: its grub.cfg
+	// carries the one-shot snippet, and from the rescue the way out is a
+	// rollback or a plain reboot.
 	if !st.Rescue {
-		if paths, err = grubSnapshotEntries(); err != nil {
-			paths = map[int]string{}
+		if menu, err := grubSnapshotEntries(); err == nil {
+			targets.esp = espOneShot()
+			for id, path := range menu {
+				if snapshotTooOld(id, targets.esp) {
+					targets.tooOld[id] = true
+				} else {
+					targets.paths[id] = path
+				}
+			}
 		}
 	}
 
@@ -252,7 +308,7 @@ func loadSnapshots(st rescueStatus) (snapshotList, map[int]string, error) {
 		if st.Rescue {
 			current = st.Snapshot != nil && *st.Snapshot == e.Number
 		}
-		_, bootable := paths[e.Number]
+		_, bootable := targets.paths[e.Number]
 		info := snapshotInfo{
 			ID:          e.Number,
 			Date:        snapperDate(e.Date),
@@ -274,7 +330,7 @@ func loadSnapshots(st rescueStatus) (snapshotList, map[int]string, error) {
 	if len(list.Snapshots) > maxSnapshotList {
 		list.Snapshots = list.Snapshots[:maxSnapshotList]
 	}
-	return list, paths, nil
+	return list, targets, nil
 }
 
 func (a *AppServer) v2SystemSnapshots(c *fiber.Ctx) error {
@@ -328,14 +384,11 @@ func (a *AppServer) v2SystemSnapshotBoot(c *fiber.Ctx) error {
 	id := *req.ID
 	auditField(c, "snapshot", strconv.Itoa(id))
 
-	if _, err := os.Stat(overlayHookPath); err != nil {
-		return errRescueUnavailable(err)
-	}
 	st, err := readRescueStatus()
 	if err != nil {
 		return errInternal(err)
 	}
-	list, paths, err := loadSnapshots(st)
+	list, targets, err := loadSnapshots(st)
 	if err != nil {
 		return errRescueUnavailable(err)
 	}
@@ -346,21 +399,21 @@ func (a *AppServer) v2SystemSnapshotBoot(c *fiber.Ctx) error {
 	if !known {
 		return invalid
 	}
-	path, ok := paths[id]
+	if targets.tooOld[id] {
+		return newAPIError(fiber.StatusConflict, codeSnapshotTooOld, "this snapshot predates single-use snapshot boots")
+	}
+	path, ok := targets.paths[id]
 	if !ok {
 		return newAPIError(fiber.StatusConflict, codeNotBootable, "this snapshot is not in the boot menu")
 	}
 
 	err = rebootGuard(func() error {
-		if _, err := runCommand("grub-reboot", path); err != nil {
+		if err := armOneShot(path, targets.esp); err != nil {
 			return err
 		}
 		scheduleReboot(func() {
-			// Left set, next_entry would boot the snapshot on the next
-			// manual reboot.
-			if _, err := runCommand("grub-editenv", "-", "unset", "next_entry"); err != nil {
-				logging.Errorf("clearing next_entry: %v", err)
-			}
+			// Left armed, the snapshot would boot on the next manual reboot.
+			disarmOneShot(targets.esp)
 		})
 		return nil
 	})
@@ -368,6 +421,61 @@ func (a *AppServer) v2SystemSnapshotBoot(c *fiber.Ctx) error {
 		return guardedError(err)
 	}
 	return sendOK(c, fiber.StatusOK, nil)
+}
+
+func armOneShot(path string, esp bool) error {
+	if !esp {
+		_, err := runCommand("grub-reboot", path)
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(espEnvPath), 0o750); err != nil {
+		return err
+	}
+	_, err := runCommand("grub-editenv", espEnvPath, "set", "calaos_oneshot="+path)
+	return err
+}
+
+func disarmOneShot(esp bool) {
+	file, name := grubEnvPath, "next_entry"
+	if esp {
+		file, name = espEnvPath, "calaos_oneshot"
+	}
+	if _, err := runCommand("grub-editenv", file, "unset", name); err != nil {
+		logging.Errorf("clearing %s: %v", name, err)
+	}
+}
+
+// ClearBootOneShot drops a snapshot boot still armed when the daemon starts:
+// it was consumed by this boot, or it outlived a failed reboot. GRUB clears
+// next_entry itself only off btrfs, and the ESP one only when it can write it.
+func ClearBootOneShot() {
+	clearEnvVar(grubEnvPath, "next_entry")
+	clearEnvVar(espEnvPath, "calaos_oneshot")
+}
+
+func clearEnvVar(file, name string) {
+	data, err := os.ReadFile(file) //nolint:gosec // fixed grubenv paths, never from a request
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if v, ok := strings.CutPrefix(line, name+"="); ok && v != "" {
+			if _, err := runCommand("grub-editenv", file, "unset", name); err != nil {
+				logging.Errorf("clearing %s in %s: %v", name, file, err)
+			}
+			return
+		}
+	}
+}
+
+// inRescue fails open: a box whose mount table cannot be read is far more
+// likely a normal one, and refusing would block its updates for good.
+func inRescue() bool {
+	st, err := readRescueStatus()
+	if err != nil {
+		logging.Errorf("reading the rescue status: %v", err)
+	}
+	return st.Rescue
 }
 
 func (a *AppServer) v2SystemSnapshotRollback(c *fiber.Ctx) error {
