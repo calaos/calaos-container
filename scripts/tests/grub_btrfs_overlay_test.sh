@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs initramfs/scripts/local-bottom/grub-btrfs-overlay against stubbed
 # btrfs/modprobe/mkdir/mount/umount and checks the exact command sequence.
-# PATH holds only the stubs, so no real mount can happen.
+# PATH holds only the stubs, so no real mount can happen; /proc/filesystems
+# and /dev/kmsg are files under a fake sysroot.
 # TEST_SH picks the shell running the script (default sh; the initrd uses
 # /usr/lib/klibc/bin/sh).
 set -uo pipefail
@@ -16,6 +17,11 @@ trap 'rm -rf "$tmp"' EXIT
 root="$tmp/root"
 mkdir -p "$root"
 log="$tmp/log"
+sysroot="$tmp/sys"
+mkdir -p "$sysroot/proc" "$sysroot/dev"
+kmsg="$sysroot/dev/kmsg"
+fs_with_overlay=$(printf 'nodev\tsysfs\nnodev\ttmpfs\n\tbtrfs\nnodev\toverlay')
+fs_without_overlay=$(printf 'nodev\tsysfs\nnodev\ttmpfs\n\tbtrfs\nnodev\toverlayx')
 
 failures=0
 fail() {
@@ -52,7 +58,11 @@ run() {
     local mnt=$1
     shift
     : >"$log"
-    env -i PATH="$tmp/bin" rootmnt="$mnt" STUB_FAIL="${STUB_FAIL:-__never__}" \
+    rm -f "$kmsg" "$sysroot/proc/filesystems"
+    [ -n "${NO_KMSG:-}" ] || : >"$kmsg"
+    [ -n "${NO_FILESYSTEMS:-}" ] ||
+        printf '%s\n' "${FILESYSTEMS:-$fs_with_overlay}" >"$sysroot/proc/filesystems"
+    env -i PATH="$tmp/bin" rootmnt="$mnt" GRUB_BTRFS_OVERLAY_SYSROOT="$sysroot" STUB_FAIL="${STUB_FAIL:-__never__}" \
         STUB_FAIL2="${STUB_FAIL2:-__never__}" \
         BTRFS_OUT="${BTRFS_OUT:-}" BTRFS_RC="${BTRFS_RC:-0}" \
         "$test_sh" "$script" "$@" >"$tmp/out" 2>"$tmp/err"
@@ -127,8 +137,32 @@ $tmpfs
 $mk2
 $move
 $overlay"
-[ -s "$tmp/err" ] || fail "ro root: no message on stderr"
+[ -s "$kmsg" ] || fail "ro root: no message in kmsg"
+[ -s "$tmp/err" ] && fail "ro root: stderr not empty: $(cat "$tmp/err")"
 
+# Without a writable kmsg the message goes to stderr.
+BTRFS_OUT="ro=true" NO_KMSG=1 run "$root"
+expect_rc0 "no kmsg"
+[ -s "$tmp/err" ] || fail "no kmsg: no message on stderr"
+
+# The root must not move when the overlay cannot be mounted at all.
+BTRFS_OUT="ro=true" FILESYSTEMS="$fs_without_overlay" run "$root"
+expect_rc0 "overlay unavailable"
+expect_log "overlay unavailable" "$probe
+$modp"
+grep -q "overlay filesystem not available" "$kmsg" || fail "overlay unavailable: no message"
+
+BTRFS_OUT="ro=true" STUB_FAIL="modprobe*" FILESYSTEMS="$fs_without_overlay" run "$root"
+expect_rc0 "modprobe fails, no overlay"
+expect_log "modprobe fails, no overlay" "$probe
+$modp"
+
+BTRFS_OUT="ro=true" NO_FILESYSTEMS=1 run "$root"
+expect_rc0 "no /proc/filesystems"
+expect_log "no /proc/filesystems" "$probe
+$modp"
+
+# Built-in overlay: modprobe fails but the filesystem is registered.
 BTRFS_OUT="ro=true" STUB_FAIL="modprobe*" run "$root"
 expect_rc0 "modprobe fails"
 expect_log "modprobe fails" "$probe

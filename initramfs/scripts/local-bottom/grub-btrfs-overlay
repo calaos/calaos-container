@@ -6,7 +6,8 @@
 # and calaos_rollback look for to detect a rescue boot.
 #
 # Runs under the klibc sh of the initramfs (no busybox): no ERR trap, no
-# mktemp, no set -e. Any doubt or failure leaves the root as it was.
+# mktemp, no set -e. Every prerequisite is checked before the root is moved:
+# any doubt or failure up to there leaves the root untouched.
 
 PREREQ=""
 prereqs() {
@@ -24,13 +25,26 @@ lower_dir=$ovl_dir/lower
 ram_dir=$ovl_dir/ram
 # The upper layer lives in RAM: past this, writes fail instead of the OOM killer.
 ram_size=25%
+# Lets the tests point /proc and /dev elsewhere; empty in the initrd.
+sysroot=${GRUB_BTRFS_OVERLAY_SYSROOT:-}
 
 msg() {
-    if [ -w /dev/kmsg ]; then
-        echo "grub-btrfs-overlay: $*" >/dev/kmsg
+    if [ -w "$sysroot/dev/kmsg" ]; then
+        echo "grub-btrfs-overlay: $*" >"$sysroot/dev/kmsg"
     else
         echo "grub-btrfs-overlay: $*" >&2
     fi
+}
+
+# klibc has no grep. Lines are "nodev<TAB>overlay" or "<TAB>btrfs".
+have_overlay() {
+    [ -r "$sysroot/proc/filesystems" ] || return 1
+    while read -r first second; do
+        if [ "$first" = overlay ] || [ "$second" = overlay ]; then
+            return 0
+        fi
+    done <"$sysroot/proc/filesystems"
+    return 1
 }
 
 [ -n "${rootmnt:-}" ] && [ -d "$rootmnt" ] || exit 0
@@ -39,8 +53,13 @@ command -v btrfs >/dev/null 2>&1 || exit 0
 ro=$(btrfs property get -ts "$rootmnt" ro 2>/dev/null) || exit 0
 [ "$ro" = "ro=true" ] || exit 0
 
-# Built in, or loaded on demand by the overlay mount below.
+# Either built in or a module; a failed modprobe is only fatal if the
+# filesystem is still not registered afterwards.
 modprobe overlay >/dev/null 2>&1
+if ! have_overlay; then
+    msg "overlay filesystem not available, read-only root left as is"
+    exit 0
+fi
 
 if ! mkdir -p "$lower_dir" "$ram_dir"; then
     msg "cannot create $ovl_dir, read-only root left as is"
@@ -55,6 +74,8 @@ if ! mkdir -m 0755 "$ram_dir/upper" "$ram_dir/work"; then
     umount "$ram_dir"
     exit 0
 fi
+# From here on the root is moved; only an overlay mount failing despite the
+# checks above, then a failed move back, can leave $rootmnt empty.
 if ! mount -o move "$rootmnt" "$lower_dir"; then
     msg "cannot move the root, read-only root left as is"
     umount "$ram_dir"
