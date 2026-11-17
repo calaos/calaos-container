@@ -53,11 +53,30 @@ deb-systemd-invoke() {
     command deb-systemd-invoke "$@"
 }
 
+# Existing boxes need grub.cfg regenerated once for the snapshot boot snippet
+# and GRUB_DEFAULT=saved; new ones get it from calaos_install. A failure only
+# delays snapshot boots, so it never fails the upgrade. From a snapshot (rescue
+# overlay) grub.cfg, shared by every snapshot, would list that snapshot's
+# kernels: left alone.
+refresh_grub_cfg() {
+    local cfg=/boot/grub/grub.cfg
+    [ -z "${DPKG_ROOT:-}" ] && [ -f "$cfg" ] || return 0
+    command -v update-grub >/dev/null 2>&1 || return 0
+    [ "$(findmnt -n -o FSTYPE / 2>/dev/null)" != overlay ] || return 0
+    ! grep -q '^# calaos-snapshot-boot 2$' "$cfg" || return 0
+    # update-grub writes its progress on stderr: kept in the dpkg log.
+    if ! update-grub >&2; then
+        echo "calaos-container: update-grub failed (output above); snapshot" \
+            "boot stays unavailable until grub.cfg is regenerated." >&2
+    fi
+}
+
 # Must run before the debhelper start below, which consults policy-rc.d.
 case "$1" in
 configure)
     remove_docker_policy_rc || true
     remove_docker_apt_speedup || true
+    refresh_grub_cfg || true
     ;;
 esac
 

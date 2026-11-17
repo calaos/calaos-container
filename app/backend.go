@@ -7,6 +7,7 @@ import "github.com/calaos/calaos-container/models"
 // bus is reached through models.Bus.
 var (
 	runCommand            = models.RunCommand
+	runCommandCtx         = models.RunCommandContext
 	checkUpdates          = models.CheckUpdates
 	getNewVersions        = models.GetNewVersions
 	getInstalledPackages  = models.GetInstalledCalaosPackages

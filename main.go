@@ -114,6 +114,7 @@ func main() {
 		if err = models.Init(); err != nil {
 			exit(err, exitModelsInit)
 		}
+		app.ClearBootOneShot()
 
 		if err = handleSignals(myApp.Start()); err != nil {
 			exit(err, exitRuntime)

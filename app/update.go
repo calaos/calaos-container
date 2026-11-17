@@ -60,6 +60,9 @@ func (a *AppServer) apiUpdateUpgrade(c *fiber.Ctx) error {
 // the next package of its queue right away never finds the lock held; a
 // self-upgrade exit still waits for the answer (graceful server shutdown).
 func (a *AppServer) legacyUpgrade(c *fiber.Ctx, kind, pkg string) error {
+	if inRescue() {
+		return legacyError(c, fiber.StatusInternalServerError, errUpgradeInRescue)
+	}
 	run, err := startUpgradeJob(kind, pkg)
 	if errors.Is(err, models.ErrPackageHeld) {
 		// The legacy vocabulary is frozen, and its check omits held packages.
@@ -157,7 +160,15 @@ func (a *AppServer) v2UpdateUpgrade(c *fiber.Ctx) error {
 	return startV2Job(c, models.JobKindUpgrade, *body.Package)
 }
 
+// errUpgradeInRescue: from a snapshot, packages land in the overlay and are
+// lost at reboot, while update-grub would rewrite the shared grub.cfg from the
+// snapshot's kernels.
+var errUpgradeInRescue = errors.New("upgrades are disabled while running from a snapshot")
+
 func startV2Job(c *fiber.Ctx, kind, pkg string) error {
+	if inRescue() {
+		return newAPIError(fiber.StatusConflict, codeInRescue, errUpgradeInRescue.Error())
+	}
 	run, err := startUpgradeJob(kind, pkg)
 	if err != nil {
 		switch {

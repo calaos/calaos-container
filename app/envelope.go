@@ -41,6 +41,12 @@ const (
 	codeCodeExpired        = "code_expired"
 	codeConsoleLimit       = "console_limit"
 	codeServiceUnavailable = "service_unavailable"
+	codeInvalidSnapshot    = "invalid_snapshot"
+	codeNotBootable        = "not_bootable"
+	codeNotInRescue        = "not_in_rescue"
+	codeRescueUnavailable  = "rescue_unavailable"
+	codeSnapshotTooOld     = "snapshot_too_old"
+	codeInRescue           = "in_rescue"
 )
 
 type okEnvelope struct {

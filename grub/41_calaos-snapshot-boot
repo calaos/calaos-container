@@ -1,0 +1,48 @@
+#!/bin/sh
+# Never fails: a failing grub.d script aborts update-grub, and with it the
+# kernel upgrade that ran it.
+
+# grub-reboot into a grub-btrfs snapshot enters its menu through "configfile",
+# which keeps only exported variables. Without these, that menu loses the
+# chosen entry and the zero timeout, and waits for a key on a headless box.
+# A key pressed at the main menu unsets timeout before the export is copied,
+# so manual browsing stays interactive.
+# The version line tells the package postinst that grub.cfg is up to date.
+cat <<'GRUBCFG'
+# calaos-snapshot-boot 2
+export default
+export timeout
+GRUBCFG
+
+# GRUB cannot rewrite a grubenv on btrfs, so a next_entry is never consumed
+# and the box would boot the snapshot forever. On a FAT ESP it can: the API
+# arms calaos_oneshot there, and the entry is used only once GRUB has erased
+# it, so any failure boots normally.
+esp=/efi
+probe=${grub_probe:-grub-probe}
+mountpoint -q "$esp" 2>/dev/null || exit 0
+[ "$("$probe" --target=fs "$esp" 2>/dev/null)" = fat ] || exit 0
+uuid=$("$probe" --target=fs_uuid "$esp" 2>/dev/null) || exit 0
+case "$uuid" in
+'' | *[!0-9A-Fa-f-]*) exit 0 ;;
+esac
+
+cat <<GRUBCFG
+if [ "\${grub_platform}" = "efi" ]; then
+  insmod part_gpt
+  insmod fat
+  if search --no-floppy --fs-uuid --set=calaos_esp $uuid; then
+    if [ -f "(\${calaos_esp})/calaos/grubenv" ]; then
+      load_env --file "(\${calaos_esp})/calaos/grubenv" calaos_oneshot
+      if [ -n "\${calaos_oneshot}" ]; then
+        set calaos_target="\${calaos_oneshot}"
+        set calaos_oneshot=
+        if save_env --file "(\${calaos_esp})/calaos/grubenv" calaos_oneshot; then
+          set default="\${calaos_target}"
+        fi
+      fi
+    fi
+  fi
+fi
+GRUBCFG
+exit 0
