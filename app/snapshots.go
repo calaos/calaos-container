@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,8 +48,13 @@ var (
 	espMountPath  = "/efi"
 	espEnvPath    = "/efi/calaos/grubenv"
 	snapshotsRoot = "/.snapshots"
-	snapAfterFunc = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
-	snapLocation  = time.Local
+	// 80snapper (a conffile of the snapper package) sources snapperDefaultPath
+	// and snapshots only configs listed in its SNAPPER_CONFIGS.
+	snapperRootConfigPath = "/etc/snapper/configs/root"
+	aptSnapperHookPath    = "/etc/apt/apt.conf.d/80snapper"
+	snapperDefaultPath    = "/etc/default/snapper"
+	snapAfterFunc         = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	snapLocation          = time.Local
 )
 
 // Same pattern as calaos_snapshot_number_from_subvol (scripts/lib).
@@ -67,8 +73,48 @@ type snapshotInfo struct {
 }
 
 type snapshotList struct {
-	Booted    *snapshotInfo  `json:"booted"`
-	Snapshots []snapshotInfo `json:"snapshots"`
+	Booted       *snapshotInfo  `json:"booted"`
+	Snapshots    []snapshotInfo `json:"snapshots"`
+	AptSnapshots bool           `json:"apt_snapshots"`
+}
+
+// shellKeyValue returns the last KEY="value" (or KEY=value) assignment of a
+// shell-style settings file.
+func shellKeyValue(path, key string) (string, bool) {
+	data, err := os.ReadFile(path) //nolint:gosec // fixed system paths
+	if err != nil {
+		return "", false
+	}
+	val, found := "", false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, key+"="); ok {
+			val, found = strings.Trim(v, `"'`), true
+		}
+	}
+	return val, found
+}
+
+// aptSnapshotsEnabled mirrors what makes 80snapper act: the root config and
+// the hook exist, root is in SNAPPER_CONFIGS, and DISABLE_APT_SNAPSHOT is not
+// "yes" (read from both files: 80snapper sources the default file, the config
+// may carry it too).
+func aptSnapshotsEnabled() bool {
+	for _, p := range []string{snapperRootConfigPath, aptSnapperHookPath} {
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+			return false
+		}
+	}
+	list, _ := shellKeyValue(snapperDefaultPath, "SNAPPER_CONFIGS")
+	if !slices.Contains(strings.Fields(list), "root") {
+		return false
+	}
+	for _, p := range []string{snapperDefaultPath, snapperRootConfigPath} {
+		if v, ok := shellKeyValue(p, "DISABLE_APT_SNAPSHOT"); ok && v == "yes" {
+			return false
+		}
+	}
+	return true
 }
 
 type rescueStatus struct {
@@ -413,6 +459,7 @@ func (a *AppServer) v2SystemSnapshots(c *fiber.Ctx) error {
 	if err != nil {
 		return errRescueUnavailable(err)
 	}
+	list.AptSnapshots = aptSnapshotsEnabled()
 	return sendOK(c, fiber.StatusOK, list)
 }
 

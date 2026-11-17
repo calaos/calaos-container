@@ -71,12 +71,84 @@ refresh_grub_cfg() {
     fi
 }
 
+# Boxes installed before calaos_install created the snapper "root" config get
+# no pre/post apt snapshot (80snapper does nothing without it), so the
+# snapshot rescue is of no use to them. The config is written from snapper's
+# template, as create-config would, but without it: create-config refuses to
+# run when /.snapshots already exists, and removing that subvolume is not
+# something an upgrade may do. A config already there is never touched; any
+# failure is logged and ignored. Under a chrootless DPKG_ROOT findmnt still
+# reads the build host: only the /.snapshots guard keeps an image untouched.
+ensure_snapper_root_config() {
+    local root="${DPKG_ROOT:-}"
+    local cfg="$root/etc/snapper/configs/root"
+    local tpl="$root/usr/share/snapper/config-templates/default"
+    local tmp
+    [ -e "$cfg" ] || [ -L "$cfg" ] && return 0
+    [ "$(findmnt -n -o FSTYPE --target "${root:-/}" 2>/dev/null)" = btrfs ] || return 0
+    [ -d "$root/.snapshots" ] || return 0
+    [ -f "$tpl" ] || tpl="$root/etc/snapper/config-templates/default"
+    if [ ! -f "$tpl" ]; then
+        echo "calaos-container: $tpl missing, snapper root config not created." >&2
+        return 0
+    fi
+    tmp=$(mktemp "$cfg.XXXXXX" 2>/dev/null) || {
+        echo "calaos-container: cannot create the snapper root config." >&2
+        return 0
+    }
+    # Same values as init_snapper / calaos_install.
+    if ! { cp "$tpl" "$tmp" &&
+        set_snapper_key "$tmp" SUBVOLUME / &&
+        set_snapper_key "$tmp" FSTYPE btrfs &&
+        set_snapper_key "$tmp" NUMBER_LIMIT 10 &&
+        set_snapper_key "$tmp" NUMBER_MIN_AGE 5400 &&
+        set_snapper_key "$tmp" TIMELINE_LIMIT_DAILY 14 &&
+        set_snapper_key "$tmp" TIMELINE_LIMIT_WEEKLY 4 &&
+        set_snapper_key "$tmp" TIMELINE_LIMIT_MONTHLY 6 &&
+        set_snapper_key "$tmp" TIMELINE_LIMIT_YEARLY 2 &&
+        chmod 640 "$tmp" &&
+        ln "$tmp" "$cfg"; }; then
+        echo "calaos-container: snapper root config not created." >&2
+        rm -f "$tmp"
+        return 0
+    fi
+    # ln fails on an existing target: a concurrent config is not replaced.
+    rm -f "$tmp"
+    register_snapper_root "$root/etc/default/snapper"
+    echo "calaos-container: created the snapper root config." >&2
+}
+
+# 80snapper runs "snapper create", and snapperd only knows the configs listed
+# in SNAPPER_CONFIGS: without "root" there, apt takes no snapshot.
+register_snapper_root() {
+    local sys=$1
+    if [ ! -f "$sys" ] || ! grep -q '^SNAPPER_CONFIGS="' "$sys"; then
+        echo "calaos-container: cannot add root to SNAPPER_CONFIGS in $sys;" \
+            "apt snapshots stay off until it is added." >&2
+        return 0
+    fi
+    grep -q '^SNAPPER_CONFIGS=".*\broot\b' "$sys" && return 0
+    sed -i 's/^SNAPPER_CONFIGS="\(.*\)"/SNAPPER_CONFIGS="\1 root"/; s/^SNAPPER_CONFIGS=" /SNAPPER_CONFIGS="/' "$sys" ||
+        echo "calaos-container: cannot add root to SNAPPER_CONFIGS in $sys." >&2
+    return 0
+}
+
+set_snapper_key() {
+    local f=$1 k=$2 v=$3
+    if grep -q "^$k=" "$f"; then
+        sed -i "s|^$k=.*|$k=\"$v\"|" "$f"
+    else
+        printf '%s="%s"\n' "$k" "$v" >>"$f"
+    fi
+}
+
 # Must run before the debhelper start below, which consults policy-rc.d.
 case "$1" in
 configure)
     remove_docker_policy_rc || true
     remove_docker_apt_speedup || true
     refresh_grub_cfg || true
+    ensure_snapper_root_config || true
     ;;
 esac
 
