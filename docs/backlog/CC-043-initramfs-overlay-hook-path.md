@@ -23,13 +23,13 @@ initramfs-tools only looks one level deep and `set_initlist` skips directories, 
 
 - [x] Install to the directories: `usr/share/initramfs-tools/hooks/` and `usr/share/initramfs-tools/scripts/local-bottom/`.
 - [x] Directory → file swap on upgrade: dpkg replaces the old directories by the files without a preinst (checked with real dpkg, upgrade from 1.9.1).
-- [x] Rewrite the local-bottom script in POSIX sh for klibc `sh`: fixed directories under `/run/calaos-overlay`, tmpfs bounded to 25% of RAM, overlay source `rootfs`, no-op unless the root is a read-only btrfs subvolume, rollback and exit 0 on any failure.
+- [x] Rewrite the local-bottom script in POSIX sh for klibc `sh`: fixed directories under `/run/calaos-overlay`, tmpfs bounded to 25% of RAM, overlay source `rootfs`, no-op unless the root is a read-only btrfs subvolume, root moved only after checking that `overlay` is registered and the tmpfs is ready, rollback and exit 0 on any failure.
 - [x] Hook ships `overlay` and `btrfs`, never fails.
 - [x] initramfs regeneration through the `update-initramfs` trigger added by `dh_installinitramfs` (no postinst).
 - [x] shellcheck on `initramfs/` in CI, stubbed shell test `scripts/tests/grub_btrfs_overlay_test.sh`.
 
 ## Acceptance criteria
 
-- [x] Upgrade from the published 1.9.1 deb in a `debian:bookworm` container: state `ii`, every file of the new deb present, `dpkg --verify` clean.
+- [x] Upgrade from a 1.9.1 deb (both paths are directories there) in a `debian:bookworm` container: state `ii`, every file of the new deb present, `dpkg --verify` clean.
 - [x] `lsinitramfs` of the regenerated initramfs contains `scripts/local-bottom/grub-btrfs-overlay`, its `ORDER` entry, `overlay.ko` and `usr/bin/btrfs`.
 - [ ] Boot of a grub-btrfs snapshot entry in a VM: `/` is `overlay` from `rootfs`, the system is writable, a normal boot is unchanged.

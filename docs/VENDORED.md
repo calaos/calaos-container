@@ -83,9 +83,10 @@ This document lists all third-party code vendored in the calaos-container reposi
 - **License:** GPLv2+ (aligns with calaos-container license and parent grub-btrfs GPLv3)
 - **Version:** N/A (custom code)
 - **Modification Status:** N/A
-- **Lines:** 73
+- **Lines:** 94
 - **File Encoding:** Text (POSIX sh, runs under the klibc `sh` of the Debian initramfs, no busybox)
-- **Purpose:** When `btrfs property get -ts $rootmnt ro` answers exactly `ro=true` (grub-btrfs snapshot entry), moves the root to `/run/calaos-overlay/lower`, mounts a tmpfs (25% of RAM) on `/run/calaos-overlay/ram` for upper/work, and mounts an overlay with source `rootfs` on `$rootmnt`. Writes are lost at reboot. Any other answer is a no-op, and any failed step undoes the previous ones and leaves the read-only root in place; the script always exits 0.
+- **Purpose:** When `btrfs property get -ts $rootmnt ro` answers exactly `ro=true` (grub-btrfs snapshot entry), moves the root to `/run/calaos-overlay/lower`, mounts a tmpfs (25% of RAM) on `/run/calaos-overlay/ram` for upper/work, and mounts an overlay with source `rootfs` on `$rootmnt`. Writes are lost at reboot. Any other answer is a no-op. The script always exits 0.
+- **Failure handling:** The root is moved only once `overlay` is listed in `/proc/filesystems` (after `modprobe overlay`) and the tmpfs, `upper` and `work` are in place; a failure up to there leaves the read-only root untouched. If the overlay mount still fails, the root is moved back and the tmpfs unmounted. The one path left that empties `$rootmnt`, and makes init stop on "No init found", is the overlay mount failing despite these checks and the move back failing too.
 - **Install:** `debian/calaos-container.install` installs both files into the initramfs-tools directories; the `update-initramfs` trigger added by `dh_installinitramfs` regenerates the initramfs. Packages up to 1.9.x installed them as directories and they never ran; dpkg replaces those directories on upgrade.
 - **Test:** `scripts/tests/grub_btrfs_overlay_test.sh` (stubbed commands; `TEST_SH=/usr/lib/klibc/bin/sh` runs it under klibc).
 
