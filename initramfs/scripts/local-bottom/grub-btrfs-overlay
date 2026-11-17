@@ -1,32 +1,73 @@
-#!/bin/sh -e
-PREREQ=
+#!/bin/sh
+#
+# Booting a grub-btrfs snapshot entry mounts a read-only btrfs subvolume as
+# the root. Put a RAM-backed overlay on top of it so the system can boot and
+# write, without touching the snapshot. The "rootfs" source is what the kiosk
+# and calaos_rollback look for to detect a rescue boot.
+#
+# Runs under the klibc sh of the initramfs (no busybox): no ERR trap, no
+# mktemp, no set -e. Any doubt or failure leaves the root as it was.
+
+PREREQ=""
 prereqs() {
-	echo "$PREREQ"
+    echo "$PREREQ"
 }
-case $1 in
-	prereqs)
-		prereqs
-		exit 0
-		;;
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
 esac
 
-. /scripts/functions
-on_err() {
-	log_failure_msg 'error setting up overlay'
+ovl_dir=/run/calaos-overlay
+lower_dir=$ovl_dir/lower
+ram_dir=$ovl_dir/ram
+# The upper layer lives in RAM: past this, writes fail instead of the OOM killer.
+ram_size=25%
+
+msg() {
+    if [ -w /dev/kmsg ]; then
+        echo "grub-btrfs-overlay: $*" >/dev/kmsg
+    else
+        echo "grub-btrfs-overlay: $*" >&2
+    fi
 }
-trap on_err ERR
-if [ -x /usr/bin/btrfs -a -x /usr/bin/findmnt ] &&
-		 [ "$(findmnt -no FSTYPE -M "$rootmnt")" = btrfs ] &&
-		 [ "$(btrfs property get $rootmnt ro)" != ro=false ]
-then
-	log_begin_msg 'remount read-only subvolume as read-only layer in non-persistent, writable overlay'
-	trap log_end_msg EXIT
-	lower_dir="$(mktemp -dp /)"
-	ram_dir="$(mktemp -dp /)"
-	upper_dir="$ram_dir"/upper
-	work_dir="$ram_dir"/work
-	mount --move "$rootmnt" "$lower_dir"
-	mount -t tmpfs cowspace "$ram_dir"
-	mkdir -p "$upper_dir" "$work_dir"
-	mount -t overlay -o lowerdir="$lower_dir",upperdir="$upper_dir",workdir="$work_dir" rootfs "$rootmnt"
+
+[ -n "${rootmnt:-}" ] && [ -d "$rootmnt" ] || exit 0
+command -v btrfs >/dev/null 2>&1 || exit 0
+# Anything but an explicit "ro=true" (rw subvolume, not btrfs, error) is a normal boot.
+ro=$(btrfs property get -ts "$rootmnt" ro 2>/dev/null) || exit 0
+[ "$ro" = "ro=true" ] || exit 0
+
+# Built in, or loaded on demand by the overlay mount below.
+modprobe overlay >/dev/null 2>&1
+
+if ! mkdir -p "$lower_dir" "$ram_dir"; then
+    msg "cannot create $ovl_dir, read-only root left as is"
+    exit 0
 fi
+if ! mount -t tmpfs -o "mode=0755,size=$ram_size" cowspace "$ram_dir"; then
+    msg "cannot mount the tmpfs, read-only root left as is"
+    exit 0
+fi
+if ! mkdir -m 0755 "$ram_dir/upper" "$ram_dir/work"; then
+    msg "cannot create the upper layer, read-only root left as is"
+    umount "$ram_dir"
+    exit 0
+fi
+if ! mount -o move "$rootmnt" "$lower_dir"; then
+    msg "cannot move the root, read-only root left as is"
+    umount "$ram_dir"
+    exit 0
+fi
+if ! mount -t overlay -o "lowerdir=$lower_dir,upperdir=$ram_dir/upper,workdir=$ram_dir/work" rootfs "$rootmnt"; then
+    if mount -o move "$lower_dir" "$rootmnt"; then
+        msg "overlay mount failed, read-only root left as is"
+        umount "$ram_dir"
+    else
+        msg "overlay mount failed and the root could not be moved back"
+    fi
+    exit 0
+fi
+msg "read-only snapshot root, writes go to RAM and are lost at reboot"
+exit 0

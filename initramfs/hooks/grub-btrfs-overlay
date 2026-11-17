@@ -1,15 +1,32 @@
-#!/bin/sh -e
-PREREQ=
+#!/bin/sh
+#
+# Ships what scripts/local-bottom/grub-btrfs-overlay needs in the initrd.
+# Never fails: a failing hook aborts update-initramfs and leaves
+# initramfs-tools half-configured in dpkg.
+
+PREREQ=""
 prereqs() {
-	echo "$PREREQ"
+    echo "$PREREQ"
 }
 case "$1" in
-	prereqs)
-		prereqs
-		exit 0
-		;;
+    prereqs)
+        prereqs
+        exit 0
+        ;;
 esac
 
+# shellcheck source=/dev/null
 . /usr/share/initramfs-tools/hook-functions
-manual_add_modules overlay
-copy_exec /usr/bin/findmnt /usr/bin
+
+manual_add_modules overlay || true
+
+# mount, umount, mkdir come from klibc and modprobe from kmod; btrfs-progs'
+# own hook normally copies btrfs too.
+btrfs_bin=$(command -v btrfs 2>/dev/null) || btrfs_bin=/usr/bin/btrfs
+if [ -x "$btrfs_bin" ]; then
+    copy_exec "$btrfs_bin" /usr/bin || true
+else
+    echo "grub-btrfs-overlay: btrfs not found, snapshot boots will stay read-only" >&2
+fi
+
+exit 0
