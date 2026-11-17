@@ -75,15 +75,29 @@ func (a *AppServer) apiEvents(c *websocket.Conn) {
 	// Reader goroutine: required to process control frames (pong/close) and to
 	// detect client disconnection. It never returns application messages to us.
 	done := make(chan struct{})
+	_ = c.SetReadDeadline(time.Now().Add(wsPongWait))
+	c.SetPongHandler(func(string) error {
+		return c.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
 	go func() {
 		defer close(done)
-		_ = c.SetReadDeadline(time.Now().Add(wsPongWait))
-		c.SetPongHandler(func(string) error {
-			return c.SetReadDeadline(time.Now().Add(wsPongWait))
-		})
 		for {
 			if _, _, err := c.ReadMessage(); err != nil {
 				return
+			}
+		}
+	}()
+	// The websocket library recycles the conn once we return: the reader must
+	// be gone by then. Close() does not interrupt a read on a hijacked fasthttp
+	// conn, an expired read deadline does; repeated because a pong being
+	// handled may push the deadline back.
+	defer func() {
+		for {
+			_ = c.SetReadDeadline(time.Now())
+			select {
+			case <-done:
+				return
+			case <-time.After(50 * time.Millisecond):
 			}
 		}
 	}()
