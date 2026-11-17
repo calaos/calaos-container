@@ -375,3 +375,29 @@ func TestRunCommandContextCancellation(t *testing.T) {
 		t.Errorf("cancelled command took %s to return", elapsed)
 	}
 }
+
+// The whole process group dies at the deadline: a script's children must not
+// outlive the call that reported the command as failed.
+func TestRunCommandContextKillsChildren(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	if _, err := RunCommandContext(ctx, "/bin/sh", "-c", "sleep 60 & echo $! > "+pidFile+"; wait"); err == nil {
+		t.Fatal("expected an error when the context expires, got nil")
+	}
+	pid := strings.TrimSpace(readTestFile(t, pidFile))
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		// A killed orphan may linger as a zombie until its new parent reaps it.
+		stat, err := os.ReadFile("/proc/" + pid + "/stat") //nolint:gosec // pid read from the test's own file
+		if err != nil || strings.Contains(string(stat), ") Z ") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child %s survived the cancellation", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

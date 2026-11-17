@@ -427,7 +427,7 @@ func (a *AppServer) v2SystemFsStatus(c *fiber.Ctx) error {
 // upgrade can never start between them.
 func (a *AppServer) v2SystemRollbackSnapshot(c *fiber.Ctx) error {
 	err := rebootGuard(func() error {
-		if _, err := queryCommand("calaos_rollback"); err != nil {
+		if _, err := rollbackCommand(); err != nil {
 			return err
 		}
 		return reboot()

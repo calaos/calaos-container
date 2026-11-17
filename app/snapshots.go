@@ -138,6 +138,17 @@ func queryCommand(command string, args ...string) (string, error) {
 	return runCommandCtx(ctx, command, args...)
 }
 
+// rollbackTimeout bounds calaos_rollback: two btrfs commits and a set-default
+// on a loaded SD card can take far longer than a read. Killed too early, the
+// API would report a failure on a rollback that is still half done.
+var rollbackTimeout = 5 * time.Minute
+
+func rollbackCommand() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	return runCommandCtx(ctx, "calaos_rollback")
+}
+
 // readRescueStatus applies the kiosk rule: the overlay the initramfs hook
 // mounts is named rootfs, and the snapshot comes from rootflags.
 func readRescueStatus() (rescueStatus, error) {
@@ -535,15 +546,22 @@ func (a *AppServer) v2SystemSnapshotBoot(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, nil)
 }
 
+// A failed arm may still have written the variable (a command killed by its
+// timeout), so it is disarmed best effort, bounded like any other command.
 func armOneShot(path string, esp bool) error {
-	if !esp {
-		_, err := queryCommand("grub-reboot", path)
-		return err
+	var err error
+	switch {
+	case !esp:
+		_, err = queryCommand("grub-reboot", path)
+	default:
+		if err = os.MkdirAll(filepath.Dir(espEnvPath), 0o750); err != nil {
+			return err
+		}
+		_, err = queryCommand("grub-editenv", espEnvPath, "set", "calaos_oneshot="+path)
 	}
-	if err := os.MkdirAll(filepath.Dir(espEnvPath), 0o750); err != nil {
-		return err
+	if err != nil {
+		disarmOneShot(esp)
 	}
-	_, err := queryCommand("grub-editenv", espEnvPath, "set", "calaos_oneshot="+path)
 	return err
 }
 
@@ -606,7 +624,7 @@ func (a *AppServer) v2SystemSnapshotRollback(c *fiber.Ctx) error {
 	auditField(c, "snapshot", strconv.Itoa(*st.Snapshot))
 
 	err = rebootGuard(func() error {
-		if _, err := queryCommand("calaos_rollback"); err != nil {
+		if _, err := rollbackCommand(); err != nil {
 			return err
 		}
 		scheduleReboot(nil)

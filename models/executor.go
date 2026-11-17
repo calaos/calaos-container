@@ -145,6 +145,14 @@ func (OSExecutor) Run(ctx context.Context, name string, args ...string) (string,
 	// reaches this point.
 	cmd := exec.CommandContext(ctx, name, args...)
 
+	// Own process group, killed whole on cancellation: killing only the
+	// script would leave its children (arch-chroot, snapper) running as
+	// orphans after the caller was told the command failed.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -524,6 +524,20 @@ func TestSnapshotBootSuccess(t *testing.T) {
 	}
 }
 
+// A grub-reboot killed by its timeout may have written next_entry already.
+func TestSnapshotBootArmFailureDisarms(t *testing.T) {
+	s := normalBackend(map[string]stubResult{"grub-reboot " + snap5Path: {err: errors.New("killed")}})
+	e := newSnapEnv(t, s)
+	unset := "grub-editenv " + grubEnvPath + " unset next_entry"
+	s.commands[unset] = stubResult{}
+	if status, _ := snapDo(t, bootCase(`{"id":5}`)); status != http.StatusInternalServerError {
+		t.Fatalf("got %d", status)
+	}
+	if last := e.ran[len(e.ran)-1]; last != unset {
+		t.Fatalf("ran %v", e.ran)
+	}
+}
+
 func TestSnapshotBootGrubRebootFails(t *testing.T) {
 	e := newSnapEnv(t, normalBackend(map[string]stubResult{"grub-reboot " + snap5Path: {err: errors.New("grubenv")}}))
 	status, r := snapDo(t, bootCase(`{"id":5}`))
@@ -953,19 +967,21 @@ func TestSnapshotCommandsAreBounded(t *testing.T) {
 		name, hang string
 		backend    func(extra map[string]stubResult) *stubBackend
 		do         func(t *testing.T) int
+		want       int
+		limit      *time.Duration
 	}{
 		{"findmnt", "findmnt", normalBackend, func(t *testing.T) int {
 			status, _ := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
 			return status
-		}},
+		}, 500, &queryTimeout},
 		{"snapper", "snapper", normalBackend, func(t *testing.T) int {
 			status, _ := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
 			return status
-		}},
+		}, 503, &queryTimeout},
 		{"grub-reboot", "grub-reboot", normalBackend, func(t *testing.T) int {
 			status, _ := snapDo(t, bootCase(`{"id":5}`))
 			return status
-		}},
+		}, 500, &queryTimeout},
 		{"grub-editenv", "grub-editenv", normalBackend, func(t *testing.T) int {
 			grubEnvPath = filepath.Join(t.TempDir(), "grubenv")
 			if err := os.WriteFile(grubEnvPath, []byte("next_entry=x\n"), 0o600); err != nil {
@@ -973,20 +989,20 @@ func TestSnapshotCommandsAreBounded(t *testing.T) {
 			}
 			ClearBootOneShot()
 			return 0
-		}},
+		}, 0, &queryTimeout},
 		{"calaos_rollback", "calaos_rollback", rescueBackend, func(t *testing.T) int {
 			if err := os.WriteFile(procCmdlinePath, []byte(cmdlineSnap5), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			status, _ := snapDo(t, rollbackCase())
 			return status
-		}},
+		}, 500, &rollbackTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			prev := queryTimeout
-			queryTimeout = 20 * time.Millisecond
-			t.Cleanup(func() { queryTimeout = prev })
+			prev := *tc.limit
+			*tc.limit = 20 * time.Millisecond
+			t.Cleanup(func() { *tc.limit = prev })
 			newSnapEnv(t, tc.backend(map[string]stubResult{
 				"grub-reboot " + snap5Path: {}, "calaos_rollback": {},
 			}))
@@ -998,6 +1014,9 @@ func TestSnapshotCommandsAreBounded(t *testing.T) {
 				}
 				hung = true
 				_, bounded = ctx.Deadline()
+				if !bounded {
+					return "", errors.New("no deadline")
+				}
 				<-ctx.Done()
 				return "", ctx.Err()
 			}
@@ -1005,8 +1024,8 @@ func TestSnapshotCommandsAreBounded(t *testing.T) {
 			if !hung || !bounded {
 				t.Fatalf("%s: reached %v, deadline %v", tc.hang, hung, bounded)
 			}
-			if status == 200 {
-				t.Fatalf("hung %s answered 200", tc.hang)
+			if status != tc.want {
+				t.Fatalf("hung %s answered %d, want %d", tc.hang, status, tc.want)
 			}
 		})
 	}

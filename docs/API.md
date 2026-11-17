@@ -842,8 +842,8 @@ one, or is `null`. `apt_snapshots` is `true` when the conditions for apt's pre/p
 met: `/etc/snapper/configs/root` and `/etc/apt/apt.conf.d/80snapper` are present, `root` is in
 `SNAPPER_CONFIGS` of `/etc/default/snapper`, and `DISABLE_APT_SNAPSHOT` is not `"yes"` in
 `/etc/default/snapper` (the only file `80snapper` reads). It does not prove a snapshot was taken.
-The package postinst creates the `root` config on a btrfs box that lacks it (same settings as `calaos_install`) and adds `root` to `SNAPPER_CONFIGS`;
-an existing config is never modified. Snapper unavailable (not installed, no `root` config,
+The package postinst creates the `root` config on a btrfs box that lacks it (same settings as
+`calaos_install`) and adds `root` to `SNAPPER_CONFIGS`; an existing config is never modified. Snapper unavailable (not installed, no `root` config,
 unreadable output): `503 rescue_unavailable`.
 
 ### `GET /api/v2/system/rescue`

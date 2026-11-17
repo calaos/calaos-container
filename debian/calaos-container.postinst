@@ -83,7 +83,8 @@ refresh_grub_cfg() {
 ensure_snapper_root_config() {
     local root="${DPKG_ROOT:-}"
     local cfg="$root/etc/snapper/configs/root"
-    local tpl="$root/usr/share/snapper/config-templates/default"
+    local tpl_usr="$root/usr/share/snapper/config-templates/default"
+    local tpl=$tpl_usr
     local tmp
     [ -e "$cfg" ] || [ -L "$cfg" ] && return 0
     [ "$(findmnt -n -o FSTYPE --target "${root:-/}" 2>/dev/null)" = btrfs ] || return 0
@@ -91,7 +92,7 @@ ensure_snapper_root_config() {
     local tpl_etc="$root/etc/snapper/config-templates/default"
     [ -f "$tpl" ] || tpl="$tpl_etc"
     if [ ! -f "$tpl" ]; then
-        echo "calaos-container: no snapper template ($root/usr/share/snapper/config-templates/default," \
+        echo "calaos-container: no snapper template ($tpl_usr," \
             "$tpl_etc), snapper root config not created." >&2
         return 0
     fi
