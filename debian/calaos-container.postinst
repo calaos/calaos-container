@@ -77,15 +77,17 @@ refresh_grub_cfg() {
 # template, as create-config would, but without it: create-config refuses to
 # run when /.snapshots already exists, and removing that subvolume is not
 # something an upgrade may do. A config already there is never touched; any
-# failure is logged and ignored.
+# failure is logged and ignored. Under a chrootless DPKG_ROOT findmnt still
+# reads the build host: only the /.snapshots guard keeps an image untouched.
 ensure_snapper_root_config() {
     local root="${DPKG_ROOT:-}"
     local cfg="$root/etc/snapper/configs/root"
-    local tpl="$root/etc/snapper/config-templates/default"
+    local tpl="$root/usr/share/snapper/config-templates/default"
     local tmp
     [ -e "$cfg" ] || [ -L "$cfg" ] && return 0
     [ "$(findmnt -n -o FSTYPE --target "${root:-/}" 2>/dev/null)" = btrfs ] || return 0
     [ -d "$root/.snapshots" ] || return 0
+    [ -f "$tpl" ] || tpl="$root/etc/snapper/config-templates/default"
     if [ ! -f "$tpl" ]; then
         echo "calaos-container: $tpl missing, snapper root config not created." >&2
         return 0
@@ -112,11 +114,23 @@ ensure_snapper_root_config() {
     fi
     # ln fails on an existing target: a concurrent config is not replaced.
     rm -f "$tmp"
-    local sys="$root/etc/default/snapper"
-    if [ -f "$sys" ] && ! grep -q '^SNAPPER_CONFIGS=.*\broot\b' "$sys"; then
-        sed -i 's/^SNAPPER_CONFIGS="\(.*\)"/SNAPPER_CONFIGS="\1 root"/; s/^SNAPPER_CONFIGS=" /SNAPPER_CONFIGS="/' "$sys" || true
-    fi
+    register_snapper_root "$root/etc/default/snapper"
     echo "calaos-container: created the snapper root config." >&2
+}
+
+# 80snapper runs "snapper create", and snapperd only knows the configs listed
+# in SNAPPER_CONFIGS: without "root" there, apt takes no snapshot.
+register_snapper_root() {
+    local sys=$1
+    if [ ! -f "$sys" ] || ! grep -q '^SNAPPER_CONFIGS="' "$sys"; then
+        echo "calaos-container: cannot add root to SNAPPER_CONFIGS in $sys;" \
+            "apt snapshots stay off until it is added." >&2
+        return 0
+    fi
+    grep -q '^SNAPPER_CONFIGS=".*\broot\b' "$sys" && return 0
+    sed -i 's/^SNAPPER_CONFIGS="\(.*\)"/SNAPPER_CONFIGS="\1 root"/; s/^SNAPPER_CONFIGS=" /SNAPPER_CONFIGS="/' "$sys" ||
+        echo "calaos-container: cannot add root to SNAPPER_CONFIGS in $sys." >&2
+    return 0
 }
 
 set_snapper_key() {

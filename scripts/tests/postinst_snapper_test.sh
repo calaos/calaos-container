@@ -30,9 +30,9 @@ cfg=$sroot/etc/snapper/configs/root
 
 reset() {
     rm -rf "$sroot"
-    mkdir -p "$sroot/etc/snapper/configs" "$sroot/etc/snapper/config-templates" "$sroot/etc/default" "$sroot/.snapshots"
+    mkdir -p "$sroot/etc/snapper/configs" "$sroot/usr/share/snapper/config-templates" "$sroot/etc/default" "$sroot/.snapshots"
     printf 'SUBVOLUME="/"\nFSTYPE="btrfs"\nNUMBER_LIMIT="50"\nTIMELINE_CREATE="yes"\nTIMELINE_LIMIT_HOURLY="10"\n' \
-        >"$sroot/etc/snapper/config-templates/default"
+        >"$sroot/usr/share/snapper/config-templates/default"
     printf 'SNAPPER_CONFIGS=""\n' >"$sroot/etc/default/snapper"
 }
 
@@ -74,10 +74,40 @@ run || fail "no .snapshots: rc=$?"
 [ ! -e "$cfg" ] || fail "config created without /.snapshots"
 
 reset
-rm "$sroot/etc/snapper/config-templates/default"
+rm "$sroot/usr/share/snapper/config-templates/default"
 run || fail "no template: rc=$?"
 [ ! -e "$cfg" ] || fail "config created without template"
 grep -q "template\|missing" "$root/err" || fail "no message without template"
+
+reset
+mkdir -p "$sroot/etc/snapper/config-templates"
+mv "$sroot/usr/share/snapper/config-templates/default" "$sroot/etc/snapper/config-templates/default"
+run || fail "etc template: rc=$?"
+[ -f "$cfg" ] || fail "config not created from the /etc template"
+
+reset
+printf 'SNAPPER_CONFIGS="home"\n' >"$sroot/etc/default/snapper"
+run || fail "home: rc=$?"
+grep -qx 'SNAPPER_CONFIGS="home root"' "$sroot/etc/default/snapper" || fail "home: $(cat "$sroot/etc/default/snapper")"
+rm "$cfg"
+run || fail "home second pass: rc=$?"
+grep -qx 'SNAPPER_CONFIGS="home root"' "$sroot/etc/default/snapper" || fail "home second pass: $(cat "$sroot/etc/default/snapper")"
+
+reset
+printf 'SNAPPER_CONFIGS="root"\n' >"$sroot/etc/default/snapper"
+run || fail "root already listed: rc=$?"
+grep -qx 'SNAPPER_CONFIGS="root"' "$sroot/etc/default/snapper" || fail "root duplicated: $(cat "$sroot/etc/default/snapper")"
+
+reset
+rm "$sroot/etc/default/snapper"
+run || fail "no default file: rc=$?"
+[ -f "$cfg" ] || fail "config not created without default file"
+grep -q 'SNAPPER_CONFIGS' "$root/err" || fail "no message without default file"
+
+reset
+printf '# nothing\n' >"$sroot/etc/default/snapper"
+run || fail "no SNAPPER_CONFIGS line: rc=$?"
+grep -q 'SNAPPER_CONFIGS' "$root/err" || fail "no message without SNAPPER_CONFIGS line"
 
 reset
 rm -rf "$sroot/etc/snapper/configs"

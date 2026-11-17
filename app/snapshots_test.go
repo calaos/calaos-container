@@ -135,12 +135,12 @@ func newSnapEnv(t *testing.T, s *stubBackend) *snapEnv {
 		return stubRun(command, args...)
 	}
 
-	prev := []string{procCmdlinePath, grubCfgPath, grubBtrfsCfgPath, grubEnvPath, espMountPath, espEnvPath, snapshotsRoot, snapperRootConfigPath, aptSnapperHookPath}
+	prev := []string{procCmdlinePath, grubCfgPath, grubBtrfsCfgPath, grubEnvPath, espMountPath, espEnvPath, snapshotsRoot, snapperRootConfigPath, aptSnapperHookPath, snapperDefaultPath}
 	prevLoc, prevAfter := snapLocation, snapAfterFunc
 	t.Cleanup(func() {
 		procCmdlinePath, grubCfgPath, grubBtrfsCfgPath = prev[0], prev[1], prev[2]
 		grubEnvPath, espMountPath, espEnvPath, snapshotsRoot = prev[3], prev[4], prev[5], prev[6]
-		snapperRootConfigPath, aptSnapperHookPath = prev[7], prev[8]
+		snapperRootConfigPath, aptSnapperHookPath, snapperDefaultPath = prev[7], prev[8], prev[9]
 		snapLocation, snapAfterFunc = prevLoc, prevAfter
 	})
 	procCmdlinePath = e.write(t, "cmdline", cmdlineNormal)
@@ -152,6 +152,7 @@ func newSnapEnv(t *testing.T, s *stubBackend) *snapEnv {
 	snapshotsRoot = filepath.Join(e.dir, "snapshots")
 	snapperRootConfigPath = e.write(t, "snapper-root", "NUMBER_LIMIT=\"10\"\n")
 	aptSnapperHookPath = e.write(t, "80snapper", "// hook\n")
+	snapperDefaultPath = e.write(t, "default-snapper", "SNAPPER_CONFIGS=\"home root\"\n")
 	for _, id := range []int{3, 5} {
 		e.snapTree(t, id, true, true)
 	}
@@ -269,6 +270,35 @@ func TestSnapshotsAptSnapshots(t *testing.T) {
 		snapperRootConfigPath = filepath.Join(t.TempDir(), "absent")
 		if get(t).AptSnapshots {
 			t.Fatal("apt_snapshots true without the root config")
+		}
+	})
+	for name, c := range map[string]struct{ file, body string }{
+		"root not in SNAPPER_CONFIGS": {"default", "SNAPPER_CONFIGS=\"home\"\n"},
+		"SNAPPER_CONFIGS empty":       {"default", "SNAPPER_CONFIGS=\"\"\n"},
+		"default file missing":        {"default", ""},
+		"disabled in default file":    {"default", "SNAPPER_CONFIGS=\"root\"\nDISABLE_APT_SNAPSHOT=\"yes\"\n"},
+		"disabled in root config":     {"config", "DISABLE_APT_SNAPSHOT=\"yes\"\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newSnapEnv(t, normalBackend(nil))
+			switch {
+			case c.file == "default" && c.body == "":
+				snapperDefaultPath = filepath.Join(t.TempDir(), "absent")
+			case c.file == "default":
+				snapperDefaultPath = e.write(t, "d2", c.body)
+			default:
+				snapperRootConfigPath = e.write(t, "c2", c.body)
+			}
+			if get(t).AptSnapshots {
+				t.Fatal("apt_snapshots true")
+			}
+		})
+	}
+	t.Run("DISABLE_APT_SNAPSHOT no", func(t *testing.T) {
+		e := newSnapEnv(t, normalBackend(nil))
+		snapperDefaultPath = e.write(t, "d2", "SNAPPER_CONFIGS=\"root\"\nDISABLE_APT_SNAPSHOT=\"no\"\n")
+		if !get(t).AptSnapshots {
+			t.Fatal("apt_snapshots false")
 		}
 	})
 	t.Run("json field", func(t *testing.T) {
