@@ -97,6 +97,13 @@ _Integration branch `admin/p7`; it merges to main only together with AP1b and WA
 | AP1a | Approver phones and push codes: enrolment, codes bound to session/action/params, `push_code`, bearer-only push payload, session killed after 5 wrong codes | P1 | M | ADM-CC1 | 🟣 |
 | CO1 | Web console pty, single-use ticket from a verified `console_open` code | P1 | M | AP1a | ⬜ |
 
+## Versions — snapshots and rescue
+_Plan: `features/versions` in calaos-archi. Boot from a snapshot lands in the overlay rescue mode of the initramfs hook._
+
+| ID | Title | Prio | Size | Deps | Status |
+|----|-------|------|------|------|--------|
+| OVL-CC-API | `/api/v2/system/snapshots`, `rescue`, `snapshots/boot` (one-shot via `grub-reboot`), `snapshots/rollback`; `GRUB_DEFAULT=saved` drop-in and exported `default`/`timeout` for the grub-btrfs submenu | P1 | M | OVL-CC-INITRAMFS | 🟣 |
+
 ---
 
 ## Done log

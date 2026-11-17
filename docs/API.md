@@ -109,6 +109,10 @@ ignored.
 | `console_limit` | 409 | a console is opened while 2 are open or opening | `{"max": 2}` |
 | `network_pending` | 409 | a network change is already waiting for its confirmation, or `calaos-container` is restarted while one waits (see Network configuration, Services) | `{"change_id": "<16 hex>", "expires_in": <seconds>}` |
 | `service_unavailable` | 409 | the unit of a service action is not installed or is masked (see Services) | none |
+| `invalid_snapshot` | 400 | `snapshots/boot` with an `id` missing, not an integer, `<= 0` or unknown to snapper | none |
+| `not_bootable` | 409 | `snapshots/boot` on a snapshot without a boot menu entry, or from rescue | none |
+| `not_in_rescue` | 409 | `snapshots/rollback` while the system does not run from a snapshot | none |
+| `rescue_unavailable` | 503 | snapper or the overlay hook is missing (see Snapshots and rescue) | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -146,6 +150,10 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
 | GET | `/api/v2/system/versions` | bearer, session allowed | 200 | `{calaos_os, debian, kernel, container, packages}`; `calaos_os` is the dpkg version of the `calaos` package (`dpkg-query -W -f='${Version}' calaos`) when it is a calendar version (`YYYY.MM`, `YYYY.MM.N`, optionally followed by `~dev.N`), otherwise `""` (package absent, dpkg failure, or any other format such as `1.2.3`); it never falls back to the Debian version, and `calaos` is never listed in `packages`; `packages` is `[{name, version}]` of the installed `calaos-*` debs sorted by name (same source as `update/installed`); `container` is the version of the `calaos-container` deb; an unreadable field is `""`, and when `dpkg-query` fails `packages` is `[]` and `container` is `""` (still 200) |
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
+| GET | `/api/v2/system/snapshots` | bearer, session allowed | 200 | `{"booted", "snapshots": [<Snapshot>]}` (see Snapshots and rescue) |
+| GET | `/api/v2/system/rescue` | bearer, session allowed | 200 | `{"rescue", "snapshot", "overlay"}` |
+| POST | `/api/v2/system/snapshots/boot` | bearer, session allowed | 200 | `null` (boots the snapshot once, then reboots); body `{"id": <int>}` |
+| POST | `/api/v2/system/snapshots/rollback` | bearer, session allowed | 200 | `null` (rolls back to the running snapshot, then reboots); `409 not_in_rescue` outside rescue |
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
 | POST | `/api/v2/system/services/restart` | bearer, session allowed | 200 | `{"id", "state": "restarting"}`; body `{"unit": "<id>"}` |
 | POST | `/api/v2/system/services/start` | bearer, session allowed | 200 | `{"id", "state": "starting"}`; body `{"unit": "<id>"}` |
@@ -647,6 +655,7 @@ The other routes add these fields before the method, and never a value that coul
 | `POST network/apply`, `POST network/trial` | `intf=`, `change_id=`; `code_id=` on `apply` |
 | `POST network/confirm` | `change_id=` |
 | `POST network/revert` | `change_id=`, `intf=`, `reason=revert` |
+| `POST system/snapshots/boot`, `POST system/snapshots/rollback` | `snapshot=<id>`, once the `id` is a positive integer (`boot`) or the system is in rescue (`rollback`) |
 
 A rollback of a pending network change by the timeout or by a daemon restart past the deadline
 writes one more line, in the form of the `console_close` line, with the `client` and the session
@@ -654,7 +663,8 @@ audit id kept in the pending record:
 `<time> client=<client> result=ok session=<audit id> action=network_rollback intf=<intf> change_id=<id> reason=<reason> - "-"`,
 `reason` being `timeout` or `restart`. An explicit `POST network/revert` is its own audit line,
 with `reason=revert`.
-`POST network/trial`, `network/confirm` and `network/revert` are audited with the bearer alone
+`POST network/trial`, `network/confirm`, `network/revert`, `system/snapshots/boot` and
+`system/snapshots/rollback` are audited with the bearer alone
 too (the CLI), as `client=local session=-` unless `X-Calaos-Client-IP` is set.
 
 A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
@@ -801,6 +811,69 @@ no `unit=` (see Audit). `POST /api/v2/system/restart` and the legacy `POST /api/
 guard: they answer `409` during a run, before anything is asked of systemd. Unlike
 `services/restart`, they answer once the job has ended. The guard is released as soon as systemd
 has the job, so that a slow restart holds up no other action.
+
+## Snapshots and rescue
+
+The four routes read snapper (`snapper --no-dbus -c root --jsonout list`) and the grub-btrfs
+menu. They take no push code.
+
+### `GET /api/v2/system/snapshots`
+
+```json
+{"booted": <Snapshot> or null, "snapshots": [<Snapshot>]}
+```
+
+`<Snapshot>` is `{id, date, type, pre_id, description, cleanup, current, default, bootable}`:
+
+| Field | Content |
+|---|---|
+| `id` | snapper number, `> 0` (snapshot 0, the live system, is never listed) |
+| `date` | RFC 3339 in the box's time zone; `""` when snapper's date cannot be read |
+| `type` | `single`, `pre` or `post` |
+| `pre_id` | number of the matching `pre` for a `post`, otherwise `null` |
+| `description`, `cleanup` | as snapper gives them |
+| `current` | the snapshot the system runs from: snapper's `active` in normal mode, the snapshot of `rootflags=` in rescue |
+| `default` | snapper's default subvolume, the one a normal boot uses |
+| `bootable` | the snapshot has an entry in the `Calaos-OS snapshots` submenu of the generated `grub.cfg`; always `false` in rescue |
+
+The list is sorted newest first and holds at most 200 snapshots. `booted` repeats the `current`
+one, or is `null`. Snapper unavailable (not installed, no `root` config, unreadable output):
+`503 rescue_unavailable`.
+
+### `GET /api/v2/system/rescue`
+
+`{"rescue": <bool>, "snapshot": <int> or null, "overlay": <bool>}`. `overlay` is `true` when `/`
+is an `overlay`; `rescue` when it is the overlay the initramfs hook mounts over a snapshot
+(`findmnt` source `rootfs`); `snapshot` is the number of `@/.snapshots/<N>/snapshot` in the
+`rootflags=` of `/proc/cmdline`, `null` otherwise. Changes made in rescue are lost at the next
+reboot.
+
+### `POST /api/v2/system/snapshots/boot`
+
+Body `{"id": <int>}`. Boots the snapshot once: `grub-reboot` with the GRUB path of its first
+kernel entry, then a reboot two seconds after the answer (`null`). Refusals:
+
+| Case | Answer |
+|---|---|
+| body not a JSON object | `400 invalid_request` |
+| `id` missing, not an integer, `<= 0`, or not in the snapper list | `400 invalid_snapshot` |
+| overlay hook not installed, snapper unavailable | `503 rescue_unavailable` |
+| no entry in the snapshot menu, or the box is already in rescue | `409 not_bootable` |
+| an upgrade job runs | `409 upgrade_in_progress` |
+
+`grub-reboot` writes `next_entry` to the grubenv. GRUB cannot clear it from a btrfs `/boot`, so
+the one-shot depends on it being cleared after the snapshot boot. If the deferred reboot fails,
+the daemon clears it itself.
+
+### `POST /api/v2/system/snapshots/rollback`
+
+No body. From rescue only: runs `calaos_rollback` (the snapshot becomes the default subvolume),
+then reboots two seconds after the answer (`null`). Outside rescue, or in an overlay without a
+snapshot in `rootflags=`: `409 not_in_rescue`. During an upgrade job: `409 upgrade_in_progress`.
+The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
+
+Boot and rollback take the upgrade guard and keep it until the reboot, so no job starts in
+between; if the reboot fails, the guard stays held until `calaos-container` restarts.
 
 ## Logs
 

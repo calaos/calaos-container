@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+# grub-reboot into a grub-btrfs snapshot enters its menu through "configfile",
+# which keeps only exported variables. Without these, that menu loses the
+# chosen entry and the zero timeout, and waits for a key on a headless box.
+# A key pressed at the main menu unsets timeout before the export is copied,
+# so manual browsing stays interactive.
+cat <<'GRUBCFG'
+export default
+export timeout
+GRUBCFG
