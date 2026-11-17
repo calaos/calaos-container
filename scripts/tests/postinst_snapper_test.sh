@@ -77,8 +77,10 @@ reset
 rm "$sroot/usr/share/snapper/config-templates/default"
 run || fail "no template: rc=$?"
 [ ! -e "$cfg" ] || fail "config created without template"
-grep -q "usr/share/snapper/config-templates/default" "$root/err" &&
-    grep -q "etc/snapper/config-templates/default" "$root/err" || fail "message does not name both template paths"
+if ! { grep -q "usr/share/snapper/config-templates/default" "$root/err" &&
+    grep -q "etc/snapper/config-templates/default" "$root/err"; }; then
+    fail "message does not name both template paths"
+fi
 
 reset
 mkdir -p "$sroot/etc/snapper/config-templates"
