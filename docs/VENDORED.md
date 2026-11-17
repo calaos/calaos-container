@@ -73,9 +73,9 @@ This document lists all third-party code vendored in the calaos-container reposi
 - **License:** GPLv2+ (aligns with calaos-container license and parent grub-btrfs GPLv3)
 - **Version:** N/A (custom code)
 - **Modification Status:** N/A
-- **Lines:** 15
-- **File Encoding:** Text (shell script hook for initramfs-tools)
-- **Purpose:** Adds the overlay kernel module to initramfs to support writable overlays on read-only Btrfs snapshots.
+- **Lines:** 32
+- **File Encoding:** Text (POSIX sh hook for initramfs-tools)
+- **Purpose:** Adds the `overlay` module and `btrfs` to the initramfs. `mount`, `umount` and `mkdir` come from klibc-utils, `modprobe` from kmod. Always exits 0: a failing hook would abort `update-initramfs` and leave initramfs-tools half-configured.
 
 ### `initramfs/scripts/local-bottom/grub-btrfs-overlay`
 
@@ -83,9 +83,11 @@ This document lists all third-party code vendored in the calaos-container reposi
 - **License:** GPLv2+ (aligns with calaos-container license and parent grub-btrfs GPLv3)
 - **Version:** N/A (custom code)
 - **Modification Status:** N/A
-- **Lines:** 32
-- **File Encoding:** Text (shell script for initramfs-tools local-bottom phase)
-- **Purpose:** At boot time, detects read-only Btrfs subvolumes and remounts them as writable overlays (lower=snapshot, upper=tmpfs, workdir=tmpfs) to allow system modifications during boot without persisting to snapshots.
+- **Lines:** 73
+- **File Encoding:** Text (POSIX sh, runs under the klibc `sh` of the Debian initramfs, no busybox)
+- **Purpose:** When `btrfs property get -ts $rootmnt ro` answers exactly `ro=true` (grub-btrfs snapshot entry), moves the root to `/run/calaos-overlay/lower`, mounts a tmpfs (25% of RAM) on `/run/calaos-overlay/ram` for upper/work, and mounts an overlay with source `rootfs` on `$rootmnt`. Writes are lost at reboot. Any other answer is a no-op, and any failed step undoes the previous ones and leaves the read-only root in place; the script always exits 0.
+- **Install:** `debian/calaos-container.install` installs both files into the initramfs-tools directories; the `update-initramfs` trigger added by `dh_installinitramfs` regenerates the initramfs. Packages up to 1.9.x installed them as directories and they never ran; dpkg replaces those directories on upgrade.
+- **Test:** `scripts/tests/grub_btrfs_overlay_test.sh` (stubbed commands; `TEST_SH=/usr/lib/klibc/bin/sh` runs it under klibc).
 
 ## CI/Linting Exclusions
 
@@ -93,14 +95,15 @@ The following files are excluded from shellcheck linting in `.github/workflows/c
 
 ```bash
 git ls-files \
-  | grep -vE '^(scripts/genfstab|scripts/arch-chroot|grub-btrfs/|initramfs/)' \
+  | grep -vE '^(scripts/genfstab|scripts/arch-chroot|grub-btrfs/)' \
   | ...
 ```
 
 Rationale:
 - **scripts/genfstab, scripts/arch-chroot:** Vendored from upstream with M4 macros expanded; patterns may not conform to calaos-container's shellcheck configuration.
 - **grub-btrfs/:** Third-party project files with their own linting standards.
-- **initramfs/:** Initramfs-tools hooks/scripts have special syntax and behavior requirements specific to the initramfs environment.
+
+`initramfs/` is linted: both files have a `#!/bin/sh` shebang, so shellcheck checks them as POSIX sh.
 
 ## Summary Table
 
@@ -127,6 +130,7 @@ Rationale:
 
 3. **Initramfs extensions**:
    - Custom code; no upstream tracking required.
+   - Must stay POSIX sh runnable by klibc `sh` (no `trap ERR`, no `mktemp`, no `--long` options of util-linux `mount`).
    - Depend on grub-btrfs and Btrfs kernel support; maintain compatibility with target kernel versions.
 
 ## References
