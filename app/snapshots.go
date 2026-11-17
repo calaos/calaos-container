@@ -47,6 +47,10 @@ var (
 	espMountPath  = "/efi"
 	espEnvPath    = "/efi/calaos/grubenv"
 	snapshotsRoot = "/.snapshots"
+	// apt takes its pre/post snapshots only when both exist (80snapper is a
+	// conffile of the snapper package, and does nothing without the config).
+	snapperRootConfigPath = "/etc/snapper/configs/root"
+	aptSnapperHookPath    = "/etc/apt/apt.conf.d/80snapper"
 	snapAfterFunc = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
 	snapLocation  = time.Local
 )
@@ -67,8 +71,18 @@ type snapshotInfo struct {
 }
 
 type snapshotList struct {
-	Booted    *snapshotInfo  `json:"booted"`
-	Snapshots []snapshotInfo `json:"snapshots"`
+	Booted       *snapshotInfo  `json:"booted"`
+	Snapshots    []snapshotInfo `json:"snapshots"`
+	AptSnapshots bool           `json:"apt_snapshots"`
+}
+
+func aptSnapshotsEnabled() bool {
+	for _, p := range []string{snapperRootConfigPath, aptSnapperHookPath} {
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+			return false
+		}
+	}
+	return true
 }
 
 type rescueStatus struct {
@@ -413,6 +427,7 @@ func (a *AppServer) v2SystemSnapshots(c *fiber.Ctx) error {
 	if err != nil {
 		return errRescueUnavailable(err)
 	}
+	list.AptSnapshots = aptSnapshotsEnabled()
 	return sendOK(c, fiber.StatusOK, list)
 }
 

@@ -135,11 +135,12 @@ func newSnapEnv(t *testing.T, s *stubBackend) *snapEnv {
 		return stubRun(command, args...)
 	}
 
-	prev := []string{procCmdlinePath, grubCfgPath, grubBtrfsCfgPath, grubEnvPath, espMountPath, espEnvPath, snapshotsRoot}
+	prev := []string{procCmdlinePath, grubCfgPath, grubBtrfsCfgPath, grubEnvPath, espMountPath, espEnvPath, snapshotsRoot, snapperRootConfigPath, aptSnapperHookPath}
 	prevLoc, prevAfter := snapLocation, snapAfterFunc
 	t.Cleanup(func() {
 		procCmdlinePath, grubCfgPath, grubBtrfsCfgPath = prev[0], prev[1], prev[2]
 		grubEnvPath, espMountPath, espEnvPath, snapshotsRoot = prev[3], prev[4], prev[5], prev[6]
+		snapperRootConfigPath, aptSnapperHookPath = prev[7], prev[8]
 		snapLocation, snapAfterFunc = prevLoc, prevAfter
 	})
 	procCmdlinePath = e.write(t, "cmdline", cmdlineNormal)
@@ -149,6 +150,8 @@ func newSnapEnv(t *testing.T, s *stubBackend) *snapEnv {
 	espMountPath = "/efi"
 	espEnvPath = filepath.Join(e.dir, "esp", "calaos", "grubenv")
 	snapshotsRoot = filepath.Join(e.dir, "snapshots")
+	snapperRootConfigPath = e.write(t, "snapper-root", "NUMBER_LIMIT=\"10\"\n")
+	aptSnapperHookPath = e.write(t, "80snapper", "// hook\n")
 	for _, id := range []int{3, 5} {
 		e.snapTree(t, id, true, true)
 	}
@@ -238,6 +241,43 @@ func TestSnapshotsList(t *testing.T) {
 	if byID[5].Description != "a > b" || byID[3].Cleanup != "number" {
 		t.Errorf("fields %+v %+v", byID[5], byID[3])
 	}
+}
+
+func TestSnapshotsAptSnapshots(t *testing.T) {
+	get := func(t *testing.T) snapshotList {
+		status, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+		if status != http.StatusOK {
+			t.Fatalf("status %d %+v", status, r)
+		}
+		return decodeList(t, r)
+	}
+	t.Run("config and hook", func(t *testing.T) {
+		newSnapEnv(t, normalBackend(nil))
+		if !get(t).AptSnapshots {
+			t.Fatal("apt_snapshots false with config and hook present")
+		}
+	})
+	t.Run("hook missing", func(t *testing.T) {
+		newSnapEnv(t, normalBackend(nil))
+		aptSnapperHookPath = filepath.Join(t.TempDir(), "absent")
+		if get(t).AptSnapshots {
+			t.Fatal("apt_snapshots true without 80snapper")
+		}
+	})
+	t.Run("config missing", func(t *testing.T) {
+		newSnapEnv(t, normalBackend(nil))
+		snapperRootConfigPath = filepath.Join(t.TempDir(), "absent")
+		if get(t).AptSnapshots {
+			t.Fatal("apt_snapshots true without the root config")
+		}
+	})
+	t.Run("json field", func(t *testing.T) {
+		newSnapEnv(t, normalBackend(nil))
+		_, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+		if !strings.Contains(string(r.Data), `"apt_snapshots":true`) {
+			t.Fatalf("data %s", r.Data)
+		}
+	})
 }
 
 func TestSnapshotsListCap(t *testing.T) {

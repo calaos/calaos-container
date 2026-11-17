@@ -821,7 +821,7 @@ menu. They take no push code.
 ### `GET /api/v2/system/snapshots`
 
 ```json
-{"booted": <Snapshot> or null, "snapshots": [<Snapshot>]}
+{"booted": <Snapshot> or null, "snapshots": [<Snapshot>], "apt_snapshots": <bool>}
 ```
 
 `<Snapshot>` is `{id, date, type, pre_id, description, cleanup, current, default, bootable}`:
@@ -838,7 +838,10 @@ menu. They take no push code.
 | `bootable` | the snapshot has an entry in the `Calaos-OS snapshots` submenu of the generated `grub.cfg` and can boot only once (below); always `false` in rescue |
 
 The list is sorted newest first and holds at most 200 snapshots. `booted` repeats the `current`
-one, or is `null`. Snapper unavailable (not installed, no `root` config, unreadable output):
+one, or is `null`. `apt_snapshots` is `true` when apt takes a pre/post snapshot around each
+install: `/etc/snapper/configs/root` and `/etc/apt/apt.conf.d/80snapper` are both present. The
+package postinst creates the `root` config on a btrfs box that lacks it (same settings as
+`calaos_install`); an existing config is never modified. Snapper unavailable (not installed, no `root` config, unreadable output):
 `503 rescue_unavailable`.
 
 ### `GET /api/v2/system/rescue`
