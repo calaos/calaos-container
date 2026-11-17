@@ -137,6 +137,13 @@ func (s *stubBackend) install(t *testing.T) {
 		models.Bus = newStubBus()
 	}
 
+	prevCtx := runCommandCtx
+	// The bounded probes go through the same stub; a test of the bound
+	// replaces runCommandCtx itself.
+	runCommandCtx = func(_ context.Context, command string, args ...string) (string, error) {
+		return runCommand(command, args...)
+	}
+	t.Cleanup(func() { runCommandCtx = prevCtx })
 	runCommand = func(command string, args ...string) (string, error) {
 		key := strings.Join(append([]string{command}, args...), " ")
 		r, ok := s.commands[key]

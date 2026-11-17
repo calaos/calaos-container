@@ -114,7 +114,7 @@ ignored.
 | `snapshot_too_old` | 409 | `snapshots/boot` on a snapshot that cannot boot only once (see Snapshots and rescue) | none |
 | `in_rescue` | 409 | `update/upgrade-all` or `update/upgrade` while the system runs from a snapshot | none |
 | `not_in_rescue` | 409 | `snapshots/rollback` while the system does not run from a snapshot | none |
-| `rescue_unavailable` | 503 | snapper or the overlay hook is missing (see Snapshots and rescue) | none |
+| `rescue_unavailable` | 503 | snapper is unavailable (see Snapshots and rescue) | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -154,8 +154,8 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
 | GET | `/api/v2/system/snapshots` | bearer, session allowed | 200 | `{"booted", "snapshots": [<Snapshot>]}` (see Snapshots and rescue) |
 | GET | `/api/v2/system/rescue` | bearer, session allowed | 200 | `{"rescue", "snapshot", "overlay"}` |
-| POST | `/api/v2/system/snapshots/boot` | bearer, session allowed | 200 | `null` (boots the snapshot once, then reboots); body `{"id": <int>}` |
-| POST | `/api/v2/system/snapshots/rollback` | bearer, session allowed | 200 | `null` (rolls back to the running snapshot, then reboots); `409 not_in_rescue` outside rescue |
+| POST | `/api/v2/system/snapshots/boot` | bearer, session header required | 200 | `null` (boots the snapshot once, then reboots); body `{"id": <int>}` |
+| POST | `/api/v2/system/snapshots/rollback` | bearer, session header required | 200 | `null` (rolls back to the running snapshot, then reboots); `409 not_in_rescue` outside rescue |
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
 | POST | `/api/v2/system/services/restart` | bearer, session allowed | 200 | `{"id", "state": "restarting"}`; body `{"unit": "<id>"}` |
 | POST | `/api/v2/system/services/start` | bearer, session allowed | 200 | `{"id", "state": "starting"}`; body `{"unit": "<id>"}` |
@@ -665,8 +665,7 @@ audit id kept in the pending record:
 `<time> client=<client> result=ok session=<audit id> action=network_rollback intf=<intf> change_id=<id> reason=<reason> - "-"`,
 `reason` being `timeout` or `restart`. An explicit `POST network/revert` is its own audit line,
 with `reason=revert`.
-`POST network/trial`, `network/confirm`, `network/revert`, `system/snapshots/boot` and
-`system/snapshots/rollback` are audited with the bearer alone
+`POST network/trial`, `network/confirm` and `network/revert` are audited with the bearer alone
 too (the CLI), as `client=local session=-` unless `X-Calaos-Client-IP` is set.
 
 A call refused with `bad_bearer` or `bad_session` goes to the daemon log only, at most one line per
@@ -858,8 +857,8 @@ then reboots two seconds after the answer (`null`). Refusals:
 | Case | Answer |
 |---|---|
 | body not a JSON object | `400 invalid_request` |
-| `id` missing, not an integer, `<= 0`, or not in the snapper list | `400 invalid_snapshot` |
-| overlay hook not installed, snapper unavailable | `503 rescue_unavailable` |
+| `id` missing, not an integer, `<= 0`, or not in the snapper list (the list is read before the 200-entry cap) | `400 invalid_snapshot` |
+| snapper unavailable | `503 rescue_unavailable` |
 | no entry in the snapshot menu, or the box is already in rescue | `409 not_bootable` |
 | the snapshot cannot boot only once (see below) | `409 snapshot_too_old` |
 | an upgrade job runs | `409 upgrade_in_progress` |
@@ -883,6 +882,12 @@ in `next_entry` mode, the
 `etc/systemd/system/sysinit.target.wants/calaos-snapshot-oneshot.service` link. A snapshot taken
 before the package shipped them gets `409 snapshot_too_old`: it would boot read-only without its
 overlay, or keep booting itself.
+
+Known risk in `next_entry` mode (BIOS boxes, or no FAT ESP): a snapshot that dies before
+sysinit (kernel panic, root not mounted, `/boot/grub` not mounted) never clears `next_entry`, so
+every reboot starts it again. A box without a screen needs the entry chosen by hand in GRUB. This
+is inherent to `grub-reboot` on btrfs and is accepted for the few boxes concerned; the ESP mode
+does not have it, and the daemon does not refuse the boot outside an ESP.
 
 At every start, `calaos-container` clears a leftover `next_entry` and `calaos_oneshot`, so a
 normal boot never keeps a pending snapshot boot. If the deferred reboot fails, the daemon clears

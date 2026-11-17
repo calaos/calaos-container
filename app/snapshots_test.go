@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,9 +99,16 @@ func (e *snapEnv) snapTree(t *testing.T, id int, hook, unit bool) string {
 			t.Fatal(err)
 		}
 	}
-	// A dangling absolute link, as the snapshot's target is not under the
-	// running system's root.
+	// An absolute link: it names the snapshot's own unit file, not the
+	// running system's.
 	if unit {
+		unitDir := filepath.Join(tree, "lib/systemd/system")
+		if err := os.MkdirAll(unitDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(unitDir, "calaos-snapshot-oneshot.service"), []byte("[Unit]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Symlink("/lib/systemd/system/calaos-snapshot-oneshot.service", filepath.Join(tree, oneShotUnitRel)); err != nil {
 			t.Fatal(err)
 		}
@@ -331,7 +339,8 @@ func TestSnapshotsRescueStatus(t *testing.T) {
 }
 
 func bootCase(body string) httpCase {
-	return httpCase{method: "POST", path: "/api/v2/system/snapshots/boot", ctype: "application/json", body: body}
+	return httpCase{method: "POST", path: "/api/v2/system/snapshots/boot", ctype: "application/json", body: body,
+		headers: map[string]string{headerAdminSession: "live"}}
 }
 
 func TestSnapshotBootRefusals(t *testing.T) {
@@ -351,6 +360,9 @@ func TestSnapshotBootRefusals(t *testing.T) {
 		{name: "float id", body: `{"id":5.5}`, status: 400, code: codeInvalidSnapshot},
 		{name: "shell in id", body: `{"id":"5; reboot"}`, status: 400, code: codeInvalidSnapshot},
 		{name: "not json", body: `id=5`, status: 400, code: codeInvalidRequest},
+		{name: "array body", body: `[]`, status: 400, code: codeInvalidRequest},
+		{name: "number body", body: `5`, status: 400, code: codeInvalidRequest},
+		{name: "string body", body: `"x"`, status: 400, code: codeInvalidRequest},
 		{name: "not bootable", body: `{"id":4}`, status: 409, code: codeNotBootable},
 		{name: "from rescue", body: `{"id":5}`, rescue: true, status: 409, code: codeNotBootable},
 		{name: "no overlay hook in the snapshot", body: `{"id":5}`, status: 409, code: codeSnapshotTooOld,
@@ -464,7 +476,8 @@ func TestSnapshotBootDeferredRebootFails(t *testing.T) {
 }
 
 func rollbackCase() httpCase {
-	return httpCase{method: "POST", path: "/api/v2/system/snapshots/rollback"}
+	return httpCase{method: "POST", path: "/api/v2/system/snapshots/rollback",
+		headers: map[string]string{headerAdminSession: "live"}}
 }
 
 func TestSnapshotRollback(t *testing.T) {
@@ -526,11 +539,14 @@ func TestSnapshotRoutesAuth(t *testing.T) {
 		tc      httpCase
 		backend func() *stubBackend
 		cmdline string
+		// sessionOnly routes refuse the bearer alone: calaos_server relays
+		// them, and the daemon is where the admin session is enforced.
+		sessionOnly bool
 	}{
-		{httpCase{method: "GET", path: "/api/v2/system/snapshots"}, func() *stubBackend { return normalBackend(nil) }, cmdlineNormal},
-		{httpCase{method: "GET", path: "/api/v2/system/rescue"}, func() *stubBackend { return normalBackend(nil) }, cmdlineNormal},
-		{bootCase(`{"id":5}`), func() *stubBackend { return normalBackend(map[string]stubResult{"grub-reboot " + snap5Path: {}}) }, cmdlineNormal},
-		{rollbackCase(), func() *stubBackend { return rescueBackend(map[string]stubResult{"calaos_rollback": {}}) }, cmdlineSnap5},
+		{httpCase{method: "GET", path: "/api/v2/system/snapshots"}, func() *stubBackend { return normalBackend(nil) }, cmdlineNormal, false},
+		{httpCase{method: "GET", path: "/api/v2/system/rescue"}, func() *stubBackend { return normalBackend(nil) }, cmdlineNormal, false},
+		{bootCase(`{"id":5}`), func() *stubBackend { return normalBackend(map[string]stubResult{"grub-reboot " + snap5Path: {}}) }, cmdlineNormal, true},
+		{rollbackCase(), func() *stubBackend { return rescueBackend(map[string]stubResult{"calaos_rollback": {}}) }, cmdlineSnap5, true},
 	}
 	for _, rt := range routes {
 		for _, ac := range []struct {
@@ -544,11 +560,15 @@ func TestSnapshotRoutesAuth(t *testing.T) {
 			{"live session", "", "live", 200, ""},
 			{"bearer alone", "", "", 200, ""},
 		} {
+			if ac.name == "bearer alone" && rt.sessionOnly {
+				ac.status, ac.code = 401, codeBadSession
+			}
 			t.Run(rt.tc.path+" "+ac.name, func(t *testing.T) {
 				e := newSnapEnv(t, rt.backend())
 				e.write(t, "cmdline", rt.cmdline)
 				tc := rt.tc
 				tc.auth = ac.auth
+				tc.headers = nil
 				if ac.session != "" {
 					tc.headers = map[string]string{headerAdminSession: ac.session}
 				}
@@ -751,5 +771,137 @@ func TestUpgradeRefusedInRescue(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A link in the middle of the path must be read inside the snapshot, never on
+// the running system.
+func TestSnapshotTooOldTreeLinks(t *testing.T) {
+	link := func(t *testing.T, oldname, newname string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(newname), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(oldname, newname); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name    string
+		build   func(t *testing.T, e *snapEnv, tree, live string)
+		tooOld  bool
+		esp     bool
+		comment string
+	}{
+		{name: "usr links to the live root", tooOld: true, esp: true,
+			build: func(t *testing.T, e *snapEnv, tree, live string) {
+				hook := filepath.Join(live, overlayHookRel)
+				if err := os.MkdirAll(filepath.Dir(hook), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(hook, []byte("#!/bin/sh\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.RemoveAll(filepath.Join(tree, "usr")); err != nil {
+					t.Fatal(err)
+				}
+				link(t, filepath.Join(live, "usr"), filepath.Join(tree, "usr"))
+			}},
+		{name: "merged-usr link stays in the tree", tooOld: false,
+			build: func(t *testing.T, e *snapEnv, tree, live string) {
+				// lib -> usr/lib, as on Debian, with the unit under usr/lib.
+				if err := os.RemoveAll(filepath.Join(tree, "lib")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(tree, "usr/lib/systemd/system"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(tree, "usr/lib/systemd/system/calaos-snapshot-oneshot.service"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				link(t, "usr/lib", filepath.Join(tree, "lib"))
+			}},
+		{name: "unit link dangling", tooOld: true,
+			build: func(t *testing.T, e *snapEnv, tree, live string) {
+				if err := os.Remove(filepath.Join(tree, "lib/systemd/system/calaos-snapshot-oneshot.service")); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "unit link dangling is fine on the ESP", tooOld: false, esp: true,
+			build: func(t *testing.T, e *snapEnv, tree, live string) {
+				if err := os.Remove(filepath.Join(tree, "lib/systemd/system/calaos-snapshot-oneshot.service")); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "unit link climbs above the tree", tooOld: true,
+			build: func(t *testing.T, e *snapEnv, tree, live string) {
+				u := filepath.Join(tree, oneShotUnitRel)
+				if err := os.Remove(u); err != nil {
+					t.Fatal(err)
+				}
+				link(t, "../../../../../../../../../../etc/hostname", u)
+			}},
+		{name: "link loop", tooOld: true,
+			build: func(t *testing.T, e *snapEnv, tree, live string) {
+				u := filepath.Join(tree, oneShotUnitRel)
+				if err := os.Remove(u); err != nil {
+					t.Fatal(err)
+				}
+				link(t, filepath.Base(u), u)
+			}},
+		{name: "hook itself a link", tooOld: true, esp: true,
+			build: func(t *testing.T, e *snapEnv, tree, live string) {
+				h := filepath.Join(tree, overlayHookRel)
+				if err := os.Rename(h, h+".real"); err != nil {
+					t.Fatal(err)
+				}
+				link(t, filepath.Base(h)+".real", h)
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newSnapEnv(t, normalBackend(nil))
+			tree := e.snapTree(t, 5, true, true)
+			tc.build(t, e, tree, filepath.Join(e.dir, "live"))
+			if got := snapshotTooOld(5, tc.esp); got != tc.tooOld {
+				t.Fatalf("snapshotTooOld = %v, want %v", got, tc.tooOld)
+			}
+		})
+	}
+}
+
+func TestSnapshotProbesAreBounded(t *testing.T) {
+	prev := queryTimeout
+	queryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { queryTimeout = prev })
+	s := normalBackend(nil)
+	newSnapEnv(t, s)
+	var hadDeadline bool
+	runCommandCtx = func(ctx context.Context, command string, args ...string) (string, error) {
+		_, hadDeadline = ctx.Deadline()
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	status, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+	if !hadDeadline || status != 500 {
+		t.Fatalf("deadline %v, got %d %+v", hadDeadline, status, r)
+	}
+}
+
+// An id snapper lists but the 200-entry cap drops is not "unknown".
+func TestSnapshotBootIDBeyondCap(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"root":[`)
+	for i := 0; i <= 250; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"number":%d,"type":"single","date":"2026-11-17 10:00:00"}`, i)
+	}
+	b.WriteString("]}")
+	newSnapEnv(t, normalBackend(map[string]stubResult{snapperCmd: {out: b.String()}}))
+	status, r := snapDo(t, bootCase(`{"id":1}`))
+	if status != 409 || r.Code != codeNotBootable {
+		t.Fatalf("got %d %+v", status, r)
 	}
 }

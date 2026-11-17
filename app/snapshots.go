@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -82,11 +83,22 @@ func errRescueUnavailable(cause error) *apiError {
 	return e
 }
 
+// queryTimeout bounds the read-only probes (snapper, findmnt): a snapper
+// stuck on a lock or a slow btrfs must not pin a request goroutine, and
+// repeated GETs would pile them up.
+var queryTimeout = 10 * time.Second
+
+func queryCommand(command string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	return runCommandCtx(ctx, command, args...)
+}
+
 // readRescueStatus applies the kiosk rule: the overlay the initramfs hook
 // mounts is named rootfs, and the snapshot comes from rootflags.
 func readRescueStatus() (rescueStatus, error) {
 	var st rescueStatus
-	out, err := runCommand("findmnt", "--json", "/")
+	out, err := queryCommand("findmnt", "--json", "/")
 	if err != nil {
 		return st, err
 	}
@@ -141,7 +153,7 @@ type snapperEntry struct {
 }
 
 func listSnapper() ([]snapperEntry, error) {
-	out, err := runCommand("snapper", "--no-dbus", "-c", "root", "--jsonout", "list")
+	out, err := queryCommand("snapper", "--no-dbus", "-c", "root", "--jsonout", "list")
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +257,7 @@ func grubPath(titles ...string) string {
 type bootTargets struct {
 	paths  map[int]string // grub path of each bootable snapshot
 	tooOld map[int]bool   // in the menu, but missing what a safe boot needs
+	known  map[int]bool   // every snapshot snapper lists, before the cap
 	esp    bool
 }
 
@@ -255,8 +268,54 @@ func espOneShot() bool {
 	if err != nil || !strings.Contains(string(cfg), "calaos_oneshot") {
 		return false
 	}
-	out, err := runCommand("findmnt", "-n", "-o", "FSTYPE", espMountPath)
+	out, err := queryCommand("findmnt", "-n", "-o", "FSTYPE", espMountPath)
 	return err == nil && strings.TrimSpace(out) == "vfat"
+}
+
+// resolveInTree resolves rel inside tree as the snapshot's own root would:
+// an absolute link target is re-rooted at tree, and a path that climbs above
+// tree is refused. Following a link with the host's resolver would read the
+// running system's /usr instead of the snapshot's.
+func resolveInTree(tree, rel string, followLast bool) (string, error) {
+	const maxLinks = 40
+	links := 0
+	pending := strings.Split(rel, "/")
+	var done []string
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(done) == 0 {
+				return "", errors.New("path leaves the snapshot tree")
+			}
+			done = done[:len(done)-1]
+			continue
+		}
+		cur := filepath.Join(append([]string{tree}, append(done, part)...)...)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return "", err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 && (followLast || len(pending) > 0) {
+			if links++; links > maxLinks {
+				return "", errors.New("too many symbolic links")
+			}
+			target, err := os.Readlink(cur)
+			if err != nil {
+				return "", err
+			}
+			if strings.HasPrefix(target, "/") {
+				done = nil
+			}
+			pending = append(strings.Split(target, "/"), pending...)
+			continue
+		}
+		done = append(done, part)
+	}
+	return filepath.Join(append([]string{tree}, done...)...), nil
 }
 
 // snapshotTooOld checks the snapshot's own tree: it boots its own kernel,
@@ -264,21 +323,29 @@ func espOneShot() bool {
 func snapshotTooOld(id int, esp bool) bool {
 	tree := filepath.Join(snapshotsRoot, strconv.Itoa(id), "snapshot")
 	// A directory stood there before the initramfs install was fixed.
-	fi, err := os.Lstat(filepath.Join(tree, overlayHookRel))
-	if err != nil || !fi.Mode().IsRegular() {
+	hook, err := resolveInTree(tree, overlayHookRel, false)
+	if err != nil {
+		return true
+	}
+	if fi, err := os.Lstat(hook); err != nil || !fi.Mode().IsRegular() {
 		return true
 	}
 	if esp {
 		return false
 	}
-	_, err = os.Lstat(filepath.Join(tree, oneShotUnitRel))
-	return err != nil
+	// The enabling link must lead to an existing unit file of the snapshot.
+	unit, err := resolveInTree(tree, oneShotUnitRel, true)
+	if err != nil {
+		return true
+	}
+	fi, err := os.Stat(unit)
+	return err != nil || !fi.Mode().IsRegular()
 }
 
 // loadSnapshots returns the snapper list, newest first and capped, with the
 // snapshots a boot may target.
 func loadSnapshots(st rescueStatus) (snapshotList, bootTargets, error) {
-	targets := bootTargets{paths: map[int]string{}, tooOld: map[int]bool{}}
+	targets := bootTargets{paths: map[int]string{}, tooOld: map[int]bool{}, known: map[int]bool{}}
 	raw, err := listSnapper()
 	if err != nil {
 		return snapshotList{}, targets, err
@@ -287,7 +354,10 @@ func loadSnapshots(st rescueStatus) (snapshotList, bootTargets, error) {
 	// carries the one-shot snippet, and from the rescue the way out is a
 	// rollback or a plain reboot.
 	if !st.Rescue {
-		if menu, err := grubSnapshotEntries(); err == nil {
+		menu, err := grubSnapshotEntries()
+		if err != nil {
+			logging.Errorf("snapshot boot menu unreadable, nothing is bootable: %v", err)
+		} else {
 			targets.esp = espOneShot()
 			for id, path := range menu {
 				if snapshotTooOld(id, targets.esp) {
@@ -304,6 +374,7 @@ func loadSnapshots(st rescueStatus) (snapshotList, bootTargets, error) {
 		if e.Number <= 0 {
 			continue
 		}
+		targets.known[e.Number] = true
 		current := e.Active
 		if st.Rescue {
 			current = st.Snapshot != nil && *st.Snapshot == e.Number
@@ -373,7 +444,7 @@ func (a *AppServer) v2SystemSnapshotBoot(c *fiber.Ctx) error {
 	}
 	if err := json.Unmarshal(c.Body(), &req); err != nil {
 		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
+		if errors.As(err, &typeErr) && typeErr.Field == "id" {
 			return invalid
 		}
 		return errInvalid("the body must be a JSON object")
@@ -388,15 +459,11 @@ func (a *AppServer) v2SystemSnapshotBoot(c *fiber.Ctx) error {
 	if err != nil {
 		return errInternal(err)
 	}
-	list, targets, err := loadSnapshots(st)
+	_, targets, err := loadSnapshots(st)
 	if err != nil {
 		return errRescueUnavailable(err)
 	}
-	known := false
-	for _, s := range list.Snapshots {
-		known = known || s.ID == id
-	}
-	if !known {
+	if !targets.known[id] {
 		return invalid
 	}
 	if targets.tooOld[id] {

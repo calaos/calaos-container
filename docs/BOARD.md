@@ -102,7 +102,7 @@ _Plan: `features/versions` in calaos-archi. Boot from a snapshot lands in the ov
 
 | ID | Title | Prio | Size | Deps | Status |
 |----|-------|------|------|------|--------|
-| OVL-CC-API | `/api/v2/system/snapshots`, `rescue`, `snapshots/boot` (one-shot via `grub-reboot`), `snapshots/rollback`; `GRUB_DEFAULT=saved` drop-in and exported `default`/`timeout` for the grub-btrfs submenu | P1 | M | OVL-CC-INITRAMFS | 🟣 |
+| OVL-CC-API | `/api/v2/system/snapshots`, `rescue`, `snapshots/boot` (one-shot via ESP grubenv or `grub-reboot` + unit), `snapshots/rollback`; `GRUB_DEFAULT=saved` drop-in and exported `default`/`timeout` for the grub-btrfs submenu | P1 | M | OVL-CC-INITRAMFS | 🟣 |
 
 ---
 

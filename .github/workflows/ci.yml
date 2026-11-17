@@ -66,7 +66,10 @@ jobs:
         run: scripts/tests/grub_btrfs_overlay_test.sh
 
       - name: grub.d snapshot one-shot snippet
-        run: scripts/tests/grub_snapshot_oneshot_test.sh
+        # grub-common gives the test its grub-script-check syntax gate.
+        run: |
+          apt-get install -y --no-install-recommends grub-common
+          scripts/tests/grub_snapshot_oneshot_test.sh
 
   shellcheck:
     name: shellcheck
