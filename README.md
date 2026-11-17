@@ -111,7 +111,7 @@ listener failed.
 | `config/` | configuration loading and validation |
 | `cmd/calaos-os/` | the CLI |
 | `scripts/` | `calaos_install`, `calaos_rollback`, `config_calaos-boot`, `init_calaosfs`, `pull_calaos_image`, `load_containers_cache`, shared `lib/calaos-common.sh` |
-| `grub-btrfs/`, `initramfs/` | snapshot boot entries and the initramfs overlay that makes a read-only snapshot bootable |
+| `grub-btrfs/`, `initramfs/` | snapshot boot entries, and the initramfs hook and local-bottom script that put a RAM overlay over a read-only snapshot root so it boots writable (rescue mode, `findmnt /` shows `overlay` from `rootfs`) |
 | `debian/` | packaging and systemd units (daemon, boot TUI, grub-btrfsd, btrfs scrub, serial touchscreen) |
 | `env/` | `/etc/profile.d/calaos.sh` |
 | `docker/` | image and script used by CI to build the .deb |

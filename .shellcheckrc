@@ -3,7 +3,7 @@
 #
 # CC-001 scope note: shellcheck has no file-path-exclusion directive of its
 # own (only rule/severity options). Vendored third-party scripts
-# (scripts/genfstab, scripts/arch-chroot, grub-btrfs/**, initramfs/**) are
+# (scripts/genfstab, scripts/arch-chroot, grub-btrfs/**) are
 # therefore excluded by the CI workflow's file-discovery step, not here.
 
 # Allow scripts to 'source' files that live next to them (e.g. scripts/*
