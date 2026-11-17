@@ -49,7 +49,7 @@ var (
 	espEnvPath    = "/efi/calaos/grubenv"
 	snapshotsRoot = "/.snapshots"
 	// 80snapper (a conffile of the snapper package) sources snapperDefaultPath
-	// and snapshots only configs listed in its SNAPPER_CONFIGS.
+	// only. The filtering by SNAPPER_CONFIGS is snapperd's, not the hook's.
 	snapperRootConfigPath = "/etc/snapper/configs/root"
 	aptSnapperHookPath    = "/etc/apt/apt.conf.d/80snapper"
 	snapperDefaultPath    = "/etc/default/snapper"
@@ -97,8 +97,8 @@ func shellKeyValue(path, key string) (string, bool) {
 
 // aptSnapshotsEnabled mirrors what makes 80snapper act: the root config and
 // the hook exist, root is in SNAPPER_CONFIGS, and DISABLE_APT_SNAPSHOT is not
-// "yes" (read from both files: 80snapper sources the default file, the config
-// may carry it too).
+// "yes" (80snapper reads it from /etc/default/snapper only, not from the root
+// config).
 func aptSnapshotsEnabled() bool {
 	for _, p := range []string{snapperRootConfigPath, aptSnapperHookPath} {
 		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
@@ -109,10 +109,8 @@ func aptSnapshotsEnabled() bool {
 	if !slices.Contains(strings.Fields(list), "root") {
 		return false
 	}
-	for _, p := range []string{snapperDefaultPath, snapperRootConfigPath} {
-		if v, ok := shellKeyValue(p, "DISABLE_APT_SNAPSHOT"); ok && v == "yes" {
-			return false
-		}
+	if v, ok := shellKeyValue(snapperDefaultPath, "DISABLE_APT_SNAPSHOT"); ok && v == "yes" {
+		return false
 	}
 	return true
 }
@@ -129,15 +127,26 @@ func errRescueUnavailable(cause error) *apiError {
 	return e
 }
 
-// queryTimeout bounds the read-only probes (snapper, findmnt): a snapper
-// stuck on a lock or a slow btrfs must not pin a request goroutine, and
-// repeated GETs would pile them up.
+// queryTimeout bounds every external command of the snapshot routes (snapper,
+// findmnt, grub-*, calaos_rollback): a snapper stuck on a lock or a slow btrfs
+// must not pin a request goroutine, and repeated calls would pile them up.
 var queryTimeout = 10 * time.Second
 
 func queryCommand(command string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 	defer cancel()
 	return runCommandCtx(ctx, command, args...)
+}
+
+// rollbackTimeout bounds calaos_rollback: two btrfs commits and a set-default
+// on a loaded SD card can take far longer than a read. Killed too early, the
+// API would report a failure on a rollback that is still half done.
+var rollbackTimeout = 5 * time.Minute
+
+func rollbackCommand() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	return runCommandCtx(ctx, "calaos_rollback")
 }
 
 // readRescueStatus applies the kiosk rule: the overlay the initramfs hook
@@ -537,15 +546,22 @@ func (a *AppServer) v2SystemSnapshotBoot(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, nil)
 }
 
+// A failed arm may still have written the variable (a command killed by its
+// timeout), so it is disarmed best effort, bounded like any other command.
 func armOneShot(path string, esp bool) error {
-	if !esp {
-		_, err := runCommand("grub-reboot", path)
-		return err
+	var err error
+	switch {
+	case !esp:
+		_, err = queryCommand("grub-reboot", path)
+	default:
+		if err = os.MkdirAll(filepath.Dir(espEnvPath), 0o750); err != nil {
+			return err
+		}
+		_, err = queryCommand("grub-editenv", espEnvPath, "set", "calaos_oneshot="+path)
 	}
-	if err := os.MkdirAll(filepath.Dir(espEnvPath), 0o750); err != nil {
-		return err
+	if err != nil {
+		disarmOneShot(esp)
 	}
-	_, err := runCommand("grub-editenv", espEnvPath, "set", "calaos_oneshot="+path)
 	return err
 }
 
@@ -554,7 +570,7 @@ func disarmOneShot(esp bool) {
 	if esp {
 		file, name = espEnvPath, "calaos_oneshot"
 	}
-	if _, err := runCommand("grub-editenv", file, "unset", name); err != nil {
+	if _, err := queryCommand("grub-editenv", file, "unset", name); err != nil {
 		logging.Errorf("clearing %s: %v", name, err)
 	}
 }
@@ -562,19 +578,24 @@ func disarmOneShot(esp bool) {
 // ClearBootOneShot drops a snapshot boot still armed when the daemon starts:
 // it was consumed by this boot, or it outlived a failed reboot. GRUB clears
 // next_entry itself only off btrfs, and the ESP one only when it can write it.
+//
+// Runs before the API starts: a hung grub-editenv must not hold the daemon
+// back, so both commands share one queryTimeout budget.
 func ClearBootOneShot() {
-	clearEnvVar(grubEnvPath, "next_entry")
-	clearEnvVar(espEnvPath, "calaos_oneshot")
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	clearEnvVar(ctx, grubEnvPath, "next_entry")
+	clearEnvVar(ctx, espEnvPath, "calaos_oneshot")
 }
 
-func clearEnvVar(file, name string) {
+func clearEnvVar(ctx context.Context, file, name string) {
 	data, err := os.ReadFile(file) //nolint:gosec // fixed grubenv paths, never from a request
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if v, ok := strings.CutPrefix(line, name+"="); ok && v != "" {
-			if _, err := runCommand("grub-editenv", file, "unset", name); err != nil {
+			if _, err := runCommandCtx(ctx, "grub-editenv", file, "unset", name); err != nil {
 				logging.Errorf("clearing %s in %s: %v", name, file, err)
 			}
 			return
@@ -603,7 +624,7 @@ func (a *AppServer) v2SystemSnapshotRollback(c *fiber.Ctx) error {
 	auditField(c, "snapshot", strconv.Itoa(*st.Snapshot))
 
 	err = rebootGuard(func() error {
-		if _, err := runCommand("calaos_rollback"); err != nil {
+		if _, err := rollbackCommand(); err != nil {
 			return err
 		}
 		scheduleReboot(nil)

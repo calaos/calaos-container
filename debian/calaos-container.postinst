@@ -64,7 +64,8 @@ refresh_grub_cfg() {
     command -v update-grub >/dev/null 2>&1 || return 0
     [ "$(findmnt -n -o FSTYPE / 2>/dev/null)" != overlay ] || return 0
     ! grep -q '^# calaos-snapshot-boot 2$' "$cfg" || return 0
-    # update-grub writes its progress on stderr: kept in the dpkg log.
+    # update-grub writes its progress on stderr: apt shows it and keeps it in
+    # /var/log/apt/term.log, not in the dpkg log.
     if ! update-grub >&2; then
         echo "calaos-container: update-grub failed (output above); snapshot" \
             "boot stays unavailable until grub.cfg is regenerated." >&2
@@ -82,14 +83,17 @@ refresh_grub_cfg() {
 ensure_snapper_root_config() {
     local root="${DPKG_ROOT:-}"
     local cfg="$root/etc/snapper/configs/root"
-    local tpl="$root/usr/share/snapper/config-templates/default"
+    local tpl_usr="$root/usr/share/snapper/config-templates/default"
+    local tpl=$tpl_usr
     local tmp
     [ -e "$cfg" ] || [ -L "$cfg" ] && return 0
     [ "$(findmnt -n -o FSTYPE --target "${root:-/}" 2>/dev/null)" = btrfs ] || return 0
     [ -d "$root/.snapshots" ] || return 0
-    [ -f "$tpl" ] || tpl="$root/etc/snapper/config-templates/default"
+    local tpl_etc="$root/etc/snapper/config-templates/default"
+    [ -f "$tpl" ] || tpl="$tpl_etc"
     if [ ! -f "$tpl" ]; then
-        echo "calaos-container: $tpl missing, snapper root config not created." >&2
+        echo "calaos-container: no snapper template ($tpl_usr," \
+            "$tpl_etc), snapper root config not created." >&2
         return 0
     fi
     tmp=$(mktemp "$cfg.XXXXXX" 2>/dev/null) || {
