@@ -111,6 +111,8 @@ ignored.
 | `service_unavailable` | 409 | the unit of a service action is not installed or is masked (see Services) | none |
 | `invalid_snapshot` | 400 | `snapshots/boot` with an `id` missing, not an integer, `<= 0` or unknown to snapper | none |
 | `not_bootable` | 409 | `snapshots/boot` on a snapshot without a boot menu entry, or from rescue | none |
+| `snapshot_too_old` | 409 | `snapshots/boot` on a snapshot that cannot boot only once (see Snapshots and rescue) | none |
+| `in_rescue` | 409 | `update/upgrade-all` or `update/upgrade` while the system runs from a snapshot | none |
 | `not_in_rescue` | 409 | `snapshots/rollback` while the system does not run from a snapshot | none |
 | `rescue_unavailable` | 503 | snapper or the overlay hook is missing (see Snapshots and rescue) | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
@@ -143,8 +145,8 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/update/available` | bearer, session allowed | 200 | same as `check`, without contacting the mirrors |
 | GET | `/api/v2/update/installed` | bearer, session allowed | 200 | object keyed by package name: `{name, version}` |
 | GET | `/api/v2/update/status` | bearer, session allowed | 200 | `{"progress": <Status>, "job": <Job> or null}` |
-| POST | `/api/v2/update/upgrade-all` | bearer, session allowed | 202 | `<Job>` |
-| POST | `/api/v2/update/upgrade` | bearer, session allowed | 202 | `<Job>`; body `{"package": "<name>"}` |
+| POST | `/api/v2/update/upgrade-all` | bearer, session allowed | 202 | `<Job>`; `409 in_rescue` in rescue |
+| POST | `/api/v2/update/upgrade` | bearer, session allowed | 202 | `<Job>`; body `{"package": "<name>"}`; `409 in_rescue` in rescue |
 | POST | `/api/v2/system/reboot` | bearer, session allowed | 200 | `null`; `409 upgrade_in_progress` while a job runs |
 | POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
@@ -834,7 +836,7 @@ menu. They take no push code.
 | `description`, `cleanup` | as snapper gives them |
 | `current` | the snapshot the system runs from: snapper's `active` in normal mode, the snapshot of `rootflags=` in rescue |
 | `default` | snapper's default subvolume, the one a normal boot uses |
-| `bootable` | the snapshot has an entry in the `Calaos-OS snapshots` submenu of the generated `grub.cfg`; always `false` in rescue |
+| `bootable` | the snapshot has an entry in the `Calaos-OS snapshots` submenu of the generated `grub.cfg` and can boot only once (below); always `false` in rescue |
 
 The list is sorted newest first and holds at most 200 snapshots. `booted` repeats the `current`
 one, or is `null`. Snapper unavailable (not installed, no `root` config, unreadable output):
@@ -850,8 +852,8 @@ reboot.
 
 ### `POST /api/v2/system/snapshots/boot`
 
-Body `{"id": <int>}`. Boots the snapshot once: `grub-reboot` with the GRUB path of its first
-kernel entry, then a reboot two seconds after the answer (`null`). Refusals:
+Body `{"id": <int>}`. Boots the snapshot once, using the GRUB path of its first kernel entry,
+then reboots two seconds after the answer (`null`). Refusals:
 
 | Case | Answer |
 |---|---|
@@ -859,11 +861,33 @@ kernel entry, then a reboot two seconds after the answer (`null`). Refusals:
 | `id` missing, not an integer, `<= 0`, or not in the snapper list | `400 invalid_snapshot` |
 | overlay hook not installed, snapper unavailable | `503 rescue_unavailable` |
 | no entry in the snapshot menu, or the box is already in rescue | `409 not_bootable` |
+| the snapshot cannot boot only once (see below) | `409 snapshot_too_old` |
 | an upgrade job runs | `409 upgrade_in_progress` |
 
-`grub-reboot` writes `next_entry` to the grubenv. GRUB cannot clear it from a btrfs `/boot`, so
-the one-shot depends on it being cleared after the snapshot boot. If the deferred reboot fails,
-the daemon clears it itself.
+GRUB cannot rewrite its environment block on btrfs, so a `next_entry` set by `grub-reboot` in
+`/boot/grub/grubenv` is never consumed by GRUB itself. That file lives in the `@/boot/grub`
+subvolume, shared by the system and every snapshot, writable in rescue. The daemon picks one of
+two ways to make the boot single-use:
+
+- ESP: when the generated `grub.cfg` carries the `calaos_oneshot` block (written by the
+  package's `grub.d` script when `/efi` is a mounted FAT ESP) and `findmnt` sees `vfat` on `/efi`,
+  the daemon writes `calaos_oneshot=<entry>` to `/efi/calaos/grubenv`. On an EFI boot, GRUB reads
+  it, erases it on the FAT, and boots the entry only if that erase succeeded: any failure boots
+  normally.
+- `next_entry`: otherwise, `grub-reboot`. The snapshot must enable
+  `calaos-snapshot-oneshot.service`, which clears `next_entry` early in its boot.
+
+A snapshot is `bootable` (and accepted here) only if its own tree, `/.snapshots/<N>/snapshot`,
+holds the overlay hook (`usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay`) and,
+in `next_entry` mode, the
+`etc/systemd/system/sysinit.target.wants/calaos-snapshot-oneshot.service` link. A snapshot taken
+before the package shipped them gets `409 snapshot_too_old`: it would boot read-only without its
+overlay, or keep booting itself.
+
+At every start, `calaos-container` clears a leftover `next_entry` and `calaos_oneshot`, so a
+normal boot never keeps a pending snapshot boot. If the deferred reboot fails, the daemon clears
+the one-shot it armed. A restart of `calaos-container` within the two seconds before the reboot
+clears it too: the box then reboots normally.
 
 ### `POST /api/v2/system/snapshots/rollback`
 
@@ -871,6 +895,11 @@ No body. From rescue only: runs `calaos_rollback` (the snapshot becomes the defa
 then reboots two seconds after the answer (`null`). Outside rescue, or in an overlay without a
 snapshot in `rootflags=`: `409 not_in_rescue`. During an upgrade job: `409 upgrade_in_progress`.
 The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
+
+In rescue, upgrades are refused: `409 in_rescue` on `POST /api/v2/update/upgrade-all` and
+`POST /api/v2/update/upgrade`, `500 {"error":true,"msg":"upgrades are disabled while running from
+a snapshot"}` on the legacy routes. The package `postinst` does not run `update-grub` when `/` is
+an overlay. If the rescue state cannot be read, upgrades are allowed.
 
 Boot and rollback take the upgrade guard and keep it until the reboot, so no job starts in
 between; if the reboot fails, the guard stays held until `calaos-container` restarts.
@@ -1442,8 +1471,8 @@ Go error text.
 | GET | `/api/update/check` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress" during a run) |
 | GET | `/api/update/available` | 200 raw object keyed by package | none |
 | GET | `/api/update/installed` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` |
-| POST | `/api/update/upgrade-all` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress") |
-| POST | `/api/update/upgrade?package=<name>` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("package not found", "upgrade already in progress") |
+| POST | `/api/update/upgrade-all` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress", "upgrades are disabled while running from a snapshot") |
+| POST | `/api/update/upgrade?package=<name>` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("package not found", "upgrade already in progress", "upgrades are disabled while running from a snapshot") |
 | GET | `/api/update/status` | 200 raw `<Status>` | none |
 | GET (WS) | `/api/events` | 101, frames as in Events | 426 `Upgrade Required` (text) on a plain `GET` |
 
