@@ -2,9 +2,13 @@ package app
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -205,6 +209,8 @@ type snapperEntry struct {
 	Date        string `json:"date"`
 	Cleanup     string `json:"cleanup"`
 	Description string `json:"description"`
+	// Read from info.xml, which keeps the date in UTC.
+	DateUTC bool `json:"-"`
 }
 
 func listSnapper() ([]snapperEntry, error) {
@@ -221,19 +227,104 @@ func listSnapper() ([]snapperEntry, error) {
 	return parsed.Root, nil
 }
 
-// snapperDate turns snapper's local "YYYY-MM-DD HH:MM:SS" into RFC 3339; an
-// unexpected format gives "" rather than a wrong date.
-func snapperDate(s string) string {
-	t, err := time.ParseInLocation(time.DateTime, s, snapLocation)
+// snapperInfo is the info.xml snapper keeps next to each snapshot.
+type snapperInfo struct {
+	Num         int    `xml:"num"`
+	Type        string `xml:"type"`
+	PreNum      *int   `xml:"pre_num"`
+	Date        string `xml:"date"`
+	Description string `xml:"description"`
+	Cleanup     string `xml:"cleanup"`
+}
+
+const maxSnapperInfoSize = 64 << 10
+
+// listSnapshotInfos reads the snapshots without snapper, which refuses to
+// work on the rescue overlay root ("not a btrfs subvolume"). An info.xml that
+// cannot be read or parsed leaves its snapshot out of the list.
+func listSnapshotInfos() ([]snapperEntry, error) {
+	dirs, err := os.ReadDir(snapshotsRoot)
+	if err != nil {
+		return nil, err
+	}
+	def := defaultSnapshot()
+	var out []snapperEntry
+	for _, d := range dirs {
+		n, err := strconv.Atoi(d.Name())
+		if err != nil || n <= 0 || !d.IsDir() {
+			continue
+		}
+		info, err := readSnapperInfo(filepath.Join(snapshotsRoot, d.Name(), "info.xml"))
+		if err == nil && info.Num != n {
+			err = fmt.Errorf("num %d", info.Num)
+		}
+		if err != nil {
+			logging.Errorf("snapshot %d left out, bad info.xml: %v", n, err)
+			continue
+		}
+		out = append(out, snapperEntry{
+			Number:      n,
+			Default:     def != nil && *def == n,
+			Type:        info.Type,
+			PreNumber:   info.PreNum,
+			Date:        info.Date,
+			DateUTC:     true,
+			Cleanup:     info.Cleanup,
+			Description: info.Description,
+		})
+	}
+	return out, nil
+}
+
+func readSnapperInfo(path string) (snapperInfo, error) {
+	var info snapperInfo
+	f, err := os.Open(path) //nolint:gosec // under snapshotsRoot, named from a numeric directory
+	if err != nil {
+		return info, err
+	}
+	defer func() { _ = f.Close() }()
+	err = xml.NewDecoder(io.LimitReader(f, maxSnapperInfoSize)).Decode(&info)
+	return info, err
+}
+
+// defaultSnapshot is the snapshot btrfs mounts on a normal boot, nil when
+// unknown or not a snapshot.
+func defaultSnapshot() *int {
+	out, err := queryCommand("btrfs", "subvolume", "get-default", snapshotsRoot)
+	if err != nil {
+		logging.Errorf("reading the default subvolume: %v", err)
+		return nil
+	}
+	if m := snapshotSubvolRe.FindStringSubmatch(out); m != nil {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			return &n
+		}
+	}
+	return nil
+}
+
+// snapperDate turns snapper's "YYYY-MM-DD HH:MM:SS" (local time from snapper
+// list, UTC in info.xml) into RFC 3339 in the box's zone; an unexpected format
+// gives "" rather than a wrong date.
+func snapperDate(s string, utc bool) string {
+	loc := snapLocation
+	if utc {
+		loc = time.UTC
+	}
+	t, err := time.ParseInLocation(time.DateTime, s, loc)
 	if err != nil {
 		return ""
 	}
-	return t.Format(time.RFC3339)
+	return t.In(snapLocation).Format(time.RFC3339)
 }
 
 // grubSnapshotEntries maps each snapshot of the grub-btrfs menu to the GRUB
-// path of its first kernel entry. Every entry shares one --id, so the path is
+// path of its newest kernel entry. Every entry shares one --id, so the path is
 // built from titles: "<menu>><snapshot submenu>><kernel entry>".
+//
+// grub-btrfs lists the kernels oldest first (glob order). An older kernel kept
+// by Debian may have an initrd built before the overlay hook was installed,
+// and would boot the snapshot read-write without the overlay.
 func grubSnapshotEntries() (map[int]string, error) {
 	cfg, err := os.ReadFile(grubCfgPath)
 	if err != nil {
@@ -243,6 +334,7 @@ func grubSnapshotEntries() (map[int]string, error) {
 	if !strings.Contains(string(cfg), "submenu '"+grubSnapshotsMenu+"'") {
 		return entries, nil
 	}
+	kernels := map[int]string{}
 
 	f, err := os.Open(grubBtrfsCfgPath)
 	if err != nil {
@@ -276,13 +368,51 @@ func grubSnapshotEntries() (map[int]string, error) {
 			if err != nil {
 				continue
 			}
-			if _, seen := entries[n]; !seen {
+			kernel := kernelRelease(line)
+			if _, seen := entries[n]; !seen || kernelVersionCmp(kernel, kernels[n]) > 0 {
 				entries[n] = grubPath(grubSnapshotsMenu, submenu, entry)
+				kernels[n] = kernel
 			}
 			entry = ""
 		}
 	}
 	return entries, sc.Err()
+}
+
+var vmlinuzRe = regexp.MustCompile(`/vmlinuz-([^"\s]+)`)
+
+// kernelRelease returns the release of the vmlinuz-<release> a linux line
+// loads, "" when it names none.
+func kernelRelease(line string) string {
+	if m := vmlinuzRe.FindStringSubmatch(line); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+var versionPartRe = regexp.MustCompile(`[0-9]+|[^0-9]+`)
+
+// kernelVersionCmp compares kernel releases with digit runs read as numbers,
+// so 6.1.0-9 < 6.1.0-10, where a plain string order would say the opposite.
+func kernelVersionCmp(a, b string) int {
+	pa, pb := versionPartRe.FindAllString(a, -1), versionPartRe.FindAllString(b, -1)
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		x, y := pa[i], pb[i]
+		if isDigitRun(x) && isDigitRun(y) {
+			x, y = strings.TrimLeft(x, "0"), strings.TrimLeft(y, "0")
+			if c := cmp.Compare(len(x), len(y)); c != 0 {
+				return c
+			}
+		}
+		if c := strings.Compare(x, y); c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(len(pa), len(pb))
+}
+
+func isDigitRun(s string) bool {
+	return s != "" && s[0] >= '0' && s[0] <= '9'
 }
 
 // singleQuoted returns the first '...' of line. grub-btrfs strips quotes
@@ -401,7 +531,11 @@ func snapshotTooOld(id int, esp bool) bool {
 // snapshots a boot may target.
 func loadSnapshots(st rescueStatus) (snapshotList, bootTargets, error) {
 	targets := bootTargets{paths: map[int]string{}, tooOld: map[int]bool{}, known: map[int]bool{}}
-	raw, err := listSnapper()
+	read := listSnapper
+	if st.Rescue {
+		read = listSnapshotInfos
+	}
+	raw, err := read()
 	if err != nil {
 		return snapshotList{}, targets, err
 	}
@@ -437,7 +571,7 @@ func loadSnapshots(st rescueStatus) (snapshotList, bootTargets, error) {
 		_, bootable := targets.paths[e.Number]
 		info := snapshotInfo{
 			ID:          e.Number,
-			Date:        snapperDate(e.Date),
+			Date:        snapperDate(e.Date, e.DateUTC),
 			Type:        e.Type,
 			PreID:       e.PreNumber,
 			Description: e.Description,

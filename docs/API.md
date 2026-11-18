@@ -114,7 +114,7 @@ ignored.
 | `snapshot_too_old` | 409 | `snapshots/boot` on a snapshot that cannot boot only once (see Snapshots and rescue) | none |
 | `in_rescue` | 409 | `update/upgrade-all` or `update/upgrade` while the system runs from a snapshot | none |
 | `not_in_rescue` | 409 | `snapshots/rollback` while the system does not run from a snapshot | none |
-| `rescue_unavailable` | 503 | snapper is unavailable (see Snapshots and rescue) | none |
+| `rescue_unavailable` | 503 | snapper is unavailable, or in rescue `/.snapshots` is unreadable (see Snapshots and rescue) | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -816,7 +816,8 @@ has the job, so that a slow restart holds up no other action.
 ## Snapshots and rescue
 
 The four routes read snapper (`snapper --no-dbus -c root --jsonout list`) and the grub-btrfs
-menu. They take no push code.
+menu. They take no push code. In rescue, snapper refuses to work on the overlay root, so the
+list is read from snapper's own files instead (below).
 
 ### `GET /api/v2/system/snapshots`
 
@@ -846,6 +847,12 @@ The package postinst creates the `root` config on a btrfs box that lacks it (sam
 `calaos_install`) and adds `root` to `SNAPPER_CONFIGS`; an existing config is never modified. Snapper unavailable (not installed, no `root` config,
 unreadable output): `503 rescue_unavailable`.
 
+In rescue, snapper is not run: each snapshot comes from `/.snapshots/<N>/info.xml` (snapper keeps
+its date in UTC there; `date` is still given in the box's time zone), and `default` from
+`btrfs subvolume get-default /.snapshots` (`false` everywhere when it fails). A snapshot whose
+`info.xml` is missing, unreadable or names another number is left out. Only an unreadable
+`/.snapshots` gives `503 rescue_unavailable`.
+
 ### `GET /api/v2/system/rescue`
 
 `{"rescue": <bool>, "snapshot": <int> or null, "overlay": <bool>}`. `overlay` is `true` when `/`
@@ -856,14 +863,17 @@ reboot.
 
 ### `POST /api/v2/system/snapshots/boot`
 
-Body `{"id": <int>}`. Boots the snapshot once, using the GRUB path of its first kernel entry,
-then reboots two seconds after the answer (`null`). Refusals:
+Body `{"id": <int>}`. Boots the snapshot once, using the GRUB path of its newest kernel entry
+(highest `vmlinuz-<release>`, digit runs compared as numbers; grub-btrfs lists them oldest
+first), then reboots two seconds after the answer (`null`). An older kernel may keep an initrd
+built before the overlay hook was installed and would boot the snapshot without the overlay.
+Refusals:
 
 | Case | Answer |
 |---|---|
 | body not a JSON object | `400 invalid_request` |
 | `id` missing, not an integer, `<= 0`, or not in the snapper list (the list is read before the 200-entry cap) | `400 invalid_snapshot` |
-| snapper unavailable | `503 rescue_unavailable` |
+| snapper unavailable (in rescue: `/.snapshots` unreadable) | `503 rescue_unavailable` |
 | no entry in the snapshot menu, or the box is already in rescue | `409 not_bootable` |
 | the snapshot cannot boot only once (see below) | `409 snapshot_too_old` |
 | an upgrade job runs | `409 upgrade_in_progress` |
