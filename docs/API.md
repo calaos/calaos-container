@@ -924,13 +924,20 @@ The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
 regenerates it, with `update-grub` in a chroot of the new default root, and checks that the
 default entry (the first one) loads its kernel and initrd from that subvolume. If not, it fails
 and nothing reboots, with one of these messages:
-- `No @/boot/grub subvolume...` or `Snapshot #N has no update-grub...`: checked before snapper,
-  nothing has changed;
-- `grub.cfg not updated after the rollback (<cause>)...`, for any failure after snapper, including
-  `update-grub` running past its 10 minutes: the snapshot is already the default subvolume, but
-  the normal boot still loads the previous root's kernel. Do not retry the rollback, which would
-  roll back once more, and do not delete the previous root's snapshot before `grub.cfg` is fixed.
-  The next daemon start (below) retries.
+- `No @/boot/grub subvolume...`, `Snapshot #N has no update-grub...` or `Default subvolume
+  unknown...`: checked before snapper, nothing has changed;
+- `Rollback undone, grub.cfg could not follow it (<cause>)...`, for any failure after snapper,
+  including `update-grub` running past its 10 minutes: the script sets the previous default
+  subvolume back, and the previous `grub.cfg` if `update-grub` replaced it, so the box boots as
+  before. Left as is, the normal boot would load the previous root's kernel on the new root, which
+  lacks its modules when the kernels differ: emergency mode, no network, and the daemon never
+  starts to repair it. The snapshots snapper created stay. The rollback can be tried again once
+  the cause is fixed;
+- `Could not undo the rollback, do not reboot...` (setting the default subvolume back failed; the
+  message gives its id) or `Rollback undone but grub.cfg could not be put back, do not reboot...`:
+  the default subvolume and `grub.cfg` disagree. Fix it from the rescue shell before any reboot
+  (`btrfs subvolume set-default <id>` on the mounted btrfs root, or `update-grub` in a chroot of
+  the default subvolume), and do not delete the previous root's snapshot before.
 
 The daemon kills the script after 20 minutes and answers a `rollback_failed` without a grub
 message. The default subvolume may then have changed already: check `default` in

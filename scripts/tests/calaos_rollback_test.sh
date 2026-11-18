@@ -1,7 +1,8 @@
 #!/bin/bash
 # Runs scripts/calaos_rollback against stubbed findmnt, mount, umount,
 # mountpoint, btrfs, timeout, arch-chroot and a fake /proc/cmdline: checks the device it
-# hands to mount and that grub.cfg must follow the new default subvolume.
+# hands to mount, that grub.cfg must follow the new default subvolume, and that
+# a failure after snapper puts the previous default subvolume and grub.cfg back.
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -38,11 +39,15 @@ echo "timeout \$1 \$2" >>"$tmp/calls"
 shift 2
 exec "\$@"
 STUB
-cat >"$tmp/bin/btrfs" <<'STUB'
+cat >"$tmp/bin/btrfs" <<STUB
 #!/bin/sh
-case "$*" in
-"subvolume list"*) printf 'ID 258 gen 10 top level 256 path %s\n' $FAKE_SUBVOLS ;;
+case "\$*" in
+"subvolume list"*) printf 'ID 258 gen 10 top level 256 path %s\n' \$FAKE_SUBVOLS ;;
 "subvolume get-default"*) echo 'ID 307 gen 300 top level 257 path @/.snapshots/40/snapshot' ;;
+"subvolume set-default"*)
+    echo "btrfs \$*" >>"$tmp/calls"
+    [ -z "\$FAKE_SETDEFAULT_FAIL" ] || exit 1
+    ;;
 esac
 STUB
 # update-grub "writes" grub.cfg from a fixture, or fails when none is given.
@@ -76,6 +81,8 @@ run() {
     [ "${FAKE_EFI:-1}" != 0 ] || mkdir -p "$dst/efi"
     printf '#!/bin/sh\n' >"$dst/.snapshots/5/snapshot/usr/sbin/update-grub"
     chmod +x "$dst/.snapshots/5/snapshot/usr/sbin/update-grub"
+    mkdir -p "$dst/boot/grub"
+    echo '# previous' >"$dst/boot/grub/grub.cfg"
     : >"$tmp/calls"
     rc=0
     FAKE_SOURCE=$1 FAKE_GRUBCFG=$2 FAKE_SUBVOLS=${3:-"@ @/.snapshots @/boot/grub"} PATH="$tmp/bin:$PATH" \
@@ -110,6 +117,13 @@ check_fails() {
     else
         [ "$snapper" = no ] || fail "$name: snapper did not run"
     fi
+    if [ "$snapper" = yes ]; then
+        grep -qx "btrfs subvolume set-default 307 $dst" "$tmp/calls" || fail "$name: default not restored: $(cat "$tmp/calls")"
+        grep -qF "the default subvolume is back to @/.snapshots/40/snapshot" "$tmp/err" || fail "$name: stderr: $(cat "$tmp/err")"
+        grep -qx '# previous' "$dst/boot/grub/grub.cfg" || fail "$name: grub.cfg not put back"
+    else
+        ! grep -q "set-default" "$tmp/calls" || fail "$name: default changed: $(cat "$tmp/calls")"
+    fi
     # Every mount must be undone, the last one first.
     local mounts umounts
     mounts=$(grep -c '^mount ' "$tmp/calls")
@@ -127,11 +141,25 @@ check_fails "update-grub fails" "update-grub failed" yes /dev/vda3 ""
 printf 'set default=0\n' >"$tmp/empty.cfg"
 check_fails "no boot entry" "grub.cfg has no boot entry" yes /dev/vda3 "$tmp/empty.cfg"
 check_fails "no @/boot/grub" "No @/boot/grub subvolume" no /dev/vda3 "$fixtures/current.cfg" "@ @/.snapshots"
-after="grub.cfg not updated after the rollback"
+after="Rollback undone, grub.cfg could not follow it"
 FAKE_MOUNT_FAIL="subvol=@/boot/grub" check_fails "grub mount fails" "$after (command failed at line" yes \
     /dev/vda3 "$fixtures/current.cfg"
 FAKE_TIMEOUT=1 check_fails "update-grub times out" "$after (update-grub timed out after 10m)" yes \
     /dev/vda3 "$fixtures/current.cfg"
+
+# The default could not be put back: the message says so and comes first,
+# since the API keeps only the first 200 characters of that line.
+FAKE_SETDEFAULT_FAIL=1 run /dev/vda3 ""
+[ "$rc" -ne 0 ] || fail "restore fails: rc=0"
+grep -qx "btrfs subvolume set-default 307 $dst" "$tmp/calls" || fail "restore fails: not tried: $(cat "$tmp/calls")"
+last=$(tail -n 1 "$tmp/err")
+case "$last" in
+*"Could not undo the rollback, do not reboot: grub.cfg not updated (update-grub failed)"*) ;;
+*) fail "restore fails: stderr: $(cat "$tmp/err")" ;;
+esac
+grep -qF "restoring the default subvolume 307 failed" "$tmp/err" || fail "restore fails: stderr: $(cat "$tmp/err")"
+! grep -q "Rollback undone" "$tmp/err" || fail "restore fails: claims undone: $(cat "$tmp/err")"
+[ "$(grep -c '^mount ' "$tmp/calls")" -eq "$(grep -c '^umount ' "$tmp/calls")" ] || fail "restore fails: mounts left"
 
 # A bare linux line is not an entry, as in app/grubrepair.go.
 { printf 'linux\n'; cat "$fixtures/current.cfg"; } >"$tmp/bare.cfg"
