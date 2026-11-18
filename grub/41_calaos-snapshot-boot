@@ -19,11 +19,14 @@ GRUBCFG
 # save_env succeeds: this is the one-shot mode of BIOS and of an UEFI box
 # without a FAT ESP. A snapshot that dies early leaves next_entry set, so the
 # 3 s window lets Escape bring the normal menu back instead of looping blind.
+# GRUB scripts have no && or ||: the conditions are nested.
 # boot_once is unset on a normal boot: menu and delay stay as they are.
 cat <<'GRUBCFG'
-if [ "${boot_once}" = "true" ] && sleep --interruptible 3; then
-  set timeout=0
-  export timeout
+if [ "${boot_once}" = "true" ]; then
+  if sleep --interruptible --verbose 3; then
+    set timeout=0
+    export timeout
+  fi
 fi
 GRUBCFG
 

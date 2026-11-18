@@ -46,6 +46,9 @@ run() {
     [ ! -s "$tmp/err" ] || fail "$1: stderr $(cat "$tmp/err")"
     [ "$(head -n 3 "$tmp/out")" = "$(printf '# calaos-snapshot-boot 4\nexport default\nexport timeout')" ] ||
         fail "$1: header $(head -n 3 "$tmp/out")"
+    # GRUB's grammar rejects && and || although its lexer knows them; this
+    # holds even where grub-script-check is not installed (bin/test).
+    ! grep -Eq '&&|\|\|' "$tmp/out" || fail "$1: && or || in the fragment"
     if command -v grub-script-check >/dev/null 2>&1; then
         grub-script-check "$tmp/out" >/dev/null 2>&1 || fail "$1: grub-script-check rejects the fragment"
     fi
@@ -63,9 +66,10 @@ no_esp_block() {
 bios_block() {
     local want
     # shellcheck disable=SC2016 # GRUB variables, matched literally
-    want=$(printf '%s\n' 'if [ "${boot_once}" = "true" ] && sleep --interruptible 3; then' \
-        '  set timeout=0' '  export timeout' 'fi')
-    [ "$(sed -n 4,7p "$tmp/out")" = "$want" ] || fail "$1: boot_once block missing or moved: $(sed -n 4,7p "$tmp/out")"
+    want=$(printf '%s\n' 'if [ "${boot_once}" = "true" ]; then' \
+        '  if sleep --interruptible --verbose 3; then' '    set timeout=0' '    export timeout' \
+        '  fi' 'fi')
+    [ "$(sed -n 4,9p "$tmp/out")" = "$want" ] || fail "$1: boot_once block missing or moved: $(sed -n 4,9p "$tmp/out")"
 }
 
 stubs 0 fat "$uuid"
