@@ -63,7 +63,7 @@ refresh_grub_cfg() {
     [ -z "${DPKG_ROOT:-}" ] && [ -f "$cfg" ] || return 0
     command -v update-grub >/dev/null 2>&1 || return 0
     [ "$(findmnt -n -o FSTYPE / 2>/dev/null)" != overlay ] || return 0
-    ! grep -q '^# calaos-snapshot-boot 2$' "$cfg" || return 0
+    ! grep -q '^# calaos-snapshot-boot 3$' "$cfg" || return 0
     # update-grub writes its progress on stderr: apt shows it and keeps it in
     # /var/log/apt/term.log, not in the dpkg log.
     if ! update-grub >&2; then
