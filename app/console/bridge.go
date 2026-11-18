@@ -106,17 +106,19 @@ func (m *Manager) run(c *console, app *fiber.App, ln net.Listener) {
 	c.closePTY()
 	_ = os.Remove(c.Socket)
 	c.exited = true
-	delete(m.consoles, c.ID)
 	info := c.Info
 	report := c.started || c.granted
 	reason := c.reason
 	m.mu.Unlock()
 
-	// The audit event must be written before done is visible: Shutdown waits
-	// on done and the daemon exits right after.
+	// Shutdown only waits for consoles still in m.consoles and for their done:
+	// both must outlive the audit event, the daemon exits right after.
 	if report {
 		m.o.Closed(info, reason)
 	}
+	m.mu.Lock()
+	delete(m.consoles, c.ID)
+	m.mu.Unlock()
 	close(c.done)
 }
 

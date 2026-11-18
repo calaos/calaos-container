@@ -495,10 +495,65 @@ func TestDoneIsVisibleOnlyAfterTheCloseAudit(t *testing.T) {
 		t.Fatal("done closed while the close audit is still running")
 	default:
 	}
+	if n := f.m.Count(); n != 1 {
+		t.Fatalf("console left m.consoles during the close audit: %d", n)
+	}
 	close(release)
 	select {
 	case <-c.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("done not closed after the close audit returned")
+	}
+}
+
+func TestListenFailureKeepsConsoleUntilAuditReturns(t *testing.T) {
+	f := newFixture(t)
+	if err := os.RemoveAll(f.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f.m.o.Closed = func(Info, string) {
+		close(entered)
+		<-release
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, err := f.m.Open(Request{SessionHash: "aaaaaaaa", Term: "xterm"}, func() error { return nil })
+		errc <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close audit never started")
+	}
+	if n := f.m.Count(); n != 1 {
+		t.Fatalf("console left m.consoles during the close audit: %d", n)
+	}
+	f.m.mu.Lock()
+	var done chan struct{}
+	for _, c := range f.m.consoles {
+		done = c.done
+	}
+	f.m.mu.Unlock()
+	select {
+	case <-done:
+		t.Fatal("done closed while the close audit is still running")
+	default:
+	}
+	close(release)
+	if err := <-errc; err == nil {
+		t.Fatal("open succeeded")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("done not closed after the close audit returned")
+	}
+	if n := f.m.Count(); n != 0 {
+		t.Fatalf("%d consoles", n)
 	}
 }
