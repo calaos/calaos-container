@@ -59,6 +59,9 @@ jobs:
       - name: init_calaosfs under concurrent units
         run: scripts/tests/init_calaosfs_test.sh
 
+      - name: calaos_rollback device extraction
+        run: scripts/tests/calaos_rollback_test.sh
+
       - name: postinst docker-apt-speedup
         run: scripts/tests/postinst_speedup_test.sh
 

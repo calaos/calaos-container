@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -759,13 +760,56 @@ func (a *AppServer) v2SystemSnapshotRollback(c *fiber.Ctx) error {
 
 	err = rebootGuard(func() error {
 		if _, err := rollbackCommand(); err != nil {
-			return err
+			return &rollbackError{err}
 		}
 		scheduleReboot(nil)
 		return nil
 	})
+	var rb *rollbackError
+	if errors.As(err, &rb) {
+		return rb.apiError()
+	}
 	if err != nil {
 		return guardedError(err)
 	}
 	return sendOK(c, fiber.StatusOK, nil)
+}
+
+// rollbackError marks a calaos_rollback failure, to tell it from a guard error.
+type rollbackError struct{ err error }
+
+func (e *rollbackError) Error() string { return e.err.Error() }
+func (e *rollbackError) Unwrap() error { return e.err }
+
+var (
+	ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	// The script's ERR trap prints this after the real failure line.
+	errTrapLine = regexp.MustCompile(`^Error on line [0-9]+$`)
+)
+
+const rollbackMsgMax = 200
+
+// apiError gives the client the last meaningful line the script wrote on stderr
+// (its die message or the failing mount/snapper line): without it an admin cannot
+// tell why the rollback failed. The full error stays in the daemon log.
+func (e *rollbackError) apiError() *apiError {
+	msg := "rollback failed"
+	text := e.err.Error()
+	if _, after, ok := strings.Cut(text, "stderr: "); ok {
+		lines := strings.Split(ansiEscape.ReplaceAllString(after, ""), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if line == "" || errTrapLine.MatchString(line) {
+				continue
+			}
+			if utf8.RuneCountInString(line) > rollbackMsgMax {
+				line = string([]rune(line)[:rollbackMsgMax])
+			}
+			msg += ": " + line
+			break
+		}
+	}
+	ae := newAPIError(fiber.StatusInternalServerError, codeRollbackFailed, msg)
+	ae.cause = e.err
+	return ae
 }

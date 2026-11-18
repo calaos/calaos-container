@@ -19,6 +19,10 @@ dst="/mnt"
 # can match more than one mount line and yield a multi-word $rootdev.
 rootdev="$(findmnt --noheadings --output SOURCE --target /.snapshots)" || true
 
+# On a btrfs subvolume mount findmnt prints "/dev/vda3[/@/.snapshots]": the
+# bracketed subvolume path is not a device and mount refuses it.
+rootdev="${rootdev%%\[*}"
+
 if [ -z "$rootdev" ]; then
     die "Snapshot btrfs device not found"
 fi
