@@ -6,7 +6,7 @@
 # which keeps only exported variables. Without these, that menu loses the
 # chosen entry, and waits for a key on a headless box.
 # The main menu countdown unsets timeout when it expires, so only a timeout
-# already at 0 reaches the nested menu: the one-shot branch sets it below.
+# already at 0 reaches the nested menu: the one-shot branches set it below.
 # Normal boots keep the default timeout and stay interactive.
 # The version line tells the package postinst that grub.cfg is up to date.
 cat <<'GRUBCFG'
@@ -15,12 +15,13 @@ export default
 export timeout
 GRUBCFG
 
-# BIOS has no ESP one-shot: next_entry is the only way in. 00_header sets
-# boot_once when it consumes next_entry (even if save_env fails on btrfs), so
-# the nested snapshot menus get timeout=0 and a box without keyboard boots.
+# 00_header sets boot_once when it consumes next_entry, whether or not
+# save_env succeeds: this is the one-shot mode of BIOS and of an UEFI box
+# without a FAT ESP. A snapshot that dies early leaves next_entry set, so the
+# 3 s window lets Escape bring the normal menu back instead of looping blind.
 # boot_once is unset on a normal boot: menu and delay stay as they are.
 cat <<'GRUBCFG'
-if [ "${grub_platform}" = "pc" -a "${boot_once}" = "true" ]; then
+if [ "${boot_once}" = "true" ] && sleep --interruptible 3; then
   set timeout=0
   export timeout
 fi

@@ -53,19 +53,19 @@ run() {
 
 no_esp_block() {
     ! grep -q calaos_oneshot "$tmp/out" || fail "$1: ESP block emitted"
-    [ "$(grep -c 'set timeout=' "$tmp/out")" -eq 1 ] || fail "$1: timeout set outside the BIOS boot_once block"
+    [ "$(grep -c 'set timeout=' "$tmp/out")" -eq 1 ] || fail "$1: timeout set outside the boot_once block"
     bios_block "$1"
 }
 
-# BIOS one-shot: next_entry consumed by 00_header leaves boot_once=true; the
-# timeout is zeroed for the nested menus, on the pc platform only, and before
-# any early exit of the ESP probing.
+# next_entry one-shot: consumed by 00_header, it leaves boot_once=true. After
+# an interruptible 3 s delay (Escape keeps the menu), the timeout is zeroed for
+# the nested menus, on any platform, and before any early exit of the ESP probing.
 bios_block() {
     local want
     # shellcheck disable=SC2016 # GRUB variables, matched literally
-    want=$(printf '%s\n' 'if [ "${grub_platform}" = "pc" -a "${boot_once}" = "true" ]; then' \
+    want=$(printf '%s\n' 'if [ "${boot_once}" = "true" ] && sleep --interruptible 3; then' \
         '  set timeout=0' '  export timeout' 'fi')
-    [ "$(sed -n 4,7p "$tmp/out")" = "$want" ] || fail "$1: BIOS boot_once block missing or moved: $(sed -n 4,7p "$tmp/out")"
+    [ "$(sed -n 4,7p "$tmp/out")" = "$want" ] || fail "$1: boot_once block missing or moved: $(sed -n 4,7p "$tmp/out")"
 }
 
 stubs 0 fat "$uuid"
@@ -90,7 +90,7 @@ after=$(sed -n "$((default + 1)),$((default + 3))p" "$tmp/out")
 want=$(printf '          set timeout=0\n          export timeout\n        fi')
 [ "$after" = "$want" ] || fail "FAT ESP: set timeout/export timeout not inside the save_env branch after set default: $after"
 bios_block "FAT ESP"
-[ "$(grep -c 'set timeout=' "$tmp/out")" -eq 2 ] || fail "FAT ESP: timeout set outside the BIOS and one-shot branches"
+[ "$(grep -c 'set timeout=' "$tmp/out")" -eq 2 ] || fail "FAT ESP: timeout set outside the boot_once and ESP branches"
 [ "$(grep -c 'set default=' "$tmp/out")" -eq 1 ] || fail "FAT ESP: default set outside the save_env branch"
 
 stubs 1 fat "$uuid"

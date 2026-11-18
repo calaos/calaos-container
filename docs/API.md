@@ -893,11 +893,12 @@ two ways to make the boot single-use:
   `calaos-snapshot-oneshot.service`, which clears `next_entry` early in its boot.
 
 Rescue boots without a key, on BIOS as on UEFI. The package's `grub.d` script zeroes and exports
-`timeout` for the nested snapshot menus: on UEFI inside the `calaos_oneshot` block, on BIOS
-(`grub_platform` = `pc`) when GRUB has just consumed a `next_entry` (`boot_once` set by
-`00_header`, even though `save_env` fails on btrfs). A normal boot keeps the usual menu and
-delay. This relies on the `grub.cfg` carrying `# calaos-snapshot-boot 4`; the package postinst
-regenerates it when the marker is older.
+`timeout` for the nested snapshot menus: in `next_entry` mode (BIOS, or UEFI without a FAT ESP)
+when GRUB has just consumed a `next_entry` (`boot_once` set by `00_header`, whether or not
+`save_env` succeeds), after a 3 s delay that Escape interrupts to show the normal menu; on UEFI
+with an ESP, inside the `calaos_oneshot` block. A normal boot keeps the usual menu and delay. This
+relies on the `grub.cfg` carrying `# calaos-snapshot-boot 4`; the package postinst regenerates it
+when the marker is older.
 
 A snapshot is `bootable` (and accepted here) only if its own tree, `/.snapshots/<N>/snapshot`,
 holds the overlay hook (`usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay`) and,
@@ -908,9 +909,11 @@ overlay, or keep booting itself.
 
 Known risk in `next_entry` mode (BIOS boxes, or no FAT ESP): a snapshot that dies before
 sysinit (kernel panic, root not mounted, `/boot/grub` not mounted) never clears `next_entry`, so
-every reboot starts it again. A box without a screen needs the entry chosen by hand in GRUB. This
-is inherent to `grub-reboot` on btrfs and is accepted for the few boxes concerned; the ESP mode
-does not have it, and the daemon does not refuse the boot outside an ESP.
+every reboot starts it again. GRUB waits 3 s with no menu, then boots the snapshot; pressing
+Escape during that delay shows the normal menu, where another entry can be chosen. A box without
+a keyboard or screen needs external media. This is inherent to `grub-reboot` on btrfs and is
+accepted for the few boxes concerned; the ESP mode does not have it, and the daemon does not
+refuse the boot outside an ESP.
 
 At every start, `calaos-container` clears a leftover `next_entry` and `calaos_oneshot`, so a
 normal boot never keeps a pending snapshot boot. If the deferred reboot fails, the daemon clears
