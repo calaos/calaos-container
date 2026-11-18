@@ -75,7 +75,7 @@ fi
 # The nested snapshot menu has no timeout of its own: it is zeroed and
 # exported inside the one-shot branch only, after default.
 tmo=$(grep -n '^ *set timeout=0$' "$tmp/out" | cut -d: -f1)
-exp=$(grep -n '^ *export timeout$' "$tmp/out" | cut -d: -f1)
+exp=$(grep -n '^ *export timeout$' "$tmp/out" | tail -n 1 | cut -d: -f1)
 if [ -z "$tmo" ] || [ -z "$exp" ] || [ "$tmo" -le "$default" ] || [ "$exp" -le "$tmo" ]; then
     fail "FAT ESP: set timeout $tmo, export timeout $exp not after set default $default"
 fi
