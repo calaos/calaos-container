@@ -786,11 +786,15 @@ func TestSnapshotRollback(t *testing.T) {
 		}
 	})
 	t.Run("rollback fails", func(t *testing.T) {
-		e := newSnapEnv(t, rescueBackend(map[string]stubResult{"calaos_rollback": {err: errors.New("snapper")}}))
+		fail := errors.New("RunCommand error: exit status 1, stderr: \x1b[0;31mmount: special device /dev/vda3[/@] does not exist\x1b[0m\n\x1b[0;31mError on line 64\x1b[0m\n")
+		e := newSnapEnv(t, rescueBackend(map[string]stubResult{"calaos_rollback": {err: fail}}))
 		e.write(t, "cmdline", cmdlineSnap5)
 		status, r := snapDo(t, rollbackCase())
 		if status != http.StatusInternalServerError || len(e.deferred) != 0 {
 			t.Fatalf("got %d %+v", status, r)
+		}
+		if r.Code != codeRollbackFailed || r.Msg != "rollback failed: Error on line 64" {
+			t.Fatalf("code %q msg %q", r.Code, r.Msg)
 		}
 	})
 	t.Run("success", func(t *testing.T) {

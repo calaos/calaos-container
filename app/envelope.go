@@ -47,6 +47,7 @@ const (
 	codeRescueUnavailable  = "rescue_unavailable"
 	codeSnapshotTooOld     = "snapshot_too_old"
 	codeInRescue           = "in_rescue"
+	codeRollbackFailed     = "rollback_failed"
 )
 
 type okEnvelope struct {

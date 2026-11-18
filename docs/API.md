@@ -115,6 +115,7 @@ ignored.
 | `in_rescue` | 409 | `update/upgrade-all` or `update/upgrade` while the system runs from a snapshot | none |
 | `not_in_rescue` | 409 | `snapshots/rollback` while the system does not run from a snapshot | none |
 | `rescue_unavailable` | 503 | snapper is unavailable, or in rescue `/.snapshots` is unreadable (see Snapshots and rescue) | none |
+| `rollback_failed` | 500 | `snapshots/rollback`: `calaos_rollback` failed; `msg` ends with the last line the script wrote on stderr (at most 200 characters) | none |
 | `internal` | 500 | anything else; the detail is logged by the daemon | none |
 
 The HTTP status is informative except in two places where clients rely on it:
@@ -913,7 +914,9 @@ clears it too: the box then reboots normally.
 
 No body. From rescue only: runs `calaos_rollback` (the snapshot becomes the default subvolume),
 then reboots two seconds after the answer (`null`). Outside rescue, or in an overlay without a
-snapshot in `rootflags=`: `409 not_in_rescue`. During an upgrade job: `409 upgrade_in_progress`.
+snapshot in `rootflags=`: `409 not_in_rescue`. During an upgrade job: `409 upgrade_in_progress`. When the script fails: `500 rollback_failed`,
+whose `msg` is `rollback failed: <last stderr line of the script>`; the full output is in the
+daemon log.
 The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
 
 In rescue, upgrades are refused: `409 in_rescue` on `POST /api/v2/update/upgrade-all` and
