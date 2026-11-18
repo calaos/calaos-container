@@ -892,6 +892,13 @@ two ways to make the boot single-use:
 - `next_entry`: otherwise, `grub-reboot`. The snapshot must enable
   `calaos-snapshot-oneshot.service`, which clears `next_entry` early in its boot.
 
+Rescue boots without a key, on BIOS as on UEFI. The package's `grub.d` script zeroes and exports
+`timeout` for the nested snapshot menus: on UEFI inside the `calaos_oneshot` block, on BIOS
+(`grub_platform` = `pc`) when GRUB has just consumed a `next_entry` (`boot_once` set by
+`00_header`, even though `save_env` fails on btrfs). A normal boot keeps the usual menu and
+delay. This relies on the `grub.cfg` carrying `# calaos-snapshot-boot 4`; the package postinst
+regenerates it when the marker is older.
+
 A snapshot is `bootable` (and accepted here) only if its own tree, `/.snapshots/<N>/snapshot`,
 holds the overlay hook (`usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay`) and,
 in `next_entry` mode, the

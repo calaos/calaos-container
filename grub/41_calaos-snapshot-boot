@@ -10,9 +10,20 @@
 # Normal boots keep the default timeout and stay interactive.
 # The version line tells the package postinst that grub.cfg is up to date.
 cat <<'GRUBCFG'
-# calaos-snapshot-boot 3
+# calaos-snapshot-boot 4
 export default
 export timeout
+GRUBCFG
+
+# BIOS has no ESP one-shot: next_entry is the only way in. 00_header sets
+# boot_once when it consumes next_entry (even if save_env fails on btrfs), so
+# the nested snapshot menus get timeout=0 and a box without keyboard boots.
+# boot_once is unset on a normal boot: menu and delay stay as they are.
+cat <<'GRUBCFG'
+if [ "${grub_platform}" = "pc" -a "${boot_once}" = "true" ]; then
+  set timeout=0
+  export timeout
+fi
 GRUBCFG
 
 # GRUB cannot rewrite a grubenv on btrfs, so a next_entry is never consumed
