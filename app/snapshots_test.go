@@ -34,16 +34,21 @@ fi
 `
 
 // Shaped like grub-btrfs 4.12 output; snapshot 4 is missing from the menu.
+// Kernels come in glob order: oldest first, and 6.1.0-9 after 6.1.0-27.
 const grubBtrfsCfg = `submenu '| 2026-11-17 10:05:00 | @/.snapshots/5/snapshot | single | a > b |' {
     submenu '---> 2026-11-17 10:05:00 | @/.snapshots/5/snapshot | single | a > b <---' { echo }
 
-    menuentry '  "vmlinuz-6.1.0-27-amd64" & "initrd.img-6.1.0-27-amd64"' --class snapshots --class gnu-linux "$menuentry_id_option" 'gnulinux-snapshots-uuid' {
+    menuentry '  "vmlinuz-6.1.0-10-amd64" & "initrd.img-6.1.0-10-amd64"' --class snapshots --class gnu-linux "$menuentry_id_option" 'gnulinux-snapshots-uuid' {
         echo 'Loading Snapshot: "2026-11-17 10:05:00" "@/.snapshots/5/snapshot"'
-        linux "/@/.snapshots/5/snapshot/boot/vmlinuz-6.1.0-27-amd64" root=UUID=x ro quiet rootflags=subvol="@/.snapshots/5/snapshot"
+        linux "/@/.snapshots/5/snapshot/boot/vmlinuz-6.1.0-10-amd64" root=UUID=x ro quiet rootflags=subvol="@/.snapshots/5/snapshot"
+        initrd "/@/.snapshots/5/snapshot/boot/initrd.img-6.1.0-10-amd64"
+    }
+    menuentry '  "vmlinuz-6.1.0-27-amd64" & "initrd.img-6.1.0-27-amd64"' --class snapshots "$menuentry_id_option" 'gnulinux-snapshots-uuid' {
+        linux "/@/.snapshots/5/snapshot/boot/vmlinuz-6.1.0-27-amd64" root=UUID=x ro rootflags=subvol="@/.snapshots/5/snapshot"
         initrd "/@/.snapshots/5/snapshot/boot/initrd.img-6.1.0-27-amd64"
     }
-    menuentry '  "vmlinuz-6.1.0-26-amd64" & "initrd.img-6.1.0-26-amd64"' --class snapshots "$menuentry_id_option" 'gnulinux-snapshots-uuid' {
-        linux "/@/.snapshots/5/snapshot/boot/vmlinuz-6.1.0-26-amd64" root=UUID=x ro rootflags=subvol="@/.snapshots/5/snapshot"
+    menuentry '  "vmlinuz-6.1.0-9-amd64" & "initrd.img-6.1.0-9-amd64"' --class snapshots "$menuentry_id_option" 'gnulinux-snapshots-uuid' {
+        linux "/@/.snapshots/5/snapshot/boot/vmlinuz-6.1.0-9-amd64" root=UUID=x ro rootflags=subvol="@/.snapshots/5/snapshot"
     }
 }
 submenu '| 2026-11-17 10:00:00 | @/.snapshots/3/snapshot | pre    | apt |' {
@@ -116,6 +121,61 @@ func (e *snapEnv) snapTree(t *testing.T, id int, hook, unit bool) string {
 	return tree
 }
 
+// The info.xml files behind snapperOut. Snapper writes the date in UTC, and
+// the rescue list reads them because snapper fails on the overlay root.
+var snapperInfoXML = map[int]string{
+	1: `<?xml version="1.0"?>
+<snapshot>
+  <type>single</type>
+  <num>1</num>
+  <date>2026-11-01 08:00:00</date>
+  <description>first root filesystem</description>
+</snapshot>
+`,
+	3: `<?xml version="1.0"?>
+<snapshot>
+  <type>pre</type>
+  <num>3</num>
+  <date>2026-11-17 10:00:00</date>
+  <description>apt</description>
+  <cleanup>number</cleanup>
+  <userdata>
+    <key>important</key>
+    <value>no</value>
+  </userdata>
+</snapshot>
+`,
+	4: `<?xml version="1.0"?>
+<snapshot>
+  <type>post</type>
+  <num>4</num>
+  <date>2026-11-17 10:05:00</date>
+  <pre_num>3</pre_num>
+  <description>apt</description>
+  <cleanup>number</cleanup>
+</snapshot>
+`,
+	5: `<?xml version="1.0"?>
+<snapshot>
+  <type>single</type>
+  <num>5</num>
+  <date>bogus</date>
+  <description>a &gt; b</description>
+</snapshot>
+`,
+}
+
+func (e *snapEnv) infoXML(t *testing.T, id int, content string) {
+	t.Helper()
+	dir := filepath.Join(snapshotsRoot, fmt.Sprint(id))
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "info.xml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (e *snapEnv) fire() {
 	for _, f := range e.deferred {
 		f()
@@ -150,11 +210,18 @@ func newSnapEnv(t *testing.T, s *stubBackend) *snapEnv {
 	espMountPath = "/efi"
 	espEnvPath = filepath.Join(e.dir, "esp", "calaos", "grubenv")
 	snapshotsRoot = filepath.Join(e.dir, "snapshots")
+	if r, ok := s.commands[getDefaultCmd]; ok {
+		delete(s.commands, getDefaultCmd)
+		s.commands["btrfs subvolume get-default "+snapshotsRoot] = r
+	}
 	snapperRootConfigPath = e.write(t, "snapper-root", "NUMBER_LIMIT=\"10\"\n")
 	aptSnapperHookPath = e.write(t, "80snapper", "// hook\n")
 	snapperDefaultPath = e.write(t, "default-snapper", "SNAPPER_CONFIGS=\"home root\"\n")
 	for _, id := range []int{3, 5} {
 		e.snapTree(t, id, true, true)
+	}
+	for id, xml := range snapperInfoXML {
+		e.infoXML(t, id, xml)
 	}
 	snapLocation = time.UTC
 	snapAfterFunc = func(d time.Duration, f func()) {
@@ -178,13 +245,27 @@ func normalBackend(extra map[string]stubResult) *stubBackend {
 	return &stubBackend{commands: cmds}
 }
 
+// errSnapperRescue is what snapper says on the rescue overlay root.
+var errSnapperRescue = errors.New("IO Error (.snapshots is not a btrfs subvolume)")
+
+// rescueBackend fails snapper as it does on the overlay root; the list comes
+// from the info.xml files that newSnapEnv writes.
 func rescueBackend(extra map[string]stubResult) *stubBackend {
 	s := normalBackend(extra)
 	if _, set := extra["findmnt --json /"]; !set {
 		s.commands["findmnt --json /"] = stubResult{out: findmntRescue}
 	}
+	if _, set := extra[snapperCmd]; !set {
+		s.commands[snapperCmd] = stubResult{err: errSnapperRescue}
+	}
+	if _, set := extra[getDefaultCmd]; !set {
+		s.commands[getDefaultCmd] = stubResult{out: "ID 268 gen 90 top level 257 path @/.snapshots/1/snapshot\n"}
+	}
 	return s
 }
+
+// newSnapEnv binds getDefaultCmd to its snapshotsRoot.
+const getDefaultCmd = "btrfs subvolume get-default <snapshots>"
 
 func snapDo(t *testing.T, tc httpCase) (int, v2Reply) {
 	t.Helper()
@@ -371,18 +452,123 @@ func TestSnapshotsListErrors(t *testing.T) {
 	}
 }
 
+// In rescue, snapper fails on the overlay root: the list comes from info.xml.
 func TestSnapshotsListInRescue(t *testing.T) {
 	e := newSnapEnv(t, rescueBackend(nil))
 	e.write(t, "cmdline", cmdlineSnap5)
-	_, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+	snapLocation = time.FixedZone("CET", 3600)
+	status, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+	if status != http.StatusOK {
+		t.Fatalf("status %d %+v", status, r)
+	}
 	l := decodeList(t, r)
 	if l.Booted == nil || l.Booted.ID != 5 {
 		t.Fatalf("booted %+v", l.Booted)
 	}
+	var ids []int
+	byID := map[int]snapshotInfo{}
 	for _, s := range l.Snapshots {
-		if s.Bootable || s.Current != (s.ID == 5) {
+		ids = append(ids, s.ID)
+		byID[s.ID] = s
+		if s.Bootable || s.Current != (s.ID == 5) || s.Default != (s.ID == 1) {
 			t.Errorf("snapshot %+v", s)
 		}
+	}
+	if fmt.Sprint(ids) != "[5 4 3 1]" {
+		t.Fatalf("ids %v", ids)
+	}
+	if byID[3].Date != "2026-11-17T11:00:00+01:00" || byID[5].Date != "" {
+		t.Errorf("dates %q %q, want UTC read and shown in the box's zone", byID[3].Date, byID[5].Date)
+	}
+	if byID[4].PreID == nil || *byID[4].PreID != 3 || byID[4].Type != "post" || byID[3].PreID != nil ||
+		byID[3].Cleanup != "number" || byID[5].Description != "a > b" || byID[1].Type != "single" {
+		t.Errorf("fields %+v %+v %+v", byID[3], byID[4], byID[5])
+	}
+	for _, c := range e.ran {
+		if strings.HasPrefix(c, "snapper") {
+			t.Errorf("ran %q in rescue", c)
+		}
+	}
+}
+
+func TestSnapshotsListInRescueDegraded(t *testing.T) {
+	t.Run("bad info.xml and stray entries", func(t *testing.T) {
+		e := newSnapEnv(t, rescueBackend(map[string]stubResult{getDefaultCmd: {err: errors.New("exit 1")}}))
+		e.infoXML(t, 4, "<snapshot><num>4")
+		e.infoXML(t, 6, "<snapshot><num>7</num></snapshot>")
+		if err := os.MkdirAll(filepath.Join(snapshotsRoot, "tmp"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(snapshotsRoot, "8"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(snapshotsRoot, "9"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		status, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+		if status != http.StatusOK {
+			t.Fatalf("status %d %+v", status, r)
+		}
+		var ids []int
+		for _, s := range decodeList(t, r).Snapshots {
+			ids = append(ids, s.ID)
+			if s.Default {
+				t.Errorf("default %+v without get-default", s)
+			}
+		}
+		if fmt.Sprint(ids) != "[5 3 1]" {
+			t.Fatalf("ids %v", ids)
+		}
+	})
+	t.Run("no snapshots directory", func(t *testing.T) {
+		newSnapEnv(t, rescueBackend(nil))
+		snapshotsRoot = filepath.Join(snapshotsRoot, "absent")
+		status, r := snapDo(t, httpCase{method: "GET", path: "/api/v2/system/snapshots"})
+		if status != http.StatusServiceUnavailable || r.Code != codeRescueUnavailable {
+			t.Fatalf("got %d %+v", status, r)
+		}
+	})
+}
+
+func TestKernelVersionCmp(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want int
+	}{
+		{"6.1.0-56-amd64", "6.1.0-54-amd64", 1},
+		{"6.1.0-9-amd64", "6.1.0-10-amd64", -1},
+		{"6.1.0-27-amd64", "6.12.0-1-amd64", -1},
+		{"6.1.0-010-amd64", "6.1.0-9-amd64", 1},
+		{"6.1.0-27-amd64", "6.1.0-27-amd64", 0},
+		{"6.1.0-27", "6.1.0-27-amd64", -1},
+		{"", "6.1.0-1-amd64", -1},
+		{"6.1.0-27-amd64", "6.1.0-27-arm64", -1},
+	} {
+		if got := kernelVersionCmp(tc.a, tc.b); got != tc.want {
+			t.Errorf("cmp(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+		if got := kernelVersionCmp(tc.b, tc.a); got != -tc.want {
+			t.Errorf("cmp(%q, %q) = %d, want %d", tc.b, tc.a, got, -tc.want)
+		}
+	}
+}
+
+// The one-shot boots the newest kernel of a snapshot, whatever its rank in
+// the menu: grub-btrfs lists them oldest first.
+func TestGrubSnapshotEntriesNewestKernel(t *testing.T) {
+	e := newSnapEnv(t, normalBackend(nil))
+	got, err := grubSnapshotEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[5] != snap5Path || !strings.Contains(got[3], "vmlinuz-6.1.0-27-amd64") || len(got) != 2 {
+		t.Fatalf("entries %v", got)
+	}
+
+	// An entry without a vmlinuz-<release> never wins over a named one.
+	e.write(t, "grub-btrfs.cfg", strings.Replace(grubBtrfsCfg, "/boot/vmlinuz-6.1.0-9-amd64", "/boot/vmlinuz", 1))
+	if got, _ := grubSnapshotEntries(); got[5] != snap5Path {
+		t.Fatalf("with an unnamed kernel: %q", got[5])
 	}
 }
 

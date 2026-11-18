@@ -65,6 +65,9 @@ jobs:
       - name: postinst snapper root config
         run: scripts/tests/postinst_snapper_test.sh
 
+      - name: postinst initramfs rebuild of every kernel
+        run: scripts/tests/postinst_initramfs_test.sh
+
       - name: initramfs grub-btrfs-overlay script
         run: scripts/tests/grub_btrfs_overlay_test.sh
 

@@ -72,6 +72,43 @@ refresh_grub_cfg() {
     fi
 }
 
+# The update-initramfs trigger of the overlay hook only rebuilds the newest
+# kernel's initrd: an older kernel keeps one without the hook, or with an
+# outdated one, and would boot a snapshot read-write. Every kernel is rebuilt
+# once per change of the hook files, one at a time so that a broken old kernel
+# does not keep the others from being rebuilt (update-initramfs -k all stops at
+# the first failure). A failure is reported and retried at the next upgrade but
+# never fails it: update-initramfs keeps the previous initrd, the trigger
+# rebuilds the newest kernel again and dpkg reports that failure itself, and an
+# unconfigured calaos-container could no longer upgrade itself. The argument
+# is a root prefix, for the tests.
+refresh_initramfs_all() {
+    local root=${1:-}
+    local hook=$root/usr/share/initramfs-tools/hooks/grub-btrfs-overlay
+    local script=$root/usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay
+    local stamp=$root/var/lib/calaos-container/initramfs-overlay.sum
+    local sum img ver failed=0
+    [ -z "${DPKG_ROOT:-}" ] || return 0
+    command -v update-initramfs >/dev/null 2>&1 || return 0
+    [ "$(findmnt -n -o FSTYPE / 2>/dev/null)" != overlay ] || return 0
+    [ -f "$hook" ] && [ -f "$script" ] || return 0
+    sum=$(cat "$hook" "$script" | sha256sum) || return 0
+    [ "$(cat "$stamp" 2>/dev/null)" != "$sum" ] || return 0
+    for img in "$root"/boot/initrd.img-*; do
+        [ -f "$img" ] || continue
+        ver=${img##*/initrd.img-}
+        [ -d "$root/lib/modules/$ver" ] || continue
+        if ! update-initramfs -u -k "$ver" >&2; then
+            echo "calaos-container: update-initramfs failed for $ver (output above);" \
+                "a snapshot booted with this kernel gets no read-only overlay." >&2
+            failed=1
+        fi
+    done
+    [ "$failed" -eq 0 ] || return 0
+    mkdir -p "${stamp%/*}" && printf '%s\n' "$sum" >"$stamp" ||
+        echo "calaos-container: cannot write $stamp." >&2
+}
+
 # Boxes installed before calaos_install created the snapper "root" config get
 # no pre/post apt snapshot (80snapper does nothing without it), so the
 # snapshot rescue is of no use to them. The config is written from snapper's
@@ -153,6 +190,7 @@ configure)
     remove_docker_apt_speedup || true
     refresh_grub_cfg || true
     ensure_snapper_root_config || true
+    refresh_initramfs_all || true
     ;;
 esac
 
