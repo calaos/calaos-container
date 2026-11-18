@@ -56,6 +56,8 @@ reset() {
 
 run() {
     : >"$log"
+    # The call line is meant to expand in the inner bash, not here.
+    # shellcheck disable=SC2016
     env -u DPKG_ROOT PATH="$bin:$PATH" FAKE_LOG="$log" "$@" \
         bash -c "$fn"'
 refresh_initramfs_all "$1"' _ "$root" 2>"$tmp/err"
