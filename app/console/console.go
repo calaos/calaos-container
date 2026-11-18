@@ -284,8 +284,8 @@ func (m *Manager) Open(req Request, take func() error) (Info, error) {
 		c.exited = true
 		info := c.Info
 		m.mu.Unlock()
-		close(c.done)
 		m.o.Closed(info, ReasonExited)
+		close(c.done)
 		return Info{}, err
 	}
 
@@ -331,6 +331,7 @@ func (m *Manager) killLocked(c *console, reason string) {
 	go func() {
 		select {
 		case <-c.done:
+		case <-c.shellDone:
 		case <-time.After(killGrace):
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		}

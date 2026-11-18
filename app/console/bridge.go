@@ -112,10 +112,12 @@ func (m *Manager) run(c *console, app *fiber.App, ln net.Listener) {
 	reason := c.reason
 	m.mu.Unlock()
 
-	close(c.done)
+	// The audit event must be written before done is visible: Shutdown waits
+	// on done and the daemon exits right after.
 	if report {
 		m.o.Closed(info, reason)
 	}
+	close(c.done)
 }
 
 func (m *Manager) bridge(c *console, conn *websocket.Conn, term string) {

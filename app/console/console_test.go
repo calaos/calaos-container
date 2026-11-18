@@ -472,3 +472,33 @@ func TestValidTerm(t *testing.T) {
 		}
 	}
 }
+
+func TestDoneIsVisibleOnlyAfterTheCloseAudit(t *testing.T) {
+	f := newFixture(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f.m.o.Closed = func(Info, string) {
+		close(entered)
+		<-release
+	}
+	info := f.open("aaaaaaaa")
+	c := infoConsole(f.m, info.ID)
+	f.m.kill(c, ReasonClosed)
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close audit never started")
+	}
+	select {
+	case <-c.done:
+		t.Fatal("done closed while the close audit is still running")
+	default:
+	}
+	close(release)
+	select {
+	case <-c.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("done not closed after the close audit returned")
+	}
+}
