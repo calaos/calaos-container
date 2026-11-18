@@ -914,9 +914,10 @@ clears it too: the box then reboots normally.
 
 No body. From rescue only: runs `calaos_rollback` (the snapshot becomes the default subvolume),
 then reboots two seconds after the answer (`null`). Outside rescue, or in an overlay without a
-snapshot in `rootflags=`: `409 not_in_rescue`. During an upgrade job: `409 upgrade_in_progress`. When the script fails: `500 rollback_failed`,
-whose `msg` is `rollback failed: <last stderr line of the script>`; the full output is in the
-daemon log.
+snapshot in `rootflags=`: `409 not_in_rescue`. During an upgrade job: `409 upgrade_in_progress`.
+When the script fails: `500 rollback_failed`, whose `msg` is `rollback failed: <last stderr line
+of the script>` (the script's `Error on line N` trap line is skipped, the line is cut at 200
+characters); the full output is in the daemon log.
 The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
 
 In rescue, upgrades are refused: `409 in_rescue` on `POST /api/v2/update/upgrade-all` and

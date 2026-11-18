@@ -793,8 +793,26 @@ func TestSnapshotRollback(t *testing.T) {
 		if status != http.StatusInternalServerError || len(e.deferred) != 0 {
 			t.Fatalf("got %d %+v", status, r)
 		}
-		if r.Code != codeRollbackFailed || r.Msg != "rollback failed: Error on line 64" {
+		if r.Code != codeRollbackFailed || r.Msg != "rollback failed: mount: special device /dev/vda3[/@] does not exist" {
 			t.Fatalf("code %q msg %q", r.Code, r.Msg)
+		}
+	})
+	t.Run("rollback fails message shapes", func(t *testing.T) {
+		long := strings.Repeat("é", 250)
+		for name, c := range map[string]struct{ stderr, want string }{
+			"die without trap line": {"\x1b[0;31mnot in a snapshot\x1b[0m\n", "rollback failed: not in a snapshot"},
+			"only a trap line":      {"Error on line 7\n", "rollback failed"},
+			"multibyte truncation":  {long + "\n", "rollback failed: " + strings.Repeat("é", 200)},
+		} {
+			t.Run(name, func(t *testing.T) {
+				fail := errors.New("RunCommand error: exit status 1, stderr: " + c.stderr)
+				e := newSnapEnv(t, rescueBackend(map[string]stubResult{"calaos_rollback": {err: fail}}))
+				e.write(t, "cmdline", cmdlineSnap5)
+				_, r := snapDo(t, rollbackCase())
+				if r.Msg != c.want {
+					t.Fatalf("msg %q, want %q", r.Msg, c.want)
+				}
+			})
 		}
 	})
 	t.Run("success", func(t *testing.T) {
