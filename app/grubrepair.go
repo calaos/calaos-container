@@ -17,11 +17,17 @@ import (
 // (/@/.snapshots/N/snapshot/boot/...). A rollback that left it untouched keeps
 // booting the old root's kernel, until snapper deletes that snapshot and the
 // box no longer boots. These repair it at startup.
+//
+// Like calaos_rollback, they take the first entry for the default one, as
+// Calaos' GRUB_DEFAULT=saved does without a saved entry. A mismatch update-grub
+// cannot fix makes every start run it again.
 var (
 	// calaos_rollback writes it once it regenerated grub.cfg from a chroot,
 	// without the grub-btrfs submenu: the native update-grub brings it back.
-	grubRefreshMarker  = "/var/lib/calaos-container/grub-refresh"
-	grubRepairTimeout  = 5 * time.Minute
+	grubRefreshMarker = "/var/lib/calaos-container/grub-refresh"
+	// Same bound as update_grub_timeout in calaos_rollback. Not measured on a
+	// Raspberry Pi SD card yet.
+	grubUpdateTimeout  = 10 * time.Minute
 	grubRepairLockWait = 30 * time.Minute
 )
 
@@ -88,6 +94,10 @@ func grubDefaultEntryPaths(cfg []byte) []string {
 			return paths
 		}
 	}
+	if sc.Err() != nil {
+		// The entry may be cut before its initrd line: fail closed.
+		return nil
+	}
 	return paths
 }
 
@@ -148,7 +158,7 @@ func RepairGrubCfg() {
 }
 
 func regenerateGrubCfg(subvol string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), grubRepairTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), grubUpdateTimeout)
 	defer cancel()
 	if _, err := runCommandCtx(ctx, "update-grub"); err != nil {
 		return fmt.Errorf("update-grub: %w", err)

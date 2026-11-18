@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -43,6 +45,8 @@ func TestGrubDefaultEntryPaths(t *testing.T) {
 		{"several initrds", "menuentry 'a' {\n\tlinux /k root=x\n\tinitrd /u /i\n}\n", []string{"/k", "/u", "/i"}},
 		{"no initrd", "menuentry 'a' {\n\tlinux /k\n}\nmenuentry 'b' {\n\tlinux /k2\n\tinitrd /i2\n}\n", []string{"/k"}},
 		{"no entry", "set default=0\n", nil},
+		{"linux without argument", "\tlinux\n\tlinux /k\n\tinitrd /i\n", []string{"/k", "/i"}},
+		{"line too long", "\tlinux /k\n" + strings.Repeat("x", 2<<20) + "\n\tinitrd /i\n", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -50,6 +54,30 @@ func TestGrubDefaultEntryPaths(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// The script must give up on update-grub, undo its mounts and say why, before
+// the daemon kills it. The snapper rollback alone had 5 minutes.
+func TestRollbackTimeoutCoversUpdateGrub(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("..", "scripts", "calaos_rollback"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^update_grub_timeout="([0-9]+[sm])"$`).FindSubmatch(script)
+	if m == nil {
+		t.Fatal("update_grub_timeout not found in calaos_rollback")
+	}
+	inScript, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inScript != grubUpdateTimeout {
+		t.Fatalf("calaos_rollback bounds update-grub to %v, the daemon to %v", inScript, grubUpdateTimeout)
+	}
+	const killGrace = 30 * time.Second // timeout --kill-after
+	if need := inScript + killGrace + 5*time.Minute; rollbackTimeout < need {
+		t.Fatalf("rollbackTimeout %v, want at least %v", rollbackTimeout, need)
 	}
 }
 

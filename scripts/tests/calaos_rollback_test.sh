@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs scripts/calaos_rollback against stubbed findmnt, mount, umount,
-# mountpoint, btrfs, arch-chroot and a fake /proc/cmdline: checks the device it
+# mountpoint, btrfs, timeout, arch-chroot and a fake /proc/cmdline: checks the device it
 # hands to mount and that grub.cfg must follow the new default subvolume.
 set -uo pipefail
 
@@ -24,9 +24,20 @@ case "$*" in
 *SOURCE*) printf '%s\n' "$FAKE_SOURCE" ;;
 esac
 STUB
-for c in mount umount; do
-    printf '#!/bin/sh\necho "%s $*" >>"%s/calls"\n' "$c" "$tmp" >"$tmp/bin/$c"
-done
+cat >"$tmp/bin/mount" <<STUB
+#!/bin/sh
+case "\$*" in *"\${FAKE_MOUNT_FAIL:-^}"*) exit 32 ;; esac
+echo "mount \$*" >>"$tmp/calls"
+STUB
+printf '#!/bin/sh\necho "umount $*" >>"%s/calls"\n' "$tmp" >"$tmp/bin/umount"
+# timeout <kill-after> <duration> <command...>: reports an expiry on demand.
+cat >"$tmp/bin/timeout" <<STUB
+#!/bin/sh
+echo "timeout \$1 \$2" >>"$tmp/calls"
+[ -z "\$FAKE_TIMEOUT" ] || exit 124
+shift 2
+exec "\$@"
+STUB
 cat >"$tmp/bin/btrfs" <<'STUB'
 #!/bin/sh
 case "$*" in
@@ -39,10 +50,15 @@ cat >"$tmp/bin/arch-chroot" <<STUB
 #!/bin/sh
 echo "arch-chroot \$*" >>"$tmp/calls"
 [ "\$2" = update-grub ] || exit 0
+echo "GRUB_BTRFS_DISABLE=\${GRUB_BTRFS_DISABLE:-}" >>"$tmp/calls"
+[ -z "\$FAKE_NO_MARKER" ] || { mkdir -p "\$1/var/lib" && : >"\$1/var/lib/calaos-container"; }
 [ -n "\$FAKE_GRUBCFG" ] || exit 1
 mkdir -p "\$1/boot/grub" && cp "\$FAKE_GRUBCFG" "\$1/boot/grub/grub.cfg"
 STUB
-printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/mountpoint"
+cat >"$tmp/bin/mountpoint" <<'STUB'
+#!/bin/sh
+exit "${FAKE_EFI:-1}"
+STUB
 chmod +x "$tmp"/bin/*
 
 failures=0
@@ -57,6 +73,7 @@ marker="$dst/var/lib/calaos-container/grub-refresh"
 run() {
     rm -rf "$dst"
     mkdir -p "$dst/.snapshots/5/snapshot/usr/sbin"
+    [ "${FAKE_EFI:-1}" != 0 ] || mkdir -p "$dst/efi"
     printf '#!/bin/sh\n' >"$dst/.snapshots/5/snapshot/usr/sbin/update-grub"
     chmod +x "$dst/.snapshots/5/snapshot/usr/sbin/update-grub"
     : >"$tmp/calls"
@@ -75,6 +92,8 @@ check_ok() {
     grep -qx "mount -o noatime,compress=zstd,subvol=@/boot/grub $3 $dst/boot/grub" "$tmp/calls" ||
         fail "$1: grub mount: $(cat "$tmp/calls")"
     grep -qx "arch-chroot $dst update-grub" "$tmp/calls" || fail "$1: no update-grub: $(cat "$tmp/calls")"
+    grep -qx "timeout --kill-after=30s 10m" "$tmp/calls" || fail "$1: update-grub not bounded: $(cat "$tmp/calls")"
+    grep -qx "GRUB_BTRFS_DISABLE=true" "$tmp/calls" || fail "$1: grub-btrfs not disabled: $(cat "$tmp/calls")"
     [ -f "$marker" ] || fail "$1: no refresh marker"
 }
 
@@ -96,6 +115,7 @@ check_fails() {
     mounts=$(grep -c '^mount ' "$tmp/calls")
     umounts=$(grep -c '^umount ' "$tmp/calls")
     [ "$mounts" -eq "$umounts" ] || fail "$name: $mounts mounts, $umounts umounts"
+    ! grep -q "Error on line" "$tmp/err" || fail "$name: generic error: $(cat "$tmp/err")"
 }
 
 check_ok "subvolume source" "/dev/vda3[/@/.snapshots]" /dev/vda3
@@ -107,6 +127,27 @@ check_fails "update-grub fails" "update-grub failed" yes /dev/vda3 ""
 printf 'set default=0\n' >"$tmp/empty.cfg"
 check_fails "no boot entry" "grub.cfg has no boot entry" yes /dev/vda3 "$tmp/empty.cfg"
 check_fails "no @/boot/grub" "No @/boot/grub subvolume" no /dev/vda3 "$fixtures/current.cfg" "@ @/.snapshots"
+after="grub.cfg not updated after the rollback"
+FAKE_MOUNT_FAIL="subvol=@/boot/grub" check_fails "grub mount fails" "$after (command failed at line" yes \
+    /dev/vda3 "$fixtures/current.cfg"
+FAKE_TIMEOUT=1 check_fails "update-grub times out" "$after (update-grub timed out after 10m)" yes \
+    /dev/vda3 "$fixtures/current.cfg"
+
+# A bare linux line is not an entry, as in app/grubrepair.go.
+{ printf 'linux\n'; cat "$fixtures/current.cfg"; } >"$tmp/bare.cfg"
+run /dev/vda3 "$tmp/bare.cfg"
+[ "$rc" -eq 0 ] || fail "bare linux line: rc=$rc: $(cat "$tmp/err")"
+
+# Once grub.cfg is right the rollback has succeeded, marker or not.
+FAKE_NO_MARKER=1 run /dev/vda3 "$fixtures/current.cfg"
+[ "$rc" -eq 0 ] || fail "marker not written: rc=$rc: $(cat "$tmp/err")"
+grep -qF "Could not write $marker" "$tmp/err" || fail "marker not written: stderr: $(cat "$tmp/err")"
+
+# UEFI: the ESP is bound into the chroot for the one-shot block, then released.
+FAKE_EFI=0 run /dev/vda3 "$fixtures/current.cfg"
+[ "$rc" -eq 0 ] || fail "efi: rc=$rc: $(cat "$tmp/err")"
+grep -qx "mount --bind /efi $dst/efi" "$tmp/calls" || fail "efi: no bind: $(cat "$tmp/calls")"
+grep -qx "umount $dst/efi" "$tmp/calls" || fail "efi: not unmounted: $(cat "$tmp/calls")"
 
 # The grub-btrfs config is overridden by a bind mount, never edited.
 run /dev/vda3 "$fixtures/current.cfg"
