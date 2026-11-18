@@ -920,6 +920,22 @@ of the script>` (the script's `Error on line N` trap line is skipped, the line i
 characters); the full output is in the daemon log.
 The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
 
+`grub.cfg` names the kernel by its path inside the default subvolume, so the script also
+regenerates it, with `update-grub` in a chroot of the new default root, and checks that the
+default entry loads its kernel and initrd from that subvolume. If not, it fails and nothing
+reboots, with one of these messages:
+- `No @/boot/grub subvolume...` or `Snapshot #N has no update-grub...`: checked before snapper,
+  nothing has changed;
+- `grub.cfg not updated after the rollback (<cause>)...`: the snapshot is already the default
+  subvolume, but the normal boot still loads the previous root's kernel. Do not delete the previous
+  root's snapshot before `grub.cfg` is fixed. The next daemon start (below) retries.
+
+The chroot leaves out the grub-btrfs `Calaos-OS snapshots` submenu. At startup, outside an
+overlay, `calaos-container` runs `update-grub` again when the rollback asked for it
+(`/var/lib/calaos-container/grub-refresh`), or when the default entry of `grub.cfg` does not boot
+the default subvolume, which repairs boxes rolled back before this check. It does so only when `/` is
+the default subvolume, under the upgrade guard, and logs it. The API does not wait for it.
+
 In rescue, upgrades are refused: `409 in_rescue` on `POST /api/v2/update/upgrade-all` and
 `POST /api/v2/update/upgrade`, `500 {"error":true,"msg":"upgrades are disabled while running from
 a snapshot"}` on the legacy routes. The package `postinst` does not run `update-grub` when `/` is

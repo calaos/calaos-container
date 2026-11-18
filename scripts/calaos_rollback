@@ -11,6 +11,16 @@ set -euo pipefail
 
 trap 'die "Error on line $LINENO"' ERR
 
+# grub_default_entry_paths <grub.cfg>
+# Prints the kernel and initrd paths of the first boot entry, the default one.
+grub_default_entry_paths() {
+    awk '
+        $1 == "linux" { if (seen) exit; print $2; seen = 1; next }
+        $1 == "initrd" && seen { for (i = 2; i <= NF; i++) print $i; exit }
+        $1 == "}" && seen { exit }
+    ' "$1"
+}
+
 dst="/mnt"
 
 # Find the btrfs device backing the /.snapshots mount. findmnt resolves the
@@ -52,25 +62,82 @@ if ! [[ "$snapNumber" =~ ^[0-9]+$ ]]; then
     die "Could not determine snapshot number from /proc/cmdline (rootflags=${rootflags:-<unset>})"
 fi
 
-# Cleanup trap: make sure /mnt/.snapshots and /mnt end up unmounted even if
-# a later step fails, instead of leaving them mounted behind a dead script.
-cleanup_rollback_mounts() {
-    if mountpoint -q "$dst/.snapshots" 2>/dev/null; then
-        umount "$dst/.snapshots" || true
-    fi
-    if mountpoint -q "$dst" 2>/dev/null; then
-        umount "$dst" || true
-    fi
+# Everything mounted below $dst, unmounted in reverse order on any exit.
+mounted=()
+mnt() {
+    mount "$@" || return
+    mounted+=("${!#}")
 }
-register_cleanup cleanup_rollback_mounts
+unmount_all() {
+    local i
+    for ((i = ${#mounted[@]} - 1; i >= 0; i--)); do
+        umount "${mounted[$i]}" || true
+    done
+    mounted=()
+}
+override=""
+cleanup_rollback() {
+    unmount_all
+    [ -z "$override" ] || rm -f "$override"
+}
+register_cleanup cleanup_rollback
 
 #mount temporary rootfs and snapshot subvolume to be able to use snapper
-mount -o noatime,compress=zstd "$rootdev" "$dst"
-mount -o noatime,compress=zstd,subvol=@/.snapshots "$rootdev" "$dst/.snapshots"
+mnt -o noatime,compress=zstd "$rootdev" "$dst"
+mnt -o noatime,compress=zstd,subvol=@/.snapshots "$rootdev" "$dst/.snapshots"
+
+# grub.cfg must follow the new default subvolume (see below): check what that
+# needs before snapper changes anything.
+if ! btrfs subvolume list "$dst" | awk '$NF == "@/boot/grub" { found = 1 } END { exit !found }'; then
+    die "No @/boot/grub subvolume: grub.cfg could not follow the rollback"
+fi
+if [ ! -x "$dst/.snapshots/$snapNumber/snapshot/usr/sbin/update-grub" ]; then
+    die "Snapshot #$snapNumber has no update-grub: grub.cfg could not follow the rollback"
+fi
 
 info "--> Rollback rootfs to snapshot #$snapNumber"
 arch-chroot "$dst" snapper --no-dbus rollback "$snapNumber"
 arch-chroot "$dst" snapper --no-dbus list
 
-umount "$dst/.snapshots"
-umount "$dst"
+fail_grub() {
+    die "grub.cfg not updated after the rollback ($1): the normal boot still loads the previous root's kernel"
+}
+
+# grub.cfg names the kernel by its path in the old default subvolume
+# (/@/.snapshots/N/snapshot/boot/...): once snapper cleans that snapshot up, the
+# normal entry no longer boots. It is regenerated from the new default root.
+unmount_all
+mnt -o noatime,compress=zstd "$rootdev" "$dst"
+newroot="$(btrfs subvolume get-default "$dst" | sed -n 's/^ID [0-9].* path //p')" || newroot=""
+[ -n "$newroot" ] || fail_grub "new default subvolume unknown"
+
+mnt -o noatime,compress=zstd,subvol=@/boot/grub "$rootdev" "$dst/boot/grub"
+# Without the ESP grub/41_calaos-snapshot-boot leaves out the one-shot block.
+if mountpoint -q /efi && [ -d "$dst/efi" ]; then
+    mnt --bind /efi "$dst/efi"
+fi
+# grub-btrfs fails in a chroot (calaos_install disables it too). A bind mount
+# keeps the root's config untouched; the daemon runs update-grub again at the
+# next boot, from the marker, to bring the snapshot submenu back.
+btrfscfg="$dst/etc/default/grub-btrfs/config"
+if [ -f "$btrfscfg" ]; then
+    override="$(mktemp)"
+    { cat "$btrfscfg"; echo 'GRUB_BTRFS_DISABLE="true"'; } >"$override"
+    mnt --bind "$override" "$btrfscfg"
+fi
+
+info "--> Regenerate grub.cfg for $newroot"
+arch-chroot "$dst" update-grub || fail_grub "update-grub failed"
+
+grubcfg="$dst/boot/grub/grub.cfg"
+paths="$(grub_default_entry_paths "$grubcfg")" || paths=""
+[ -n "$paths" ] || fail_grub "grub.cfg has no boot entry"
+while read -r p; do
+    case "$p" in
+    "/$newroot/boot/"*) ;;
+    *) fail_grub "the default grub entry loads $p, outside $newroot" ;;
+    esac
+done <<<"$paths"
+
+mkdir -p "$dst/var/lib/calaos-container"
+: >"$dst/var/lib/calaos-container/grub-refresh"

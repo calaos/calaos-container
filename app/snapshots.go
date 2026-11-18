@@ -124,6 +124,8 @@ type rescueStatus struct {
 	Rescue   bool `json:"rescue"`
 	Snapshot *int `json:"snapshot"`
 	Overlay  bool `json:"overlay"`
+
+	rootSubvol string
 }
 
 func errRescueUnavailable(cause error) *apiError {
@@ -177,6 +179,7 @@ func readRescueStatus() (rescueStatus, error) {
 	root := fm.Filesystems[0]
 	st.Overlay = root.FsType == "overlay"
 	st.Rescue = st.Overlay && root.Source == "rootfs"
+	st.rootSubvol = subvolOfSource(root.Source)
 
 	cmdline, err := os.ReadFile(procCmdlinePath)
 	if err != nil {

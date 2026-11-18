@@ -49,6 +49,18 @@ func RebootGuard(fn func() error) error {
 	return nil
 }
 
+// WithUpgradeLock runs fn under upgradeLock, waiting for it as long as ctx
+// allows, so fn never overlaps an upgrade (whose kernel postinst runs
+// update-grub too).
+func WithUpgradeLock(ctx context.Context, fn func()) error {
+	if err := upgradeLock.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer upgradeLock.Release(1)
+	fn()
+	return nil
+}
+
 func acquireUpgradeLock() error {
 	if upgradeLock.TryAcquire(1) {
 		return nil
