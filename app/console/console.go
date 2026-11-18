@@ -280,12 +280,14 @@ func (m *Manager) Open(req Request, take func() error) (Info, error) {
 
 	if err := m.serve(c, req.Term); err != nil {
 		m.mu.Lock()
-		delete(m.consoles, id)
 		c.exited = true
 		info := c.Info
 		m.mu.Unlock()
-		close(c.done)
 		m.o.Closed(info, ReasonExited)
+		m.mu.Lock()
+		delete(m.consoles, id)
+		m.mu.Unlock()
+		close(c.done)
 		return Info{}, err
 	}
 
@@ -331,6 +333,9 @@ func (m *Manager) killLocked(c *console, reason string) {
 	go func() {
 		select {
 		case <-c.done:
+		// The leader is reaped: a slow Closed must not SIGKILL a pgid the
+		// kernel may have reused.
+		case <-c.shellDone:
 		case <-time.After(killGrace):
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		}
