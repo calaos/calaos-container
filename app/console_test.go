@@ -176,6 +176,10 @@ func TestConsoleKilledAfterFiveBadCodes(t *testing.T) {
 	if _, err := os.Lstat(theirs.Socket); err != nil {
 		t.Fatalf("other session's console: %v", err)
 	}
+	// Manager.Shutdown returns once the console is done, before its close
+	// audit is written; the audit write must not outlive the TempDir.
+	c.a.consoles.Shutdown()
+	waitAudit(t, "console="+theirs.ConsoleID+" reason=shutdown")
 }
 
 func TestConsoleActivityRouteRemoved(t *testing.T) {

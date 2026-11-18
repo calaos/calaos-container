@@ -693,6 +693,7 @@ func TestSnapshotsListTooOld(t *testing.T) {
 
 const grubCfgESP = grubCfgWithMenu + `### BEGIN /etc/grub.d/41_calaos-snapshot-boot ###
 load_env --file "(${calaos_esp})/calaos/grubenv" calaos_oneshot
+set default="${calaos_target}"
 `
 
 const findmntESP = "findmnt -n -o FSTYPE /efi"

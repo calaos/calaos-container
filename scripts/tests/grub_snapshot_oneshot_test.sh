@@ -44,7 +44,7 @@ run() {
     env -u grub_probe PATH="$tmp/bin:$PATH" sh "$script" >"$tmp/out" 2>"$tmp/err" || rc=$?
     [ "$rc" -eq 0 ] || fail "$1: rc=$rc"
     [ ! -s "$tmp/err" ] || fail "$1: stderr $(cat "$tmp/err")"
-    [ "$(head -n 3 "$tmp/out")" = "$(printf '# calaos-snapshot-boot 2\nexport default\nexport timeout')" ] ||
+    [ "$(head -n 3 "$tmp/out")" = "$(printf '# calaos-snapshot-boot 3\nexport default\nexport timeout')" ] ||
         fail "$1: header $(head -n 3 "$tmp/out")"
     if command -v grub-script-check >/dev/null 2>&1; then
         grub-script-check "$tmp/out" >/dev/null 2>&1 || fail "$1: grub-script-check rejects the fragment"
@@ -53,6 +53,7 @@ run() {
 
 no_esp_block() {
     ! grep -q calaos_oneshot "$tmp/out" || fail "$1: ESP block emitted"
+    ! grep -q 'set timeout=' "$tmp/out" || fail "$1: timeout set without one-shot"
 }
 
 stubs 0 fat "$uuid"
@@ -71,6 +72,12 @@ default=$(grep -n 'set default="${calaos_target}"' "$tmp/out" | cut -d: -f1)
 if [ -z "$save" ] || [ -z "$clear" ] || [ -z "$default" ] || [ "$clear" -ge "$save" ] || [ "$save" -ge "$default" ]; then
     fail "FAT ESP: clear $clear, save_env $save, set default $default out of order"
 fi
+# The nested snapshot menu has no timeout of its own: it is zeroed and
+# exported right after set default, inside the save_env branch (its fi follows).
+after=$(sed -n "$((default + 1)),$((default + 3))p" "$tmp/out")
+want=$(printf '          set timeout=0\n          export timeout\n        fi')
+[ "$after" = "$want" ] || fail "FAT ESP: set timeout/export timeout not inside the save_env branch after set default: $after"
+[ "$(grep -c 'timeout' "$tmp/out")" -eq 3 ] || fail "FAT ESP: timeout set outside the one-shot branch"
 [ "$(grep -c 'set default=' "$tmp/out")" -eq 1 ] || fail "FAT ESP: default set outside the save_env branch"
 
 stubs 1 fat "$uuid"

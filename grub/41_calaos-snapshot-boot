@@ -4,12 +4,13 @@
 
 # grub-reboot into a grub-btrfs snapshot enters its menu through "configfile",
 # which keeps only exported variables. Without these, that menu loses the
-# chosen entry and the zero timeout, and waits for a key on a headless box.
-# A key pressed at the main menu unsets timeout before the export is copied,
-# so manual browsing stays interactive.
+# chosen entry, and waits for a key on a headless box.
+# The main menu countdown unsets timeout when it expires, so only a timeout
+# already at 0 reaches the nested menu: the one-shot branch sets it below.
+# Normal boots keep the default timeout and stay interactive.
 # The version line tells the package postinst that grub.cfg is up to date.
 cat <<'GRUBCFG'
-# calaos-snapshot-boot 2
+# calaos-snapshot-boot 3
 export default
 export timeout
 GRUBCFG
@@ -39,6 +40,8 @@ if [ "\${grub_platform}" = "efi" ]; then
         set calaos_oneshot=
         if save_env --file "(\${calaos_esp})/calaos/grubenv" calaos_oneshot; then
           set default="\${calaos_target}"
+          set timeout=0
+          export timeout
         fi
       fi
     fi
