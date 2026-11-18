@@ -53,6 +53,7 @@ run() {
 
 no_esp_block() {
     ! grep -q calaos_oneshot "$tmp/out" || fail "$1: ESP block emitted"
+    ! grep -q 'set timeout=' "$tmp/out" || fail "$1: timeout set without one-shot"
 }
 
 stubs 0 fat "$uuid"
@@ -71,6 +72,14 @@ default=$(grep -n 'set default="${calaos_target}"' "$tmp/out" | cut -d: -f1)
 if [ -z "$save" ] || [ -z "$clear" ] || [ -z "$default" ] || [ "$clear" -ge "$save" ] || [ "$save" -ge "$default" ]; then
     fail "FAT ESP: clear $clear, save_env $save, set default $default out of order"
 fi
+# The nested snapshot menu has no timeout of its own: it is zeroed and
+# exported inside the one-shot branch only, after default.
+tmo=$(grep -n '^ *set timeout=0$' "$tmp/out" | cut -d: -f1)
+exp=$(grep -n '^ *export timeout$' "$tmp/out" | cut -d: -f1)
+if [ -z "$tmo" ] || [ -z "$exp" ] || [ "$tmo" -le "$default" ] || [ "$exp" -le "$tmo" ]; then
+    fail "FAT ESP: set timeout $tmo, export timeout $exp not after set default $default"
+fi
+[ "$(grep -c 'set timeout=' "$tmp/out")" -eq 1 ] || fail "FAT ESP: timeout set outside the one-shot branch"
 [ "$(grep -c 'set default=' "$tmp/out")" -eq 1 ] || fail "FAT ESP: default set outside the save_env branch"
 
 stubs 1 fat "$uuid"

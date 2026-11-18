@@ -39,6 +39,8 @@ if [ "\${grub_platform}" = "efi" ]; then
         set calaos_oneshot=
         if save_env --file "(\${calaos_esp})/calaos/grubenv" calaos_oneshot; then
           set default="\${calaos_target}"
+          set timeout=0
+          export timeout
         fi
       fi
     fi
