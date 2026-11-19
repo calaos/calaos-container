@@ -44,8 +44,11 @@ run() {
     env -u grub_probe PATH="$tmp/bin:$PATH" sh "$script" >"$tmp/out" 2>"$tmp/err" || rc=$?
     [ "$rc" -eq 0 ] || fail "$1: rc=$rc"
     [ ! -s "$tmp/err" ] || fail "$1: stderr $(cat "$tmp/err")"
-    [ "$(head -n 3 "$tmp/out")" = "$(printf '# calaos-snapshot-boot 3\nexport default\nexport timeout')" ] ||
+    [ "$(head -n 3 "$tmp/out")" = "$(printf '# calaos-snapshot-boot 4\nexport default\nexport timeout')" ] ||
         fail "$1: header $(head -n 3 "$tmp/out")"
+    # GRUB's grammar rejects && and || although its lexer knows them; this
+    # holds even where grub-script-check is not installed (bin/test).
+    ! grep -Eq '&&|\|\|' "$tmp/out" || fail "$1: && or || in the fragment"
     if command -v grub-script-check >/dev/null 2>&1; then
         grub-script-check "$tmp/out" >/dev/null 2>&1 || fail "$1: grub-script-check rejects the fragment"
     fi
@@ -53,7 +56,20 @@ run() {
 
 no_esp_block() {
     ! grep -q calaos_oneshot "$tmp/out" || fail "$1: ESP block emitted"
-    ! grep -q 'set timeout=' "$tmp/out" || fail "$1: timeout set without one-shot"
+    [ "$(grep -c 'set timeout=' "$tmp/out")" -eq 1 ] || fail "$1: timeout set outside the boot_once block"
+    bios_block "$1"
+}
+
+# next_entry one-shot: consumed by 00_header, it leaves boot_once=true. After
+# an interruptible 3 s delay (Escape keeps the menu), the timeout is zeroed for
+# the nested menus, on any platform, and before any early exit of the ESP probing.
+bios_block() {
+    local want
+    # shellcheck disable=SC2016 # GRUB variables, matched literally
+    want=$(printf '%s\n' 'if [ "${boot_once}" = "true" ]; then' \
+        '  if sleep --interruptible --verbose 3; then' '    set timeout=0' '    export timeout' \
+        '  fi' 'fi')
+    [ "$(sed -n 4,9p "$tmp/out")" = "$want" ] || fail "$1: boot_once block missing or moved: $(sed -n 4,9p "$tmp/out")"
 }
 
 stubs 0 fat "$uuid"
@@ -77,7 +93,8 @@ fi
 after=$(sed -n "$((default + 1)),$((default + 3))p" "$tmp/out")
 want=$(printf '          set timeout=0\n          export timeout\n        fi')
 [ "$after" = "$want" ] || fail "FAT ESP: set timeout/export timeout not inside the save_env branch after set default: $after"
-[ "$(grep -c 'timeout' "$tmp/out")" -eq 3 ] || fail "FAT ESP: timeout set outside the one-shot branch"
+bios_block "FAT ESP"
+[ "$(grep -c 'set timeout=' "$tmp/out")" -eq 2 ] || fail "FAT ESP: timeout set outside the boot_once and ESP branches"
 [ "$(grep -c 'set default=' "$tmp/out")" -eq 1 ] || fail "FAT ESP: default set outside the save_env branch"
 
 stubs 1 fat "$uuid"
