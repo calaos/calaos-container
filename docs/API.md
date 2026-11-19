@@ -966,7 +966,10 @@ a snapshot"}` on the legacy routes. The package `postinst` does not run `update-
 an overlay. If the rescue state cannot be read, upgrades are allowed.
 
 Boot and rollback take the upgrade guard and keep it until the reboot, so no job starts in
-between; if the reboot fails, the guard stays held until `calaos-container` restarts.
+between; if the reboot fails, the guard stays held until `calaos-container` restarts. A
+rollback that succeeded keeps it too when its own reboot fails (`system/rollback_snapshot`, v2
+and legacy): the new default root is set, so no upgrade may run on the old one. A rollback that
+failed releases it.
 
 ## Logs
 
@@ -1301,11 +1304,14 @@ synchronous behaviour: they answer when apt ends.
   `409 upgrade_in_progress` (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
-  `"package not found"` unchanged. Two deliberate exceptions: the legacy `POST /api/system/reboot`
-  and `POST /api/system/restart` answer `409 {"error": true, "msg": "upgrade already in progress"}`
+  `"package not found"` unchanged. Three deliberate exceptions: the legacy `POST /api/system/reboot`,
+  `POST /api/system/restart` and `POST /api/system/rollback_snapshot` answer `409 {"error": true, "msg": "upgrade already in progress"}`
   during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
-  ignore the result of both.
-  The legacy `POST /api/system/rollback_snapshot` is unchanged.
+  ignore the result of the first two.
+  The legacy `POST /api/system/rollback_snapshot` takes the same path as the v2 route:
+  `calaos_rollback` is bounded by a timeout, the reboot is sent only after it succeeded, and
+  during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
+  answers `500` with the usual legacy body and no reboot.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
   The legacy `POST /api/update/upgrade?package=` applies the same rule and answers its
@@ -1525,7 +1531,7 @@ Go error text.
 | POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
-| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots) | 500 `{"error":true,"msg":<err>}`, no reboot; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/install/start` | 200 `text/plain` log stream | 400 or 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/status` | 200 `{"error":false,"msg":"ok","exit_code":<int>,"log":<text>}` | 400 `{"error":true,"msg":<err>}`, including "never ran" |
