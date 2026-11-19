@@ -49,7 +49,7 @@ sed -e "s#/usr/lib/calaos/calaos-common.sh#$lib#" \
 
 run_boot() {
     : > "$tmp/chvt.log"
-    PATH="$tmp/bin:$PATH" bash "$tmp/boot" "$@" >/dev/null 2>&1
+    env -u IMAGE_SRC PATH="$tmp/bin:$PATH" bash "$tmp/boot" "$@" >/dev/null 2>&1
 }
 
 # failure inside a function (set -e, no ERR trap there)
