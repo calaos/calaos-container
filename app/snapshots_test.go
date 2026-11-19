@@ -1284,3 +1284,26 @@ func TestLegacyRollbackFailureNoReboot(t *testing.T) {
 		t.Fatalf("rebooted after a failed rollback: %s", got)
 	}
 }
+
+func TestLegacyRollbackKeepsGuardWhenRebootFails(t *testing.T) {
+	e := newSnapEnv(t, normalBackend(map[string]stubResult{
+		"calaos_rollback":  {},
+		"systemctl reboot": {err: errors.New("boom")},
+	}))
+	prevGuard := rebootGuard
+	t.Cleanup(func() { rebootGuard = prevGuard })
+	kept := false
+	rebootGuard = func(fn func() error) error {
+		err := fn()
+		kept = err == nil
+		return err
+	}
+	a := newHandlerTestApp(t)
+	resp, body := doCase(t, a, httpCase{method: "POST", path: "/api/system/rollback_snapshot"})
+	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(body), `"error":true`) {
+		t.Fatalf("got %d %s", resp.StatusCode, body)
+	}
+	if !kept {
+		t.Fatalf("guard released after a successful rollback: %s", strings.Join(e.ran, ";"))
+	}
+}
