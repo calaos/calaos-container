@@ -10,6 +10,15 @@ set -euo pipefail
 # shellcheck disable=SC1091
 . /usr/lib/calaos/calaos-common.sh
 
+# EXIT, not ERR: without errtrace the ERR trap skips functions and set -u
+# errors, and tty2 is masked so a VT left on 2 is a black screen. chvt is
+# idempotent on the normal path.
+release_vt()
+{
+    chvt 1 || true
+}
+register_cleanup release_vt
+
 trap 'die "Error on line $LINENO"' ERR
 
 # Define the dialog exit status codes.
@@ -66,9 +75,9 @@ load_containers()
         fi
     done
 
-    echo
+    echo || true
     green "Initialization done!"
-    echo "Continuing boot..."
+    echo "Continuing boot..." || true
     log "Initialization done! Continuing boot"
 }
 
@@ -146,7 +155,7 @@ run_installer()
                 log "No disk selected. Calaos-OS installation aborted"
                 sleep 2
                 load_containers
-                echo
+                echo || true
                 sleep 2
 
                 # change back to main console
@@ -156,7 +165,7 @@ run_installer()
             *)
                 green "Installing Calaos-OS on $disk..."
                 log "Installing Calaos-OS on $disk"
-                echo
+                echo || true
                 sleep 2
 
                 install_result=0
@@ -165,7 +174,7 @@ run_installer()
                 if [ "$install_result" -eq 0 ]; then
                     green "Calaos-OS installation successful on $disk. Rebooting..."
                     log "Calaos-OS installation successful on $disk"
-                    echo
+                    echo || true
                     sleep 2
                     reboot
                     return 0
@@ -188,7 +197,7 @@ run_installer()
                     color "${ORANGE}" "Skipping installation. Continuing boot..."
                     log "Skipping installation after failure. Continuing boot"
                     load_containers
-                    echo
+                    echo || true
                     sleep 2
 
                     # change back to main console
@@ -216,14 +225,14 @@ color "${LIGHTBLUE}" "██║     ███████║██║     ██
 color "${LIGHTBLUE}" "██║     ██╔══██║██║     ██╔══██║██║   ██║╚════██║╚════╝██║   ██║╚════██║"
 color "${LIGHTBLUE}" "╚██████╗██║  ██║███████╗██║  ██║╚██████╔╝███████║      ╚██████╔╝███████║"
 color "${LIGHTBLUE}" " ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝       ╚═════╝ ╚══════╝"
-echo
-echo
+echo || true
+echo || true
 color "${PURPLE}" "Welcome to Calaos-OS!"
-echo
+echo || true
 info "Calaos-OS is currently initializing. Please wait..."
 info "This can take a few minutes. Please be patient."
-echo
-echo
+echo || true
+echo || true
 
 log "Parsing kernel command line"
 calaos_parse_cmdline
@@ -239,7 +248,7 @@ then
     log "Calaos-OS installation was requested. Starting installer"
 
     green "Calaos-OS installation was requested. Starting installer..."
-    echo
+    echo || true
     sleep 2
 
     # Create a temporary file and make sure it goes away when we're done.
@@ -265,7 +274,7 @@ else
     log "Loading containers"
 
     load_containers
-    echo
+    echo || true
     sleep 2
 
     # change back to main console
