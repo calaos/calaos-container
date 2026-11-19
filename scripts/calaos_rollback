@@ -21,7 +21,8 @@ grub_default_entry_paths() {
     ' "$1"
 }
 
-dst="/mnt"
+# Private mount point: /mnt/calaos must stay visible to the running system.
+run_dir="/run"
 update_grub_timeout="10m"
 
 # Find the btrfs device backing the /.snapshots mount. findmnt resolves the
@@ -79,19 +80,32 @@ unmount_all() {
 override=""
 grubbak=""
 bakfile=""
-grubcfg="$dst/boot/grub/grub.cfg"
 cleanup_rollback() {
     unmount_all
+    [ -z "${dst:-}" ] || rmdir "$dst" 2>/dev/null || true
     [ -z "$override" ] || rm -f "$override"
     [ -z "$bakfile" ] || rm -f "$bakfile"
 }
 register_cleanup cleanup_rollback
 
-# A rollback the daemon killed leaves its mounts, and its update-grub may still
-# run there for 10 minutes: never mount over it.
-if mountpoint -q "$dst"; then
-    die "$dst is already mounted, maybe by a rollback still running update-grub: unmount it (umount -R $dst) before trying again"
-fi
+# One rollback at a time. The children (update-grub) inherit fd 9: a rollback the
+# daemon killed keeps the lock while its update-grub still runs, and nothing
+# may mount over or remove that mount point meanwhile. The daemon's own guard
+# (rebootGuard) does not cover the CLI route nor an orphaned child.
+exec 9>"$run_dir/calaos-rollback.lock"
+flock -n 9 || die "Another calaos_rollback is running, maybe a killed one whose update-grub is still running: try again in 11 minutes"
+
+# Mounts left by a rollback that was killed: the lock proves it is gone.
+for stale in "$run_dir"/calaos-rollback.*/; do
+    [ -d "$stale" ] || continue
+    if mountpoint -q "$stale"; then
+        umount -R "$stale" || warn "Could not unmount the stale $stale"
+    fi
+    rmdir "$stale" 2>/dev/null || true
+done
+
+dst="$(mktemp -d "$run_dir/calaos-rollback.XXXXXX")"
+grubcfg="$dst/boot/grub/grub.cfg"
 
 #mount temporary rootfs and snapshot subvolume to be able to use snapper
 mnt -o noatime,compress=zstd "$rootdev" "$dst"
