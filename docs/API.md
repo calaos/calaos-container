@@ -892,6 +892,14 @@ two ways to make the boot single-use:
 - `next_entry`: otherwise, `grub-reboot`. The snapshot must enable
   `calaos-snapshot-oneshot.service`, which clears `next_entry` early in its boot.
 
+Rescue boots without a key, on BIOS as on UEFI. The package's `grub.d` script zeroes and exports
+`timeout` for the nested snapshot menus: in `next_entry` mode (BIOS, or UEFI without a FAT ESP)
+when GRUB has just consumed a `next_entry` (`boot_once` set by `00_header`, whether or not
+`save_env` succeeds), after a 3 s delay that Escape interrupts to show the normal menu; on UEFI
+with an ESP, inside the `calaos_oneshot` block. A normal boot keeps the usual menu and delay. This
+relies on the `grub.cfg` carrying `# calaos-snapshot-boot 4`; the package postinst regenerates it
+when the marker is older.
+
 A snapshot is `bootable` (and accepted here) only if its own tree, `/.snapshots/<N>/snapshot`,
 holds the overlay hook (`usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay`) and,
 in `next_entry` mode, the
@@ -901,9 +909,11 @@ overlay, or keep booting itself.
 
 Known risk in `next_entry` mode (BIOS boxes, or no FAT ESP): a snapshot that dies before
 sysinit (kernel panic, root not mounted, `/boot/grub` not mounted) never clears `next_entry`, so
-every reboot starts it again. A box without a screen needs the entry chosen by hand in GRUB. This
-is inherent to `grub-reboot` on btrfs and is accepted for the few boxes concerned; the ESP mode
-does not have it, and the daemon does not refuse the boot outside an ESP.
+every reboot starts it again. GRUB waits 3 s with no menu, then boots the snapshot; pressing
+Escape during that delay shows the normal menu, where another entry can be chosen. A box without
+a keyboard or screen needs external media. This is inherent to `grub-reboot` on btrfs and is
+accepted for the few boxes concerned; the ESP mode does not have it, and the daemon does not
+refuse the boot outside an ESP.
 
 At every start, `calaos-container` clears a leftover `next_entry` and `calaos_oneshot`, so a
 normal boot never keeps a pending snapshot boot. If the deferred reboot fails, the daemon clears
@@ -966,7 +976,10 @@ a snapshot"}` on the legacy routes. The package `postinst` does not run `update-
 an overlay. If the rescue state cannot be read, upgrades are allowed.
 
 Boot and rollback take the upgrade guard and keep it until the reboot, so no job starts in
-between; if the reboot fails, the guard stays held until `calaos-container` restarts.
+between; if the reboot fails, the guard stays held until `calaos-container` restarts. A
+rollback that succeeded keeps it too when its own reboot fails (`system/rollback_snapshot`, v2
+and legacy): the new default root is set, so no upgrade may run on the old one. A rollback that
+failed releases it.
 
 ## Logs
 
@@ -1301,11 +1314,14 @@ synchronous behaviour: they answer when apt ends.
   `409 upgrade_in_progress` (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
-  `"package not found"` unchanged. Two deliberate exceptions: the legacy `POST /api/system/reboot`
-  and `POST /api/system/restart` answer `409 {"error": true, "msg": "upgrade already in progress"}`
+  `"package not found"` unchanged. Three deliberate exceptions: the legacy `POST /api/system/reboot`,
+  `POST /api/system/restart` and `POST /api/system/rollback_snapshot` answer `409 {"error": true, "msg": "upgrade already in progress"}`
   during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
-  ignore the result of both.
-  The legacy `POST /api/system/rollback_snapshot` is unchanged.
+  ignore the result of the first two.
+  The legacy `POST /api/system/rollback_snapshot` takes the same path as the v2 route:
+  `calaos_rollback` is bounded by a timeout, the reboot is sent only after it succeeded, and
+  during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
+  answers `500` with the usual legacy body and no reboot.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
   The legacy `POST /api/update/upgrade?package=` applies the same rule and answers its
@@ -1525,7 +1541,7 @@ Go error text.
 | POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
-| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots) | 500 `{"error":true,"msg":<err>}`, no reboot; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/install/start` | 200 `text/plain` log stream | 400 or 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/status` | 200 `{"error":false,"msg":"ok","exit_code":<int>,"log":<text>}` | 400 `{"error":true,"msg":<err>}`, including "never ran" |

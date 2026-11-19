@@ -51,8 +51,8 @@ func restartHome() error {
 }
 
 // legacyGuardedError answers 409 during an upgrade, a deliberate change to the
-// legacy reboot and restart: either would cut dpkg, and old kiosks handle any
-// non-2xx the same way.
+// legacy reboot, restart and rollback: each would cut dpkg, and old kiosks
+// handle any non-2xx the same way.
 func legacyGuardedError(c *fiber.Ctx, err error) error {
 	if errors.Is(err, models.ErrUpgradeInProgress) {
 		return legacyError(c, fiber.StatusConflict, err)
@@ -101,16 +101,31 @@ func (a *AppServer) apiSystemFsStatus(c *fiber.Ctx) error {
 	})
 }
 
-// apiSystemRollbackSnapshot keeps its legacy behaviour during an upgrade (no
-// 409), an accepted risk until old kiosks are gone.
+// apiSystemRollbackSnapshot is the kiosk and mobile route: same guarded,
+// bounded path as the v2 one, only the error body stays the frozen legacy one.
 func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) error {
-	if _, err := runCommand("calaos_rollback"); err != nil {
-		return legacyError(c, fiber.StatusInternalServerError, err)
-	}
-	if err := reboot(); err != nil {
-		return legacyError(c, fiber.StatusInternalServerError, err)
+	if err := rollbackAndReboot(); err != nil {
+		return legacyGuardedError(c, err)
 	}
 	return legacyOK(c)
+}
+
+// rollbackAndReboot holds RebootGuard over both steps, so an upgrade cannot
+// start between them, and reboots only once calaos_rollback succeeded. Once
+// the rollback has succeeded the guard stays held even if the reboot fails:
+// the new default root is in place and an upgrade would run on the old one.
+func rollbackAndReboot() error {
+	var rebootErr error
+	if err := rebootGuard(func() error {
+		if _, err := rollbackCommand(); err != nil {
+			return err
+		}
+		rebootErr = reboot()
+		return nil
+	}); err != nil {
+		return err
+	}
+	return rebootErr
 }
 
 func (a *AppServer) apiSystemInstallListDevices(c *fiber.Ctx) error {
@@ -423,16 +438,9 @@ func (a *AppServer) v2SystemFsStatus(c *fiber.Ctx) error {
 	return sendOK(c, fiber.StatusOK, parsed)
 }
 
-// v2SystemRollbackSnapshot guards rollback and reboot together, so an
-// upgrade can never start between them.
+// v2SystemRollbackSnapshot is bearer-only, kept for the CLI.
 func (a *AppServer) v2SystemRollbackSnapshot(c *fiber.Ctx) error {
-	err := rebootGuard(func() error {
-		if _, err := rollbackCommand(); err != nil {
-			return err
-		}
-		return reboot()
-	})
-	if err != nil {
+	if err := rollbackAndReboot(); err != nil {
 		return guardedError(err)
 	}
 	return sendOK(c, fiber.StatusOK, nil)
