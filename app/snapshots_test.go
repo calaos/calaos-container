@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/calaos/calaos-container/models"
 )
 
 const snapperCmd = "snapper --no-dbus -c root --jsonout list"
@@ -1206,6 +1208,11 @@ func TestSnapshotCommandsAreBounded(t *testing.T) {
 			status, _ := snapDo(t, rollbackCase())
 			return status
 		}, 500, &rollbackTimeout},
+		{"legacy calaos_rollback", "calaos_rollback", normalBackend, func(t *testing.T) int {
+			a := newHandlerTestApp(t)
+			resp, _ := doCase(t, a, httpCase{method: "POST", path: "/api/system/rollback_snapshot"})
+			return resp.StatusCode
+		}, 500, &rollbackTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1255,5 +1262,25 @@ func TestSnapshotBootIDBeyondCap(t *testing.T) {
 	status, r := snapDo(t, bootCase(`{"id":1}`))
 	if status != 409 || r.Code != codeNotBootable {
 		t.Fatalf("got %d %+v", status, r)
+	}
+}
+
+// The legacy route must not reboot after a failed rollback, and must release
+// the guard so a later upgrade or retry is not locked out.
+func TestLegacyRollbackFailureNoReboot(t *testing.T) {
+	fail := errors.New("exit status 1\nstderr: mount failed")
+	e := newSnapEnv(t, normalBackend(map[string]stubResult{"calaos_rollback": {err: fail}}))
+	prevGuard := rebootGuard
+	t.Cleanup(func() { rebootGuard = prevGuard })
+	rebootGuard = models.RebootGuard
+	a := newHandlerTestApp(t)
+	for i := 0; i < 2; i++ {
+		resp, body := doCase(t, a, httpCase{method: "POST", path: "/api/system/rollback_snapshot"})
+		if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(body), `"error":true`) {
+			t.Fatalf("try %d: got %d %s", i, resp.StatusCode, body)
+		}
+	}
+	if got := strings.Join(e.ran, ";"); strings.Contains(got, "systemctl reboot") {
+		t.Fatalf("rebooted after a failed rollback: %s", got)
 	}
 }

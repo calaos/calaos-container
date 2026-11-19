@@ -1295,7 +1295,10 @@ synchronous behaviour: they answer when apt ends.
   and `POST /api/system/restart` answer `409 {"error": true, "msg": "upgrade already in progress"}`
   during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
   ignore the result of both.
-  The legacy `POST /api/system/rollback_snapshot` is unchanged.
+  The legacy `POST /api/system/rollback_snapshot` takes the same path as the v2 route:
+  `calaos_rollback` is bounded by a timeout, the reboot is sent only after it succeeded, and
+  during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
+  answers `500` with the usual legacy body and no reboot.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
   The legacy `POST /api/update/upgrade?package=` applies the same rule and answers its
