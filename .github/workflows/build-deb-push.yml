@@ -29,10 +29,19 @@ jobs:
     name: Build deb package and push to repositories
     runs-on: ubuntu-latest
     needs: ci
+    # Serializes version computation, tag and release across runs; the next
+    # run only starts (and reads the tags) once the previous one has tagged.
+    concurrency:
+      group: release-${{ github.repository }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout the repo
         uses: actions/checkout@v4
+        with:
+          # The bump step must see tags created by the run that just finished.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Calaos Action Bump Version
         id: calaos_version
