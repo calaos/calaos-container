@@ -18,6 +18,7 @@ mkdir -p "$tmp/run"
 sed "s#cat /proc/cmdline#cat $tmp/cmdline#" "$here/../lib/calaos-common.sh" >"$tmp/lib/calaos-common.sh"
 sed -e "s#/usr/lib/calaos/calaos-common.sh#$tmp/lib/calaos-common.sh#" \
     -e "s#^run_dir=\"/run\"#run_dir=\"$tmp/run\"#" "$here/../calaos_rollback" >"$tmp/calaos_rollback"
+grep -q "^run_dir=\"$tmp/run\"" "$tmp/calaos_rollback" || { echo "FAIL: run_dir not redirected"; exit 1; }
 echo 'ro rootflags=subvol=@/.snapshots/5/snapshot' >"$tmp/cmdline"
 
 cat >"$tmp/bin/findmnt" <<'STUB'
@@ -82,6 +83,8 @@ case "\$*" in
 esac
 [ "\$2" = update-grub ] || exit 0
 echo "GRUB_BTRFS_DISABLE=\${GRUB_BTRFS_DISABLE:-}" >>"$tmp/calls"
+# fd 9 holds the rollback lock: update-grub must inherit it.
+{ flock -n 9 && echo "update-grub holds fd 9" >>"$tmp/calls"; } 2>/dev/null
 [ -z "\$FAKE_NO_MARKER" ] || { mkdir -p "\$1/var/lib" && : >"\$1/var/lib/calaos-container"; }
 [ -n "\$FAKE_GRUBCFG" ] || exit 1
 mkdir -p "\$1/boot/grub" && cp "\$FAKE_GRUBCFG" "\$1/boot/grub/grub.cfg"
@@ -165,6 +168,7 @@ check_ok() {
     grep -qx "arch-chroot $dst update-grub" "$tmp/calls" || fail "$1: no update-grub: $(cat "$tmp/calls")"
     grep -qx "timeout --kill-after=30s 10m" "$tmp/calls" || fail "$1: update-grub not bounded: $(cat "$tmp/calls")"
     grep -qx "GRUB_BTRFS_DISABLE=true" "$tmp/calls" || fail "$1: grub-btrfs not disabled: $(cat "$tmp/calls")"
+    grep -qx "update-grub holds fd 9" "$tmp/calls" || fail "$1: update-grub lost the lock fd: $(cat "$tmp/calls")"
     [ -f "$marker" ] || fail "$1: no refresh marker"
     private_mounts "$1"
     ! grep -qE "set-default|snapper --no-dbus delete" "$tmp/calls" || fail "$1: undone: $(cat "$tmp/calls")"
@@ -288,14 +292,16 @@ grep -qF "after: grub.cfg could not follow it (the default grub entry loads" "$t
 [ "$(grep -c '^mount ' "$tmp/calls")" -eq "$(grep -c '^umount ' "$tmp/calls")" ] || fail "restore fails: mounts left"
 
 # A rollback holds the lock, possibly through an orphaned update-grub: nothing
-# is mounted, made or removed.
+# is mounted, made or removed, orphans included.
+mkdir -p "$tmp/run/calaos-rollback.stale"
 exec 8>"$tmp/run/calaos-rollback.lock"
 flock -n 8
-run /dev/vda3 "$fixtures/current.cfg"
+FAKE_STALE=1 run /dev/vda3 "$fixtures/current.cfg"
 exec 8>&-
+rm -rf "$tmp/run/calaos-rollback.stale"
 [ "$rc" -ne 0 ] || fail "locked: rc=0"
 grep -qF "Another calaos_rollback is running" "$tmp/err" || fail "locked: stderr: $(cat "$tmp/err")"
-! grep -qE '^(mount|mktemp|arch-chroot|btrfs)' "$tmp/calls" || fail "locked: acted: $(cat "$tmp/calls")"
+! grep -qE '^(mount|umount|rmdir|mktemp|arch-chroot|btrfs)' "$tmp/calls" || fail "locked: acted: $(cat "$tmp/calls")"
 
 # Mounts of a killed rollback are released once its lock is free.
 mkdir -p "$tmp/run/calaos-rollback.stale"
