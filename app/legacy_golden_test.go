@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/calaos/calaos-container/models"
 	"github.com/calaos/calaos-container/models/structs"
@@ -136,6 +137,11 @@ func (s *stubBackend) install(t *testing.T) {
 	if _, own := models.Bus.(*sysbustest.Bus); !own {
 		models.Bus = newStubBus()
 	}
+
+	// A deferred reboot must not fire after the test, behind the stubs.
+	prevAfter := snapAfterFunc
+	t.Cleanup(func() { snapAfterFunc = prevAfter })
+	snapAfterFunc = func(time.Duration, func()) {}
 
 	prevCtx := runCommandCtx
 	// The bounded probes go through the same stub; a test of the bound
