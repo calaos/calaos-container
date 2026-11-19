@@ -57,6 +57,9 @@ func legacyGuardedError(c *fiber.Ctx, err error) error {
 	if errors.Is(err, models.ErrUpgradeInProgress) {
 		return legacyError(c, fiber.StatusConflict, err)
 	}
+	if errors.Is(err, models.ErrRollbackInProgress) {
+		return legacyError(c, fiber.StatusConflict, err)
+	}
 	return legacyError(c, fiber.StatusInternalServerError, err)
 }
 
@@ -385,6 +388,9 @@ func (a *AppServer) apiSystemInfo(c *fiber.Ctx) error {
 func guardedError(err error) error {
 	if errors.Is(err, models.ErrUpgradeInProgress) {
 		return errUpgradeInProgress(err)
+	}
+	if errors.Is(err, models.ErrRollbackInProgress) {
+		return errRollbackInProgress()
 	}
 	return errInternal(err)
 }

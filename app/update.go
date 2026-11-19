@@ -174,6 +174,8 @@ func startV2Job(c *fiber.Ctx, kind, pkg string) error {
 		switch {
 		case errors.Is(err, models.ErrUpgradeInProgress):
 			return errUpgradeInProgress(err)
+		case errors.Is(err, models.ErrRollbackInProgress):
+			return errRollbackInProgress()
 		case errors.Is(err, models.ErrPackageNotFound):
 			return newAPIError(fiber.StatusNotFound, codePackageNotFound, "no pending update for this package")
 		case errors.Is(err, models.ErrPackageHeld):

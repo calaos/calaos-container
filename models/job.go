@@ -451,6 +451,12 @@ func StartJob(kind, pkg string) (*JobRun, error) {
 		return nil, &InProgressError{JobID: RunningJobID()}
 	}
 	upgrading.Store(true)
+	// Probed under upgradeLock, see RebootGuard.
+	if err := checkRollbackLock(); err != nil {
+		upgrading.Store(false)
+		upgradeLock.Release(1)
+		return nil, err
+	}
 
 	r := &JobRun{}
 	// A kernel installed by an earlier job on this boot still waits for its
