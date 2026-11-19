@@ -184,6 +184,8 @@ func TestCapOfTwo(t *testing.T) {
 
 	f.m.kill(infoConsole(f.m, a.ID), ReasonClosed)
 	f.expectGone(a, ReasonClosed)
+	// Closed fires before the slot is deleted, so the audit event alone does not free it.
+	consoletest.Eventually(t, "slot released", func() bool { return f.m.Count() == 1 })
 	f.open("cccccccc")
 }
 

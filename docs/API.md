@@ -168,7 +168,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/system/timezones` | bearer, session allowed | 200 | `{"timezones": ["Africa/Abidjan", ...]}` |
 | GET | `/api/v2/logs/sources` | bearer, session allowed | 200 | `{"sources": [{"id", "label"}]}` (see Logs) |
 | POST | `/api/v2/logs/query` | bearer, session allowed | 200 | `{"entries", "truncated", "complete", "next_cursor"}`; body in Logs |
-| POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, then reboots); `409 upgrade_in_progress` while a job runs |
+| POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, answers, then reboots two seconds later); `409 upgrade_in_progress` while a job runs; `500 internal` when `calaos_rollback` fails |
 | GET | `/api/v2/system/install/list_devices` | bearer only | 200 | `lsblk --json --output-all` output |
 | POST | `/api/v2/system/install/start` | bearer only | 200 | `text/plain` log stream; body `{"device": "/dev/...", "confirm": true}` |
 | GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}`; `exit_code` is `-1` when the installer ended without an exit status (failed start, daemon restarted under it) |
@@ -928,7 +928,19 @@ snapshot in `rootflags=`: `409 not_in_rescue`. During an upgrade job: `409 upgra
 When the script fails: `500 rollback_failed`, whose `msg` is `rollback failed: <last stderr line
 of the script>` (the script's `Error on line N` trap line is skipped, the line is cut at 200
 characters); the full output is in the daemon log.
-The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
+The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI. It answers the same
+way: `200` once `calaos_rollback` succeeded, the reboot two seconds later, so a client sees the
+answer and then the connection drop. The reboot runs after the answer, so a failure of it cannot be
+reported (no `reboot_failed` code exists: the answer has already left); it is logged, and the guard
+stays held.
+
+A client that got `200` reads `uptime` (`GET /api/v2/system/info`, or `GET /api/system/info`) before
+the call, then again once the box answers. The reboot happened only if the uptime went down. If the
+box answers with an uptime that did not go down, the reboot failed (waiting longer does not tell,
+a box that came back late has a low uptime too). Until the daemon restarts, `system/reboot`,
+service and daemon restarts, a second rollback and updates answer `409 upgrade_in_progress`: the
+only way out is to cut the power and switch the box back on. That is safe, the new default root is
+already set and the box boots on it.
 
 `grub.cfg` names the kernel by its path inside the default subvolume, so the script also
 regenerates it, with `update-grub` in a chroot of the new default root, and checks that the
@@ -985,7 +997,7 @@ an overlay. If the rescue state cannot be read, upgrades are allowed.
 
 Boot and rollback take the upgrade guard and keep it until the reboot, so no job starts in
 between; if the reboot fails, the guard stays held until `calaos-container` restarts. A
-rollback that succeeded keeps it too when its own reboot fails (`system/rollback_snapshot`, v2
+rollback that succeeded keeps it too when its deferred reboot fails (`system/rollback_snapshot`, v2
 and legacy): the new default root is set, so no upgrade may run on the old one. A rollback that
 failed releases it.
 
@@ -1327,8 +1339,8 @@ synchronous behaviour: they answer when apt ends.
   during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
   ignore the result of the first two.
   The legacy `POST /api/system/rollback_snapshot` takes the same path as the v2 route:
-  `calaos_rollback` is bounded by a timeout, the reboot is sent only after it succeeded, and
-  during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
+  `calaos_rollback` is bounded by a timeout, the reboot is sent two seconds after the `200`, only if
+  `calaos_rollback` succeeded, and during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
   answers `500` with the usual legacy body and no reboot.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
@@ -1549,7 +1561,7 @@ Go error text.
 | POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
-| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots) | 500 `{"error":true,"msg":<err>}`, no reboot; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
+| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, answers, then reboots) | 500 `{"error":true,"msg":<err>}`, no reboot; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/install/start` | 200 `text/plain` log stream | 400 or 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/status` | 200 `{"error":false,"msg":"ok","exit_code":<int>,"log":<text>}` | 400 `{"error":true,"msg":<err>}`, including "never ran" |
@@ -1578,8 +1590,7 @@ text, `failed to write network config file: ...`; that of a failed call is a fix
 daemon log.
 
 The other legacy routes that reach systemd keep their `500` too, with a fixed `msg`:
-`reboot failed` on `POST /api/system/reboot` and on `POST /api/system/rollback_snapshot` when the
-reboot fails, and `describe network failed` on `GET /api/network/list` and on the interface check of
+`reboot failed` on `POST /api/system/reboot` when the reboot fails, and `describe network failed` on `GET /api/network/list` and on the interface check of
 `POST /api/network/{intf}`. On `POST /api/system/restart` it is `read unit state failed`,
 `<n> unit states for calaos-home.service`, `unit not available: calaos-home.service`,
 `restart calaos-home.service failed` or `calaos-home.service: job <result>`, `<result>` being
