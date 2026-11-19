@@ -1309,6 +1309,9 @@ func TestLegacyRollbackAnswersBeforeReboot(t *testing.T) {
 		t.Fatalf("rebooted before the answer: %s, %d deferred", got, len(e.deferred))
 	}
 	e.fire()
+	if got := strings.Join(e.ran, ";"); !strings.Contains(got, "systemctl reboot") {
+		t.Fatalf("deferred reboot not attempted: %s", got)
+	}
 	if !kept {
 		t.Fatalf("guard released after a successful rollback: %s", strings.Join(e.ran, ";"))
 	}

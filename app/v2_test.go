@@ -272,13 +272,22 @@ func TestV2RollbackSingleGuard(t *testing.T) {
 	t.Cleanup(func() { snapAfterFunc = prevAfter })
 	snapAfterFunc = func(_ time.Duration, f func()) { deferred = append(deferred, f) }
 	guards := 0
+	var inGuard []string
 	rebootGuard = func(fn func() error) error {
 		guards++
-		return fn()
+		err := fn()
+		inGuard = append([]string(nil), ran...)
+		if len(deferred) != 1 {
+			t.Errorf("%d deferred calls once the guarded function returned", len(deferred))
+		}
+		return err
 	}
 	a := newHandlerTestApp(t)
 
 	resp, body := doCase(t, a, httpCase{method: "POST", path: "/api/v2/system/rollback_snapshot"})
+	if strings.Join(inGuard, ";") != "calaos_rollback" {
+		t.Fatalf("commands run inside the guard: %v", inGuard)
+	}
 	if resp.StatusCode != http.StatusOK || guards != 1 {
 		t.Fatalf("got %d %s, %d guards", resp.StatusCode, body, guards)
 	}

@@ -931,9 +931,16 @@ characters); the full output is in the daemon log.
 The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI. It answers the same
 way: `200` once `calaos_rollback` succeeded, the reboot two seconds later, so a client sees the
 answer and then the connection drop. The reboot runs after the answer, so a failure of it cannot be
-reported: it is logged, and the guard stays held. A client that got `200` waits for the box to come
-back, and treats a box still up after a minute or so as a failed reboot (no `reboot_failed` code
-exists: the answer has already left).
+reported (no `reboot_failed` code exists: the answer has already left); it is logged, and the guard
+stays held.
+
+A client that got `200` reads `uptime` (`GET /api/v2/system/info`, or `GET /api/system/info`) before
+the call, then again once the box answers. The reboot happened only if the uptime went down. If the
+box answers with an uptime that did not go down, the reboot failed (waiting longer does not tell,
+a box that came back late has a low uptime too). Until the daemon restarts, `system/reboot`,
+service and daemon restarts, a second rollback and updates answer `409 upgrade_in_progress`: the
+only way out is to cut the power and switch the box back on. That is safe, the new default root is
+already set and the box boots on it.
 
 `grub.cfg` names the kernel by its path inside the default subvolume, so the script also
 regenerates it, with `update-grub` in a chroot of the new default root, and checks that the
@@ -1324,8 +1331,8 @@ synchronous behaviour: they answer when apt ends.
   during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
   ignore the result of the first two.
   The legacy `POST /api/system/rollback_snapshot` takes the same path as the v2 route:
-  `calaos_rollback` is bounded by a timeout, the reboot is sent two seconds after the `200`, only if it succeeded, and
-  during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
+  `calaos_rollback` is bounded by a timeout, the reboot is sent two seconds after the `200`, only if
+  `calaos_rollback` succeeded, and during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
   answers `500` with the usual legacy body and no reboot.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
