@@ -341,6 +341,7 @@ func legacyCases(t *testing.T) []httpCase {
 		// Deliberate legacy change: no reboot while dpkg runs.
 		{name: "system_reboot_in_progress", method: "POST", path: "/api/system/reboot",
 			backend: stubBackend{rebootBlocked: true}},
+		// Deliberate legacy change: no rollback while dpkg runs.
 		{name: "system_rollback_in_progress", method: "POST", path: "/api/system/rollback_snapshot",
 			backend: stubBackend{rebootBlocked: true, commands: map[string]stubResult{"calaos_rollback": {}, "systemctl reboot": {}}}},
 		{name: "system_reboot_err", method: "POST", path: "/api/system/reboot",

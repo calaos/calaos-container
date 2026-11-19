@@ -934,24 +934,34 @@ The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
 regenerates it, with `update-grub` in a chroot of the new default root, and checks that the
 default entry (the first one) loads its kernel and initrd from that subvolume. If not, it fails
 and nothing reboots, with one of these messages:
-- `No @/boot/grub subvolume...`, `Snapshot #N has no update-grub...` or `Default subvolume
-  unknown...`: checked before snapper, nothing has changed;
-- `Rollback undone, grub.cfg could not follow it (<cause>)...`, for any failure after snapper,
-  including `update-grub` running past its 10 minutes: the script sets the previous default
-  subvolume back, and the previous `grub.cfg` if `update-grub` replaced it, so the box boots as
-  before. Left as is, the normal boot would load the previous root's kernel on the new root, which
-  lacks its modules when the kernels differ: emergency mode, no network, and the daemon never
-  starts to repair it. The snapshots snapper created stay. The rollback can be tried again once
-  the cause is fixed;
-- `Could not undo the rollback, do not reboot...` (setting the default subvolume back failed; the
-  message gives its id) or `Rollback undone but grub.cfg could not be put back, do not reboot...`:
-  the default subvolume and `grub.cfg` disagree. Fix it from the rescue shell before any reboot
-  (`btrfs subvolume set-default <id>` on the mounted btrfs root, or `update-grub` in a chroot of
-  the default subvolume), and do not delete the previous root's snapshot before.
+- `No @/boot/grub subvolume...`, `Snapshot #N has no update-grub...`, `Default subvolume
+  unknown...` or `/mnt is already mounted...`: checked before snapper, nothing has changed;
+- `Rollback undone, snapper rollback failed...` or `Rollback undone, grub.cfg could not follow it
+  (<cause>)...`, for a failure of snapper or of any step after it, including `update-grub` running
+  past its 10 minutes: the script sets the previous default subvolume back (a no-op if snapper
+  failed before changing it), then puts the previous `grub.cfg` back if `update-grub` replaced it,
+  through a temporary file renamed over it, so the box boots as before. Left as is, the normal
+  boot would load the previous root's kernel on the new root, which lacks its modules when the
+  kernels differ: emergency mode, no network, and the daemon never starts to repair it. The script
+  then deletes the `writable copy of #N` snapshot that snapper made the default, and only that
+  one: snapper gives it no cleanup algorithm, so every failed try would leave one. If the delete
+  fails, a warning in the daemon log names it (`snapper delete <n>` removes it). The `rollback
+  backup of #M` snapshot stays, under snapper's `number` cleanup. The rollback can be tried again
+  once the cause is fixed;
+- `Could not undo the rollback, do not reboot: setting the default subvolume back to <id>
+  failed, after: <cause>` or `Rollback undone but grub.cfg could not be put back, do not
+  reboot...`: the default subvolume and `grub.cfg` disagree, and the writable copy is kept. Fix it
+  from the rescue shell before any reboot (`btrfs subvolume set-default <id>` on the mounted btrfs
+  root, or `update-grub` in a chroot of the default subvolume), and do not delete the previous
+  root's snapshot nor the writable copy before.
 
-The daemon kills the script after 20 minutes and answers a `rollback_failed` without a grub
-message. The default subvolume may then have changed already: check `default` in
-`GET /api/v2/system/snapshots` before trying again.
+The daemon kills the script after 20 minutes and answers a `rollback_failed` with the last line
+the script printed, which may be an `update-grub` progress line rather than one of the messages
+above. Nothing is undone then: the default subvolume may have changed already, the mounts under
+`/mnt` stay, and the `update-grub` run, which `timeout` keeps in its own process group so that its
+10 minutes bound reach `grub-mkconfig`, can go on for up to 10 minutes 30. A new try refuses to
+start while `/mnt` is mounted: wait 11 minutes, check `default` in `GET /api/v2/system/snapshots`,
+then `umount -R /mnt` before trying again.
 
 The chroot leaves out the grub-btrfs `Calaos-OS snapshots` submenu. At startup, outside an
 overlay, `calaos-container` runs `update-grub` again when the rollback asked for it
@@ -966,7 +976,10 @@ a snapshot"}` on the legacy routes. The package `postinst` does not run `update-
 an overlay. If the rescue state cannot be read, upgrades are allowed.
 
 Boot and rollback take the upgrade guard and keep it until the reboot, so no job starts in
-between; if the reboot fails, the guard stays held until `calaos-container` restarts.
+between; if the reboot fails, the guard stays held until `calaos-container` restarts. A
+rollback that succeeded keeps it too when its own reboot fails (`system/rollback_snapshot`, v2
+and legacy): the new default root is set, so no upgrade may run on the old one. A rollback that
+failed releases it.
 
 ## Logs
 
@@ -1301,11 +1314,14 @@ synchronous behaviour: they answer when apt ends.
   `409 upgrade_in_progress` (with `data.job_id`).
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
-  `"package not found"` unchanged. Two deliberate exceptions: the legacy `POST /api/system/reboot`
-  and `POST /api/system/restart` answer `409 {"error": true, "msg": "upgrade already in progress"}`
+  `"package not found"` unchanged. Three deliberate exceptions: the legacy `POST /api/system/reboot`,
+  `POST /api/system/restart` and `POST /api/system/rollback_snapshot` answer `409 {"error": true, "msg": "upgrade already in progress"}`
   during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
-  ignore the result of both.
-  The legacy `POST /api/system/rollback_snapshot` is unchanged.
+  ignore the result of the first two.
+  The legacy `POST /api/system/rollback_snapshot` takes the same path as the v2 route:
+  `calaos_rollback` is bounded by a timeout, the reboot is sent only after it succeeded, and
+  during a run it answers `409 {"error": true, "msg": "upgrade already in progress"}`. A failure
+  answers `500` with the usual legacy body and no reboot.
 - `package` must match `^[A-Za-z0-9][A-Za-z0-9.+-]*$` (the first character is a letter or a
   digit), contain no `..` and be at most 128 characters long; otherwise `400 invalid_request`.
   The legacy `POST /api/update/upgrade?package=` applies the same rule and answers its
@@ -1525,7 +1541,7 @@ Go error text.
 | POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
-| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots, even during a run) | 500 `{"error":true,"msg":<err>}` |
+| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, then reboots) | 500 `{"error":true,"msg":<err>}`, no reboot; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/install/start` | 200 `text/plain` log stream | 400 or 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/status` | 200 `{"error":false,"msg":"ok","exit_code":<int>,"log":<text>}` | 400 `{"error":true,"msg":<err>}`, including "never ran" |

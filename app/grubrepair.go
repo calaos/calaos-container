@@ -25,8 +25,7 @@ var (
 	// calaos_rollback writes it once it regenerated grub.cfg from a chroot,
 	// without the grub-btrfs submenu: the native update-grub brings it back.
 	grubRefreshMarker = "/var/lib/calaos-container/grub-refresh"
-	// Same bound as update_grub_timeout in calaos_rollback. Not measured on a
-	// Raspberry Pi SD card yet.
+	// Same bound as update_grub_timeout in calaos_rollback.
 	grubUpdateTimeout  = 10 * time.Minute
 	grubRepairLockWait = 30 * time.Minute
 )
