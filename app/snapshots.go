@@ -124,6 +124,8 @@ type rescueStatus struct {
 	Rescue   bool `json:"rescue"`
 	Snapshot *int `json:"snapshot"`
 	Overlay  bool `json:"overlay"`
+
+	rootSubvol string
 }
 
 func errRescueUnavailable(cause error) *apiError {
@@ -143,10 +145,11 @@ func queryCommand(command string, args ...string) (string, error) {
 	return runCommandCtx(ctx, command, args...)
 }
 
-// rollbackTimeout bounds calaos_rollback: two btrfs commits and a set-default
-// on a loaded SD card can take far longer than a read. Killed too early, the
-// API would report a failure on a rollback that is still half done.
-var rollbackTimeout = 5 * time.Minute
+// rollbackTimeout bounds calaos_rollback: the snapper rollback (two btrfs
+// commits and a set-default on a loaded SD card), then update-grub in a chroot,
+// which the script bounds itself to grubUpdateTimeout. Killed here, the script
+// leaves its mounts and possibly a changed default subvolume behind.
+var rollbackTimeout = grubUpdateTimeout + 10*time.Minute
 
 func rollbackCommand() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
@@ -177,6 +180,7 @@ func readRescueStatus() (rescueStatus, error) {
 	root := fm.Filesystems[0]
 	st.Overlay = root.FsType == "overlay"
 	st.Rescue = st.Overlay && root.Source == "rootfs"
+	st.rootSubvol = subvolOfSource(root.Source)
 
 	cmdline, err := os.ReadFile(procCmdlinePath)
 	if err != nil {
