@@ -8,6 +8,18 @@ import (
 	"testing"
 )
 
+// TestMain keeps the tests off the host's /run/calaos-rollback.lock.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "models-rollback-lock")
+	if err != nil {
+		panic(err)
+	}
+	rollbackLockPath = filepath.Join(dir, "calaos-rollback.lock")
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // holdRollbackLock takes the lock the way calaos_rollback does, on its own
 // open file description, so flock treats the daemon as another process.
 func holdRollbackLock(t *testing.T) {
@@ -82,4 +94,40 @@ func TestRollbackLockFree(t *testing.T) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatalf("the guard kept the lock: %v", err)
 	}
+}
+
+// The probe runs under upgradeLock: with the upgrade lock held, a refusal says
+// upgrade in progress without ever opening the rollback lock, whose path here
+// cannot be opened.
+func TestRollbackProbeAfterUpgradeLock(t *testing.T) {
+	old := rollbackLockPath
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rollbackLockPath = filepath.Join(blocker, "lock") // ENOTDIR on open
+	t.Cleanup(func() { rollbackLockPath = old })
+	holdLock(t, true)
+
+	if err := RebootGuard(func() error { return nil }); !errors.Is(err, ErrUpgradeInProgress) {
+		t.Fatalf("RebootGuard: %v", err)
+	}
+	if _, err := StartJob(JobKindUpgradeAll, ""); !errors.Is(err, ErrUpgradeInProgress) {
+		t.Fatalf("StartJob: %v", err)
+	}
+}
+
+func TestStartJobRollbackLockFree(t *testing.T) {
+	if err := os.WriteFile(rollbackLockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := StartJob(JobKindUpgradeAll, "")
+	if err != nil {
+		t.Fatalf("StartJob: %v", err)
+	}
+	r.Complete()
+	if !upgradeLock.TryAcquire(1) {
+		t.Fatal("upgradeLock still held after Complete")
+	}
+	upgradeLock.Release(1)
 }

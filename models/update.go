@@ -72,10 +72,13 @@ var rebootLockWait = 30 * time.Second
 // holder that does not release in time is treated as an upgrade that has not
 // raised its flag yet.
 func RebootGuard(fn func() error) error {
-	if err := checkRollbackLock(); err != nil {
+	if err := acquireUpgradeLock(); err != nil {
 		return err
 	}
-	if err := acquireUpgradeLock(); err != nil {
+	// Probed under upgradeLock: a rollback run by the daemon holds it, so the
+	// probe cannot take the flock calaos_rollback is about to ask for.
+	if err := checkRollbackLock(); err != nil {
+		upgradeLock.Release(1)
 		return err
 	}
 	if err := fn(); err != nil {

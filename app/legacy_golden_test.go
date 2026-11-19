@@ -354,6 +354,11 @@ func legacyCases(t *testing.T) []httpCase {
 		// Deliberate legacy change: no rollback while dpkg runs.
 		{name: "system_rollback_in_progress", method: "POST", path: "/api/system/rollback_snapshot",
 			backend: stubBackend{rebootBlocked: true, commands: map[string]stubResult{"calaos_rollback": {}, "systemctl reboot": {}}}},
+		// Deliberate legacy change: no reboot or rollback while calaos_rollback holds its lock.
+		{name: "system_reboot_rollback_busy", method: "POST", path: "/api/system/reboot",
+			backend: stubBackend{rollbackBusy: true}},
+		{name: "system_rollback_rollback_busy", method: "POST", path: "/api/system/rollback_snapshot",
+			backend: stubBackend{rollbackBusy: true, commands: map[string]stubResult{"calaos_rollback": {}, "systemctl reboot": {}}}},
 		{name: "system_reboot_err", method: "POST", path: "/api/system/reboot",
 			backend: stubBackend{commands: map[string]stubResult{"systemctl reboot": {err: boom}}}},
 		{name: "system_restart_ok", method: "POST", path: "/api/system/restart",
@@ -425,6 +430,8 @@ func legacyCases(t *testing.T) []httpCase {
 		{name: "update_upgrade_all_ok", method: "POST", path: "/api/update/upgrade-all"},
 		{name: "update_upgrade_all_in_progress", method: "POST", path: "/api/update/upgrade-all",
 			backend: stubBackend{upgradeAllErr: errors.New("upgrade already in progress")}},
+		{name: "update_upgrade_all_rollback_busy", method: "POST", path: "/api/update/upgrade-all",
+			backend: stubBackend{upgradeAllErr: models.ErrRollbackInProgress}},
 		{name: "update_upgrade_all_apt_err", method: "POST", path: "/api/update/upgrade-all",
 			backend: stubBackend{upgradeAllErr: errors.New("E: Sub-process /usr/bin/dpkg returned an error code (1)")}},
 		{name: "update_upgrade_apt_err", method: "POST", path: "/api/update/upgrade?package=calaos-server",

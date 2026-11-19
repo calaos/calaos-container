@@ -147,17 +147,17 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/update/available` | bearer, session allowed | 200 | same as `check`, without contacting the mirrors |
 | GET | `/api/v2/update/installed` | bearer, session allowed | 200 | object keyed by package name: `{name, version}` |
 | GET | `/api/v2/update/status` | bearer, session allowed | 200 | `{"progress": <Status>, "job": <Job> or null}` |
-| POST | `/api/v2/update/upgrade-all` | bearer, session allowed | 202 | `<Job>`; `409 in_rescue` in rescue |
-| POST | `/api/v2/update/upgrade` | bearer, session allowed | 202 | `<Job>`; body `{"package": "<name>"}`; `409 in_rescue` in rescue |
-| POST | `/api/v2/system/reboot` | bearer, session allowed | 200 | `null`; `409 upgrade_in_progress` while a job runs |
+| POST | `/api/v2/update/upgrade-all` | bearer, session allowed | 202 | `<Job>`; `409 in_rescue` in rescue; `409 rollback_in_progress` while a rollback runs |
+| POST | `/api/v2/update/upgrade` | bearer, session allowed | 202 | `<Job>`; body `{"package": "<name>"}`; `409 in_rescue` in rescue; `409 rollback_in_progress` while a rollback runs |
+| POST | `/api/v2/system/reboot` | bearer, session allowed | 200 | `null`; `409 upgrade_in_progress` while a job runs; `409 rollback_in_progress` while a rollback runs |
 | POST | `/api/v2/system/restart` | bearer, session allowed | 200 | `null` (restarts the `calaos-home` kiosk); `409 upgrade_in_progress` while a job runs |
 | GET | `/api/v2/system/info` | bearer, session allowed | 200 | `{hostname, uptime, cpu_usage, mem_usage}` |
 | GET | `/api/v2/system/versions` | bearer, session allowed | 200 | `{calaos_os, debian, kernel, container, packages}`; `calaos_os` is the dpkg version of the `calaos` package (`dpkg-query -W -f='${Version}' calaos`) when it is a calendar version (`YYYY.MM`, `YYYY.MM.N`, optionally followed by `~dev.N`), otherwise `""` (package absent, dpkg failure, or any other format such as `1.2.3`); it never falls back to the Debian version, and `calaos` is never listed in `packages`; `packages` is `[{name, version}]` of the installed `calaos-*` debs sorted by name (same source as `update/installed`); `container` is the version of the `calaos-container` deb; an unreadable field is `""`, and when `dpkg-query` fails `packages` is `[]` and `container` is `""` (still 200) |
 | GET | `/api/v2/system/fs_status` | bearer, session allowed | 200 | `findmnt --json /` output |
 | GET | `/api/v2/system/snapshots` | bearer, session allowed | 200 | `{"booted", "snapshots": [<Snapshot>]}` (see Snapshots and rescue) |
 | GET | `/api/v2/system/rescue` | bearer, session allowed | 200 | `{"rescue", "snapshot", "overlay"}` |
-| POST | `/api/v2/system/snapshots/boot` | bearer, session header required | 200 | `null` (boots the snapshot once, then reboots); body `{"id": <int>}` |
-| POST | `/api/v2/system/snapshots/rollback` | bearer, session header required | 200 | `null` (rolls back to the running snapshot, then reboots); `409 not_in_rescue` outside rescue |
+| POST | `/api/v2/system/snapshots/boot` | bearer, session header required | 200 | `null` (boots the snapshot once, then reboots); body `{"id": <int>}`; `409 rollback_in_progress` while a rollback runs |
+| POST | `/api/v2/system/snapshots/rollback` | bearer, session header required | 200 | `null` (rolls back to the running snapshot, then reboots); `409 not_in_rescue` outside rescue; `409 rollback_in_progress` while a rollback runs |
 | GET | `/api/v2/system/services` | bearer, session allowed | 200 | `{"services": [<Service>]}` (see Services) |
 | POST | `/api/v2/system/services/restart` | bearer, session allowed | 200 | `{"id", "state": "restarting"}`; body `{"unit": "<id>"}` |
 | POST | `/api/v2/system/services/start` | bearer, session allowed | 200 | `{"id", "state": "starting"}`; body `{"unit": "<id>"}` |
@@ -169,7 +169,7 @@ absent header is logged as `local` (the CLI). The daemon trusts nothing in it.
 | GET | `/api/v2/system/timezones` | bearer, session allowed | 200 | `{"timezones": ["Africa/Abidjan", ...]}` |
 | GET | `/api/v2/logs/sources` | bearer, session allowed | 200 | `{"sources": [{"id", "label"}]}` (see Logs) |
 | POST | `/api/v2/logs/query` | bearer, session allowed | 200 | `{"entries", "truncated", "complete", "next_cursor"}`; body in Logs |
-| POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, answers, then reboots two seconds later); `409 upgrade_in_progress` while a job runs; `500 internal` when `calaos_rollback` fails |
+| POST | `/api/v2/system/rollback_snapshot` | bearer only | 200 | `null` (rolls back, answers, then reboots two seconds later); `409 upgrade_in_progress` while a job runs; `409 rollback_in_progress` while a rollback runs; `500 internal` when `calaos_rollback` fails |
 | GET | `/api/v2/system/install/list_devices` | bearer only | 200 | `lsblk --json --output-all` output |
 | POST | `/api/v2/system/install/start` | bearer only | 200 | `text/plain` log stream; body `{"device": "/dev/...", "confirm": true}` |
 | GET | `/api/v2/system/install/status` | bearer only | 200 | `{"status": "never_run"}`, `{"status": "running"}` or `{"status": "finished", "exit_code": <int>, "log": "<text>"}`; `exit_code` is `-1` when the installer ended without an exit status (failed start, daemon restarted under it) |
@@ -977,8 +977,11 @@ group so that its 10 minutes bound reach `grub-mkconfig`, can go on for up to 10
 The script mounts the btrfs root on a private directory, `/run/calaos-rollback.XXXXXX`, removed
 when it exits, never on `/mnt`: `/mnt/calaos` stays visible to the system during the rollback.
 It holds `flock` on `/run/calaos-rollback.lock`, which `update-grub` inherits: a new try refuses
-to start (`Another calaos_rollback is running...`) while a killed rollback's `update-grub` goes on,
-so wait 11 minutes and check `default` in `GET /api/v2/system/snapshots`. The next try unmounts and
+to start while a killed rollback's `update-grub` goes on. Through the API, a new try answers
+`409 rollback_in_progress` before the script runs, and `upgrade*`, `system/reboot` and
+`system/snapshots/boot` are refused the same way meanwhile; the message
+`Another calaos_rollback is running...` only reaches a manual launch. Wait 11 minutes and check
+`default` in `GET /api/v2/system/snapshots`. The next try unmounts and
 removes the directory a killed rollback left.
 When the script is killed, the `update-grub` it started survives the kill of its process group and
 keeps the lock until it ends. The mounts under the private `/run/calaos-rollback.*` directory then
@@ -1332,12 +1335,17 @@ synchronous behaviour: they answer when apt ends.
   kiosk). Every run is recorded as a job, so `update/status` shows a run started from the kiosk.
 - While a run is in progress, `POST update/upgrade*`, `GET update/check`,
   `POST system/reboot`, `POST system/restart` and `POST system/rollback_snapshot` answer
-  `409 upgrade_in_progress` (with `data.job_id`).
+  `409 upgrade_in_progress` (with `data.job_id`). While a rollback runs, or an `update-grub` it left
+  behind holds `/run/calaos-rollback.lock`, `POST update/upgrade*`, `POST system/reboot`,
+  `POST system/rollback_snapshot` and the two snapshot routes `POST system/snapshots/boot` and
+  `POST system/snapshots/rollback` answer `409 rollback_in_progress` instead.
 - Legacy routes during a run keep their current answers:
   `500 {"error": true, "msg": "upgrade already in progress"}` on `upgrade*` and `update/check`,
   `"package not found"` unchanged. Three deliberate exceptions: the legacy `POST /api/system/reboot`,
   `POST /api/system/restart` and `POST /api/system/rollback_snapshot` answer `409 {"error": true, "msg": "upgrade already in progress"}`
-  during a run, so that an old kiosk cannot cut dpkg. Old kiosks treat any non-2xx the same way and
+  during a run, so that an old kiosk cannot cut dpkg. While a rollback runs, legacy `reboot` and
+  `rollback_snapshot` answer `409 {"error": true, "msg": "rollback in progress"}`, and legacy
+  `upgrade-all` and `upgrade` answer `500 {"error": true, "msg": "rollback in progress"}`. Old kiosks treat any non-2xx the same way and
   ignore the result of the first two.
   The legacy `POST /api/system/rollback_snapshot` takes the same path as the v2 route:
   `calaos_rollback` is bounded by a timeout, the reboot is sent two seconds after the `200`, only if
@@ -1559,10 +1567,10 @@ Go error text.
 
 | Method | Path | Success | Error |
 |---|---|---|---|
-| POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
+| POST | `/api/system/reboot` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run, `{"error":true,"msg":"rollback in progress"}` during a rollback |
 | POST | `/api/system/restart` | 200 `{"error":false,"msg":"ok"}` | 500 `{"error":true,"msg":<err>}`; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
 | GET | `/api/system/fs_status` | 200 `{"error":false,"msg":"ok","output":<findmnt>}` | 500 `{"error":true,"msg":<err>}` |
-| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, answers, then reboots) | 500 `{"error":true,"msg":<err>}`, no reboot; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run |
+| POST | `/api/system/rollback_snapshot` | 200 `{"error":false,"msg":"ok"}` (rolls back, answers, then reboots) | 500 `{"error":true,"msg":<err>}`, no reboot; 409 `{"error":true,"msg":"upgrade already in progress"}` during a run, `{"error":true,"msg":"rollback in progress"}` during a rollback |
 | GET | `/api/system/install/list_devices` | 200 `{"error":false,"msg":"ok","output":<lsblk>}` | 500 `{"error":true,"msg":<err>}` |
 | POST | `/api/system/install/start` | 200 `text/plain` log stream | 400 or 500 `{"error":true,"msg":<err>}` |
 | GET | `/api/system/install/status` | 200 `{"error":false,"msg":"ok","exit_code":<int>,"log":<text>}` | 400 `{"error":true,"msg":<err>}`, including "never ran" |
@@ -1572,8 +1580,8 @@ Go error text.
 | GET | `/api/update/check` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress" during a run) |
 | GET | `/api/update/available` | 200 raw object keyed by package | none |
 | GET | `/api/update/installed` | 200 raw object keyed by package | 500 `{"error":true,"msg":<err>}` |
-| POST | `/api/update/upgrade-all` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress", "upgrades are disabled while running from a snapshot") |
-| POST | `/api/update/upgrade?package=<name>` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("package not found", "upgrade already in progress", "upgrades are disabled while running from a snapshot") |
+| POST | `/api/update/upgrade-all` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("upgrade already in progress", "rollback in progress", "upgrades are disabled while running from a snapshot") |
+| POST | `/api/update/upgrade?package=<name>` | 200 `{"msg":"Upgrade done"}` once apt ends | 500 `{"error":true,"msg":<err>}` ("package not found", "upgrade already in progress", "rollback in progress", "upgrades are disabled while running from a snapshot") |
 | GET | `/api/update/status` | 200 raw `<Status>` | none |
 | GET (WS) | `/api/events` | 101, frames as in Events | 426 `Upgrade Required` (text) on a plain `GET` |
 
