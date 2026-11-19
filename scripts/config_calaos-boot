@@ -10,8 +10,16 @@ set -euo pipefail
 # shellcheck disable=SC1091
 . /usr/lib/calaos/calaos-common.sh
 
-# Hand the VT back before dying so a failed boot never leaves tty2 up.
-trap 'chvt 1 || true; die "Error on line $LINENO"' ERR
+# EXIT, not ERR: without errtrace the ERR trap skips functions and set -u
+# errors, and tty2 is masked so a VT left on 2 is a black screen. chvt is
+# idempotent on the normal path.
+release_vt()
+{
+    chvt 1 || true
+}
+register_cleanup release_vt
+
+trap 'die "Error on line $LINENO"' ERR
 
 # Define the dialog exit status codes.
 : "${DIALOG_OK:=0}"

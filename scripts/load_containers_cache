@@ -52,7 +52,7 @@ if [ -f "$cache" ]; then
 
     # Podman loads the archive from cache and copies it into the local
     # repository.
-    podman load < "$cache"
+    podman load < "$cache" >/dev/null 2>&1 || true
 
     # Check if the image landed in the local repository. Uses the library's
     # exact-match check (podman images --format '{{.Repository}}:{{.Tag}}')

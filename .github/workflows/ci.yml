@@ -74,6 +74,9 @@ jobs:
       - name: initramfs grub-btrfs-overlay script
         run: scripts/tests/grub_btrfs_overlay_test.sh
 
+      - name: calaos-boot console and VT handling
+        run: scripts/tests/boot_tty_test.sh
+
       - name: grub.d snapshot one-shot snippet
         # grub-common gives the test its grub-script-check syntax gate.
         run: |
