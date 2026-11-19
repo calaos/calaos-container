@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gws "github.com/gorilla/websocket"
 
@@ -256,8 +257,8 @@ func TestV2EmptySessionHeader(t *testing.T) {
 	}
 }
 
-// TestV2RollbackSingleGuard: rollback and reboot run inside one guard, so no
-// upgrade can start between them.
+// TestV2RollbackSingleGuard: the guard covers the rollback only, and the reboot
+// is deferred so the answer leaves before the system goes down.
 func TestV2RollbackSingleGuard(t *testing.T) {
 	var ran []string
 	s := &stubBackend{}
@@ -266,15 +267,14 @@ func TestV2RollbackSingleGuard(t *testing.T) {
 		ran = append(ran, strings.Join(append([]string{command}, args...), " "))
 		return "", nil
 	}
+	var deferred []func()
+	prevAfter := snapAfterFunc
+	t.Cleanup(func() { snapAfterFunc = prevAfter })
+	snapAfterFunc = func(_ time.Duration, f func()) { deferred = append(deferred, f) }
 	guards := 0
 	rebootGuard = func(fn func() error) error {
 		guards++
-		before := len(ran)
-		err := fn()
-		if len(ran)-before != 2 {
-			t.Errorf("guard covered %d commands, want rollback and reboot", len(ran)-before)
-		}
-		return err
+		return fn()
 	}
 	a := newHandlerTestApp(t)
 
@@ -282,6 +282,10 @@ func TestV2RollbackSingleGuard(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || guards != 1 {
 		t.Fatalf("got %d %s, %d guards", resp.StatusCode, body, guards)
 	}
+	if strings.Join(ran, ";") != "calaos_rollback" || len(deferred) != 1 {
+		t.Fatalf("answered with commands %v, %d deferred", ran, len(deferred))
+	}
+	deferred[0]()
 	if strings.Join(ran, ";") != "calaos_rollback;systemctl reboot" {
 		t.Fatalf("commands %v", ran)
 	}

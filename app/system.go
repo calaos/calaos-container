@@ -110,22 +110,18 @@ func (a *AppServer) apiSystemRollbackSnapshot(c *fiber.Ctx) error {
 	return legacyOK(c)
 }
 
-// rollbackAndReboot holds RebootGuard over both steps, so an upgrade cannot
-// start between them, and reboots only once calaos_rollback succeeded. Once
-// the rollback has succeeded the guard stays held even if the reboot fails:
-// the new default root is in place and an upgrade would run on the old one.
+// rollbackAndReboot holds RebootGuard over the rollback and reboots only once
+// calaos_rollback succeeded. The reboot is deferred so the answer leaves first;
+// a failed rollback releases the guard, a successful one keeps it (the new
+// default root is in place and an upgrade would run on the old one).
 func rollbackAndReboot() error {
-	var rebootErr error
-	if err := rebootGuard(func() error {
+	return rebootGuard(func() error {
 		if _, err := rollbackCommand(); err != nil {
 			return err
 		}
-		rebootErr = reboot()
+		scheduleReboot(nil)
 		return nil
-	}); err != nil {
-		return err
-	}
-	return rebootErr
+	})
 }
 
 func (a *AppServer) apiSystemInstallListDevices(c *fiber.Ctx) error {

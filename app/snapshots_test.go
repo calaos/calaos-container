@@ -1285,7 +1285,9 @@ func TestLegacyRollbackFailureNoReboot(t *testing.T) {
 	}
 }
 
-func TestLegacyRollbackKeepsGuardWhenRebootFails(t *testing.T) {
+// The answer is written before the reboot is even attempted, and a deferred
+// reboot that fails keeps the guard: the new default root is in place.
+func TestLegacyRollbackAnswersBeforeReboot(t *testing.T) {
 	e := newSnapEnv(t, normalBackend(map[string]stubResult{
 		"calaos_rollback":  {},
 		"systemctl reboot": {err: errors.New("boom")},
@@ -1300,10 +1302,23 @@ func TestLegacyRollbackKeepsGuardWhenRebootFails(t *testing.T) {
 	}
 	a := newHandlerTestApp(t)
 	resp, body := doCase(t, a, httpCase{method: "POST", path: "/api/system/rollback_snapshot"})
-	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(body), `"error":true`) {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"error":false`) {
 		t.Fatalf("got %d %s", resp.StatusCode, body)
 	}
+	if got := strings.Join(e.ran, ";"); strings.Contains(got, "systemctl reboot") || len(e.deferred) != 1 {
+		t.Fatalf("rebooted before the answer: %s, %d deferred", got, len(e.deferred))
+	}
+	e.fire()
 	if !kept {
 		t.Fatalf("guard released after a successful rollback: %s", strings.Join(e.ran, ";"))
+	}
+}
+
+func TestV2RollbackSnapshotAnswersBeforeReboot(t *testing.T) {
+	e := newSnapEnv(t, normalBackend(map[string]stubResult{"calaos_rollback": {}}))
+	a := newHandlerTestApp(t)
+	resp, _ := doCase(t, a, httpCase{method: "POST", path: "/api/v2/system/rollback_snapshot"})
+	if got := strings.Join(e.ran, ";"); resp.StatusCode != http.StatusOK || strings.Contains(got, "systemctl reboot") || len(e.deferred) != 1 {
+		t.Fatalf("got %d, ran %s, %d deferred", resp.StatusCode, got, len(e.deferred))
 	}
 }
