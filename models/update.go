@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/calaos/calaos-container/apt"
@@ -20,6 +22,37 @@ var (
 	ErrUpgradeInProgress = errors.New("upgrade already in progress")
 	ErrPackageNotFound   = errors.New("package not found")
 )
+
+// ErrRollbackInProgress refuses a run while calaos_rollback, or an update-grub
+// it left behind, holds the rollback lock.
+var ErrRollbackInProgress = errors.New("rollback in progress")
+
+// rollbackLockPath is the flock calaos_rollback holds (fd 9, inherited by its
+// update-grub) until the last of them exits.
+var rollbackLockPath = "/run/calaos-rollback.lock"
+
+// checkRollbackLock fails while the rollback lock is held. It only probes: the
+// lock is released at once, because calaos_rollback, run by the same guard,
+// takes it itself and would refuse to start if the daemon kept it.
+func checkRollbackLock() error {
+	f, err := os.Open(rollbackLockPath) //nolint:gosec // fixed path
+	if errors.Is(err, os.ErrNotExist) {
+		// /run is a tmpfs: no file, no rollback since boot.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open rollback lock: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return ErrRollbackInProgress
+	}
+	if err != nil {
+		return fmt.Errorf("probe rollback lock: %w", err)
+	}
+	return nil
+}
 
 // ErrPackageHeld refuses a single-package upgrade of a package on hold.
 var ErrPackageHeld = errors.New("package held")
@@ -39,6 +72,9 @@ var rebootLockWait = 30 * time.Second
 // holder that does not release in time is treated as an upgrade that has not
 // raised its flag yet.
 func RebootGuard(fn func() error) error {
+	if err := checkRollbackLock(); err != nil {
+		return err
+	}
 	if err := acquireUpgradeLock(); err != nil {
 		return err
 	}

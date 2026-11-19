@@ -53,6 +53,7 @@ type stubBackend struct {
 	installLogFile  string
 
 	rebootBlocked bool   // an upgrade holds the apt lock
+	rollbackBusy  bool   // calaos_rollback holds its lock
 	startLog      string // written to the log by the fake installer
 	startRunning  bool   // the fake installer has not exited
 }
@@ -173,7 +174,7 @@ func (s *stubBackend) install(t *testing.T) {
 			err = s.upgradeErr
 		}
 		// Refusals come before any job exists.
-		if err != nil && (err.Error() == models.ErrUpgradeInProgress.Error() || err.Error() == models.ErrPackageNotFound.Error()) {
+		if err != nil && (err.Error() == models.ErrUpgradeInProgress.Error() || err.Error() == models.ErrRollbackInProgress.Error() || err.Error() == models.ErrPackageNotFound.Error()) {
 			return nil, err
 		}
 		return &stubRun{job: models.Job{ID: "0123456789abcdef", Kind: kind, Package: pkg, Status: models.JobRunning}, err: err}, nil
@@ -190,6 +191,9 @@ func (s *stubBackend) install(t *testing.T) {
 	rebootGuard = func(fn func() error) error {
 		if s.rebootBlocked {
 			return models.ErrUpgradeInProgress
+		}
+		if s.rollbackBusy {
+			return models.ErrRollbackInProgress
 		}
 		return fn()
 	}

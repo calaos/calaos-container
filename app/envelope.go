@@ -28,6 +28,7 @@ const (
 	codeAdminNotSet        = "admin_not_set"
 	codeAdminAlreadySet    = "admin_already_set"
 	codeUpgradeInProgress  = "upgrade_in_progress"
+	codeRollbackInProgress = "rollback_in_progress"
 	codeUpgradeRequired    = "upgrade_required"
 	codeRateLimited        = "rate_limited"
 	codeInternal           = "internal"
@@ -105,6 +106,10 @@ func errUpgradeInProgress(err error) *apiError {
 		e.data = fiber.Map{"job_id": id}
 	}
 	return e
+}
+
+func errRollbackInProgress() *apiError {
+	return newAPIError(fiber.StatusConflict, codeRollbackInProgress, "a rollback is in progress")
 }
 
 func sendOK(c *fiber.Ctx, status int, data any) error {

@@ -446,6 +446,9 @@ func StartJob(kind, pkg string) (*JobRun, error) {
 	if kind != JobKindUpgradeAll && kind != JobKindUpgrade {
 		return nil, fmt.Errorf("unknown job kind %q", kind)
 	}
+	if err := checkRollbackLock(); err != nil {
+		return nil, err
+	}
 	if !upgradeLock.TryAcquire(1) {
 		logging.Debugln("StartJob(): upgrade already in progress")
 		return nil, &InProgressError{JobID: RunningJobID()}

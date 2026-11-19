@@ -96,6 +96,7 @@ ignored.
 | `admin_not_set` | 409 | the admin password is not defined (verify, change) | none |
 | `admin_already_set` | 409 | bootstrap while an admin password exists (including a lost bootstrap race) | none |
 | `upgrade_in_progress` | 409 | an upgrade runs: new upgrade, update check, reboot, kiosk restart, service action, network change | `{"job_id": "..."}` when the run is a job (absent behind a version check, a reboot or a service action) |
+| `rollback_in_progress` | 409 | `calaos_rollback`, or an `update-grub` it left behind, holds `/run/calaos-rollback.lock`: new upgrade, reboot, rollback, snapshot boot. The daemon only probes the lock (`flock -n`), it never keeps it | none |
 | `upgrade_required` | 426 | plain `GET` on `/api/v2/events` | none |
 | `rate_limited` | 429 | admin password limiter (see Rate limiting), push code limits (see Push codes), log query limits (see Logs) | `{"retry_after": <seconds>}` |
 | `approver_required` | 409 | the action needs a push code and no approver is enrolled | none |
