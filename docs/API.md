@@ -967,6 +967,9 @@ It holds `flock` on `/run/calaos-rollback.lock`, which `update-grub` inherits: a
 to start (`Another calaos_rollback is running...`) while a killed rollback's `update-grub` goes on,
 so wait 11 minutes and check `default` in `GET /api/v2/system/snapshots`. The next try unmounts and
 removes the directory a killed rollback left.
+When the script is killed, the `update-grub` it started survives the kill of its process group and
+keeps the lock until it ends. The mounts under the private `/run/calaos-rollback.*` directory then
+stay in place until the next try, which removes them.
 
 The chroot leaves out the grub-btrfs `Calaos-OS snapshots` submenu. At startup, outside an
 overlay, `calaos-container` runs `update-grub` again when the rollback asked for it
