@@ -11,12 +11,14 @@ fixtures="$here/../../app/testdata/grubcfg"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/lib"
-dst="$tmp/mnt"
+dst="$tmp/run/calaos-rollback.private"
+mkdir -p "$tmp/run"
 
-# The script hardcodes the installed library, /proc/cmdline and /mnt.
+# The script hardcodes the installed library, /proc/cmdline and /run.
 sed "s#cat /proc/cmdline#cat $tmp/cmdline#" "$here/../lib/calaos-common.sh" >"$tmp/lib/calaos-common.sh"
 sed -e "s#/usr/lib/calaos/calaos-common.sh#$tmp/lib/calaos-common.sh#" \
-    -e "s#^dst=\"/mnt\"#dst=\"$dst\"#" "$here/../calaos_rollback" >"$tmp/calaos_rollback"
+    -e "s#^run_dir=\"/run\"#run_dir=\"$tmp/run\"#" "$here/../calaos_rollback" >"$tmp/calaos_rollback"
+grep -q "^run_dir=\"$tmp/run\"" "$tmp/calaos_rollback" || { echo "FAIL: run_dir not redirected"; exit 1; }
 echo 'ro rootflags=subvol=@/.snapshots/5/snapshot' >"$tmp/cmdline"
 
 cat >"$tmp/bin/findmnt" <<'STUB'
@@ -81,6 +83,8 @@ case "\$*" in
 esac
 [ "\$2" = update-grub ] || exit 0
 echo "GRUB_BTRFS_DISABLE=\${GRUB_BTRFS_DISABLE:-}" >>"$tmp/calls"
+# fd 9 holds the rollback lock: update-grub must inherit it.
+{ flock -n 9 && echo "update-grub holds fd 9" >>"$tmp/calls"; } 2>/dev/null
 [ -z "\$FAKE_NO_MARKER" ] || { mkdir -p "\$1/var/lib" && : >"\$1/var/lib/calaos-container"; }
 [ -n "\$FAKE_GRUBCFG" ] || exit 1
 mkdir -p "\$1/boot/grub" && cp "\$FAKE_GRUBCFG" "\$1/boot/grub/grub.cfg"
@@ -89,8 +93,22 @@ cat >"$tmp/bin/mountpoint" <<STUB
 #!/bin/sh
 case "\$2" in
 /efi) exit "\${FAKE_EFI:-1}" ;;
-*) exit "\${FAKE_DST_MOUNTED:-1}" ;;
+*stale*) [ -z "\$FAKE_STALE" ] || exit 0; exit 1 ;;
+*) exit 1 ;;
 esac
+STUB
+# mktemp -d <template>: hands out the fixed private mount point and records it.
+realmktemp=$(command -v mktemp)
+cat >"$tmp/bin/mktemp" <<STUB
+#!/bin/sh
+case "\$*" in
+"-d $tmp/run/calaos-rollback.XXXXXX") echo "mktemp \$*" >>"$tmp/calls"; mkdir -p "$dst"; echo "$dst" ;;
+*) exec "$realmktemp" "\$@" ;;
+esac
+STUB
+cat >"$tmp/bin/rmdir" <<STUB
+#!/bin/sh
+echo "rmdir \$*" >>"$tmp/calls"
 STUB
 realmv=$(command -v mv)
 cat >"$tmp/bin/mv" <<STUB
@@ -127,6 +145,17 @@ run() {
         bash "$tmp/calaos_rollback" >/dev/null 2>"$tmp/err" || rc=$?
 }
 
+# private_mounts <name>: /mnt is never touched, every mount sits in the private
+# directory made by mktemp, and that directory is removed on the way out.
+private_mounts() {
+    ! grep -qE '^(mount|umount) .*(^| )/mnt($|/)' "$tmp/calls" || fail "$1: touched /mnt: $(cat "$tmp/calls")"
+    grep -qx "mktemp -d $tmp/run/calaos-rollback.XXXXXX" "$tmp/calls" || fail "$1: no private mount point: $(cat "$tmp/calls")"
+    ! grep '^mount ' "$tmp/calls" | awk -v d="$dst" '{ t = $NF; if (t != d && index(t, d "/") != 1 && t != "/efi") bad = 1 } END { exit !bad }' ||
+        fail "$1: mount outside the private directory: $(cat "$tmp/calls")"
+    grep -qx "rmdir $dst" "$tmp/calls" || fail "$1: private directory not removed: $(cat "$tmp/calls")"
+    [ "$(grep -c '^umount ' "$tmp/calls")" -eq "$(grep -c '^mount ' "$tmp/calls")" ] || fail "$1: mounts left"
+}
+
 # check_ok <name> <findmnt source> <expected device>
 check_ok() {
     run "$2" "$fixtures/current.cfg"
@@ -139,7 +168,9 @@ check_ok() {
     grep -qx "arch-chroot $dst update-grub" "$tmp/calls" || fail "$1: no update-grub: $(cat "$tmp/calls")"
     grep -qx "timeout --kill-after=30s 10m" "$tmp/calls" || fail "$1: update-grub not bounded: $(cat "$tmp/calls")"
     grep -qx "GRUB_BTRFS_DISABLE=true" "$tmp/calls" || fail "$1: grub-btrfs not disabled: $(cat "$tmp/calls")"
+    grep -qx "update-grub holds fd 9" "$tmp/calls" || fail "$1: update-grub lost the lock fd: $(cat "$tmp/calls")"
     [ -f "$marker" ] || fail "$1: no refresh marker"
+    private_mounts "$1"
     ! grep -qE "set-default|snapper --no-dbus delete" "$tmp/calls" || fail "$1: undone: $(cat "$tmp/calls")"
 }
 
@@ -178,6 +209,7 @@ check_fails() {
     umounts=$(grep -c '^umount ' "$tmp/calls")
     [ "$mounts" -eq "$umounts" ] || fail "$name: $mounts mounts, $umounts umounts"
     ! grep -q "Error on line" "$tmp/err" || fail "$name: generic error: $(cat "$tmp/err")"
+    private_mounts "$name"
 }
 
 check_ok "subvolume source" "/dev/vda3[/@/.snapshots]" /dev/vda3
@@ -259,9 +291,25 @@ grep -qF "after: grub.cfg could not follow it (the default grub entry loads" "$t
 ! grep -q "snapper --no-dbus delete" "$tmp/calls" || fail "restore fails: copy deleted: $(cat "$tmp/calls")"
 [ "$(grep -c '^mount ' "$tmp/calls")" -eq "$(grep -c '^umount ' "$tmp/calls")" ] || fail "restore fails: mounts left"
 
-# /mnt still mounted, maybe by a killed rollback whose update-grub still runs.
-FAKE_DST_MOUNTED=0 check_fails "$dst busy" "$dst is already mounted" no /dev/vda3 "$fixtures/current.cfg"
-! grep -q '^mount ' "$tmp/calls" || fail "$dst busy: mounted over: $(cat "$tmp/calls")"
+# A rollback holds the lock, possibly through an orphaned update-grub: nothing
+# is mounted, made or removed, orphans included.
+mkdir -p "$tmp/run/calaos-rollback.stale"
+exec 8>"$tmp/run/calaos-rollback.lock"
+flock -n 8
+FAKE_STALE=1 run /dev/vda3 "$fixtures/current.cfg"
+exec 8>&-
+rm -rf "$tmp/run/calaos-rollback.stale"
+[ "$rc" -ne 0 ] || fail "locked: rc=0"
+grep -qF "Another calaos_rollback is running" "$tmp/err" || fail "locked: stderr: $(cat "$tmp/err")"
+! grep -qE '^(mount|umount|rmdir|mktemp|arch-chroot|btrfs)' "$tmp/calls" || fail "locked: acted: $(cat "$tmp/calls")"
+
+# Mounts of a killed rollback are released once its lock is free.
+mkdir -p "$tmp/run/calaos-rollback.stale"
+FAKE_STALE=1 run /dev/vda3 "$fixtures/current.cfg"
+[ "$rc" -eq 0 ] || fail "stale: rc=$rc: $(cat "$tmp/err")"
+grep -qx "umount -R $tmp/run/calaos-rollback.stale/" "$tmp/calls" || fail "stale: not unmounted: $(cat "$tmp/calls")"
+grep -qx "rmdir $tmp/run/calaos-rollback.stale/" "$tmp/calls" || fail "stale: not removed: $(cat "$tmp/calls")"
+rm -rf "$tmp/run/calaos-rollback.stale"
 
 # A bare linux line is not an entry, as in app/grubrepair.go.
 { printf 'linux\n'; cat "$fixtures/current.cfg"; } >"$tmp/bare.cfg"

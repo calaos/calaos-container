@@ -947,7 +947,7 @@ regenerates it, with `update-grub` in a chroot of the new default root, and chec
 default entry (the first one) loads its kernel and initrd from that subvolume. If not, it fails
 and nothing reboots, with one of these messages:
 - `No @/boot/grub subvolume...`, `Snapshot #N has no update-grub...`, `Default subvolume
-  unknown...` or `/mnt is already mounted...`: checked before snapper, nothing has changed;
+  unknown...` or `Another calaos_rollback is running...`: checked before snapper, nothing has changed;
 - `Rollback undone, snapper rollback failed...` or `Rollback undone, grub.cfg could not follow it
   (<cause>)...`, for a failure of snapper or of any step after it, including `update-grub` running
   past its 10 minutes: the script sets the previous default subvolume back (a no-op if snapper
@@ -970,10 +970,18 @@ and nothing reboots, with one of these messages:
 The daemon kills the script after 20 minutes and answers a `rollback_failed` with the last line
 the script printed, which may be an `update-grub` progress line rather than one of the messages
 above. Nothing is undone then: the default subvolume may have changed already, the mounts under
-`/mnt` stay, and the `update-grub` run, which `timeout` keeps in its own process group so that its
-10 minutes bound reach `grub-mkconfig`, can go on for up to 10 minutes 30. A new try refuses to
-start while `/mnt` is mounted: wait 11 minutes, check `default` in `GET /api/v2/system/snapshots`,
-then `umount -R /mnt` before trying again.
+the private mount point stay, and the `update-grub` run, which `timeout` keeps in its own process
+group so that its 10 minutes bound reach `grub-mkconfig`, can go on for up to 10 minutes 30.
+
+The script mounts the btrfs root on a private directory, `/run/calaos-rollback.XXXXXX`, removed
+when it exits, never on `/mnt`: `/mnt/calaos` stays visible to the system during the rollback.
+It holds `flock` on `/run/calaos-rollback.lock`, which `update-grub` inherits: a new try refuses
+to start (`Another calaos_rollback is running...`) while a killed rollback's `update-grub` goes on,
+so wait 11 minutes and check `default` in `GET /api/v2/system/snapshots`. The next try unmounts and
+removes the directory a killed rollback left.
+When the script is killed, the `update-grub` it started survives the kill of its process group and
+keeps the lock until it ends. The mounts under the private `/run/calaos-rollback.*` directory then
+stay in place until the next try, which removes them.
 
 The chroot leaves out the grub-btrfs `Calaos-OS snapshots` submenu. At startup, outside an
 overlay, `calaos-container` runs `update-grub` again when the rollback asked for it
