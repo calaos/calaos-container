@@ -87,6 +87,12 @@ cleanup_rollback() {
 }
 register_cleanup cleanup_rollback
 
+# A rollback the daemon killed leaves its mounts, and its update-grub may still
+# run there for 10 minutes: never mount over it.
+if mountpoint -q "$dst"; then
+    die "$dst is already mounted, maybe by a rollback still running update-grub: unmount it (umount -R $dst) before trying again"
+fi
+
 #mount temporary rootfs and snapshot subvolume to be able to use snapper
 mnt -o noatime,compress=zstd "$rootdev" "$dst"
 mnt -o noatime,compress=zstd,subvol=@/.snapshots "$rootdev" "$dst/.snapshots"
@@ -107,26 +113,83 @@ if ! [[ "$prev_id" =~ ^[0-9]+$ ]]; then
     die "Default subvolume unknown: a failed rollback could not be undone"
 fi
 
-restore_default() {
-    { [ "${#mounted[@]}" -gt 0 ] || mnt -o noatime,compress=zstd "$rootdev" "$dst"; } &&
-        btrfs subvolume set-default "$prev_id" "$dst"
+# Snapshots above it were created by this rollback.
+prev_max=0
+for d in "$dst"/.snapshots/*/; do
+    n="${d%/}"
+    n="${n##*/}"
+    if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$prev_max" ]; then
+        prev_max="$n"
+    fi
+done
+
+# The functions below run from the ERR trap, under set -e: every command that
+# may fail is tested, so the undo goes on and its message names the cause.
+remount_root() {
+    [ "${#mounted[@]}" -gt 0 ] || mnt -o noatime,compress=zstd "$rootdev" "$dst"
 }
 
-# grub.cfg keeps loading the previous root's kernel: on the new root, without
-# its modules when the kernels differ, the box stops in emergency mode without
-# network, so the daemon-start repair never runs. Put the previous root back.
+# Prints the number of the writable copy this rollback made the default, the
+# only snapshot it may delete: never the target, nor one that existed before.
+rollback_copy() {
+    local cur id n
+    cur="$(btrfs subvolume get-default "$dst")" || return 0
+    id="$(awk '$1 == "ID" { print $2 }' <<<"$cur")"
+    [[ "${cur##* path }" =~ ^@/\.snapshots/([0-9]+)/snapshot$ ]] || return 0
+    n="${BASH_REMATCH[1]}"
+    if [ "$id" != "$prev_id" ] && [ "$n" -gt "$prev_max" ]; then
+        echo "$n"
+    fi
+}
+
+# Deleted rather than left to a snapper cleanup: snapper gives it none, and the
+# failure marker is in the target, so every new try would add one copy.
+delete_copy() {
+    unmount_all
+    mnt -o noatime,compress=zstd "$rootdev" "$dst" &&
+        mnt -o noatime,compress=zstd,subvol=@/.snapshots "$rootdev" "$dst/.snapshots" &&
+        arch-chroot "$dst" snapper --no-dbus delete "$1"
+}
+
+# A rename never leaves a truncated grub.cfg behind a power cut.
+put_grubcfg_back() {
+    local tmpcfg="$grubcfg.calaos-rollback"
+    if cp -p "$grubbak" "$tmpcfg" && sync "$tmpcfg" && mv -f "$tmpcfg" "$grubcfg"; then
+        return 0
+    fi
+    rm -f "$tmpcfg" || true
+    return 1
+}
+
+# undo_rollback <what failed>
+# Left as is, grub.cfg loads the previous root's kernel: on the new root,
+# without its modules when the kernels differ, the box stops in emergency mode
+# without network, so the daemon-start repair never runs. Put the previous root
+# back. The id comes first in the message: the API cuts it at 200 characters.
+undo_rollback() {
+    local copy=""
+    if remount_root; then
+        copy="$(rollback_copy)" || copy=""
+    fi
+    if ! { remount_root && btrfs subvolume set-default "$prev_id" "$dst"; }; then
+        die "Could not undo the rollback, do not reboot: setting the default subvolume back to $prev_id failed, after: $1"
+    fi
+    if [ -n "$grubbak" ] && ! cmp -s "$grubbak" "$grubcfg" && ! put_grubcfg_back; then
+        die "Rollback undone but grub.cfg could not be put back, do not reboot: $1"
+    fi
+    if [ -n "$copy" ] && ! delete_copy "$copy"; then
+        warn "Snapshot #$copy, the writable copy of #$snapNumber, is left: delete it with snapper delete $copy"
+    fi
+    die "Rollback undone, $1: the default subvolume is back to $prev_path"
+}
 fail_grub() {
-    if ! restore_default; then
-        die "Could not undo the rollback, do not reboot: grub.cfg not updated ($1) and restoring the default subvolume $prev_id failed"
-    fi
-    if [ -n "$grubbak" ] && ! cmp -s "$grubbak" "$grubcfg" && ! cp "$grubbak" "$grubcfg"; then
-        die "Rollback undone but grub.cfg could not be put back, do not reboot ($1)"
-    fi
-    die "Rollback undone, grub.cfg could not follow it ($1): the default subvolume is back to $prev_path"
+    undo_rollback "grub.cfg could not follow it ($1)"
 }
 
+# snapper may fail after its own set-default: undo that too. set-default to
+# the unchanged default does nothing.
 info "--> Rollback rootfs to snapshot #$snapNumber"
-arch-chroot "$dst" snapper --no-dbus rollback "$snapNumber"
+arch-chroot "$dst" snapper --no-dbus rollback "$snapNumber" || undo_rollback "snapper rollback failed"
 # From here the default subvolume has changed: every failure must undo it.
 trap 'fail_grub "command failed at line $LINENO"' ERR
 arch-chroot "$dst" snapper --no-dbus list || warn "snapper list failed"
@@ -157,7 +220,7 @@ fi
 # fail_grub puts grub.cfg back only once the copy is complete.
 if [ -f "$grubcfg" ]; then
     bakfile="$(mktemp)"
-    cp "$grubcfg" "$bakfile"
+    cp -p "$grubcfg" "$bakfile"
     grubbak="$bakfile"
 fi
 

@@ -924,24 +924,34 @@ The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
 regenerates it, with `update-grub` in a chroot of the new default root, and checks that the
 default entry (the first one) loads its kernel and initrd from that subvolume. If not, it fails
 and nothing reboots, with one of these messages:
-- `No @/boot/grub subvolume...`, `Snapshot #N has no update-grub...` or `Default subvolume
-  unknown...`: checked before snapper, nothing has changed;
-- `Rollback undone, grub.cfg could not follow it (<cause>)...`, for any failure after snapper,
-  including `update-grub` running past its 10 minutes: the script sets the previous default
-  subvolume back, and the previous `grub.cfg` if `update-grub` replaced it, so the box boots as
-  before. Left as is, the normal boot would load the previous root's kernel on the new root, which
-  lacks its modules when the kernels differ: emergency mode, no network, and the daemon never
-  starts to repair it. The snapshots snapper created stay. The rollback can be tried again once
-  the cause is fixed;
-- `Could not undo the rollback, do not reboot...` (setting the default subvolume back failed; the
-  message gives its id) or `Rollback undone but grub.cfg could not be put back, do not reboot...`:
-  the default subvolume and `grub.cfg` disagree. Fix it from the rescue shell before any reboot
-  (`btrfs subvolume set-default <id>` on the mounted btrfs root, or `update-grub` in a chroot of
-  the default subvolume), and do not delete the previous root's snapshot before.
+- `No @/boot/grub subvolume...`, `Snapshot #N has no update-grub...`, `Default subvolume
+  unknown...` or `/mnt is already mounted...`: checked before snapper, nothing has changed;
+- `Rollback undone, snapper rollback failed...` or `Rollback undone, grub.cfg could not follow it
+  (<cause>)...`, for a failure of snapper or of any step after it, including `update-grub` running
+  past its 10 minutes: the script sets the previous default subvolume back (a no-op if snapper
+  failed before changing it), then puts the previous `grub.cfg` back if `update-grub` replaced it,
+  through a temporary file renamed over it, so the box boots as before. Left as is, the normal
+  boot would load the previous root's kernel on the new root, which lacks its modules when the
+  kernels differ: emergency mode, no network, and the daemon never starts to repair it. The script
+  then deletes the `writable copy of #N` snapshot that snapper made the default, and only that
+  one: snapper gives it no cleanup algorithm, so every failed try would leave one. If the delete
+  fails, a warning in the daemon log names it (`snapper delete <n>` removes it). The `rollback
+  backup of #M` snapshot stays, under snapper's `number` cleanup. The rollback can be tried again
+  once the cause is fixed;
+- `Could not undo the rollback, do not reboot: setting the default subvolume back to <id>
+  failed, after: <cause>` or `Rollback undone but grub.cfg could not be put back, do not
+  reboot...`: the default subvolume and `grub.cfg` disagree, and the writable copy is kept. Fix it
+  from the rescue shell before any reboot (`btrfs subvolume set-default <id>` on the mounted btrfs
+  root, or `update-grub` in a chroot of the default subvolume), and do not delete the previous
+  root's snapshot nor the writable copy before.
 
-The daemon kills the script after 20 minutes and answers a `rollback_failed` without a grub
-message. The default subvolume may then have changed already: check `default` in
-`GET /api/v2/system/snapshots` before trying again.
+The daemon kills the script after 20 minutes and answers a `rollback_failed` with the last line
+the script printed, which may be an `update-grub` progress line rather than one of the messages
+above. Nothing is undone then: the default subvolume may have changed already, the mounts under
+`/mnt` stay, and the `update-grub` run, which `timeout` keeps in its own process group so that its
+10 minutes bound reach `grub-mkconfig`, can go on for up to 10 minutes 30. A new try refuses to
+start while `/mnt` is mounted: wait 11 minutes, check `default` in `GET /api/v2/system/snapshots`,
+then `umount -R /mnt` before trying again.
 
 The chroot leaves out the grub-btrfs `Calaos-OS snapshots` submenu. At startup, outside an
 overlay, `calaos-container` runs `update-grub` again when the rollback asked for it
