@@ -67,31 +67,31 @@ WHITE='\033[1;37m'
 color() {
     local code="$1"
     shift
-    echo -e "${code}$*${NOCOLOR}"
+    echo -e "${code}$*${NOCOLOR}" || true
 }
 
 # info <message...>
 # Prints an informational message in cyan to stdout.
 info() {
-    echo -e "${CYAN}$*${NOCOLOR}"
+    echo -e "${CYAN}$*${NOCOLOR}" || true
 }
 
 # warn <message...>
 # Prints a warning message in yellow to stderr.
 warn() {
-    echo -e "${YELLOW}$*${NOCOLOR}" >&2
+    echo -e "${YELLOW}$*${NOCOLOR}" >&2 || true
 }
 
 # err <message...>
 # Prints an error message in red to stderr.
 err() {
-    echo -e "${RED}$*${NOCOLOR}" >&2
+    echo -e "${RED}$*${NOCOLOR}" >&2 || true
 }
 
 # green <message...>
 # Prints a message in green to stdout (typically a success message).
 green() {
-    echo -e "${GREEN}$*${NOCOLOR}"
+    echo -e "${GREEN}$*${NOCOLOR}" || true
 }
 
 # ---------------------------------------------------------------------------
