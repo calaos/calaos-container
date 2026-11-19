@@ -48,11 +48,11 @@ fi
 cache="/var/lib/cache/containers/${ct_name}.tar"
 
 if [ -f "$cache" ]; then
-    echo "loading $cache"
+    echo "loading $cache" || true
 
     # Podman loads the archive from cache and copies it into the local
     # repository.
-    podman load < "$cache"
+    podman load < "$cache" >/dev/null 2>&1 || true
 
     # Check if the image landed in the local repository. Uses the library's
     # exact-match check (podman images --format '{{.Repository}}:{{.Tag}}')
@@ -60,11 +60,11 @@ if [ -f "$cache" ]; then
     # matched a ':'-containing reference (repo and tag are separate columns)
     # and could false-positive on unrelated repos/tags as substrings.
     if calaos_image_exists "$image"; then
-        echo "Image $image loaded"
+        echo "Image $image loaded" || true
         # Remove the cache
         rm -f "$cache"
     else
-        echo "Error: image $image not loaded, an error occured."
+        echo "Error: image $image not loaded, an error occured." || true
         exit 1
     fi
 fi

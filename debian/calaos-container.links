@@ -1,0 +1,3 @@
+# calaos-boot owns tty2: a getty there hangs the tty up under it (EIO on its console output).
+dev/null etc/systemd/system/autovt@tty2.service
+dev/null etc/systemd/system/getty@tty2.service
