@@ -31,6 +31,8 @@ jobs:
     needs: ci
     # Serializes version computation, tag and release across runs; the next
     # run only starts (and reads the tags) once the previous one has tagged.
+    # The stable workflow_dispatch shares this group: dispatch only when no run
+    # is pending, since a push arriving meanwhile replaces a queued dispatch.
     concurrency:
       group: release-${{ github.repository }}
       cancel-in-progress: false
