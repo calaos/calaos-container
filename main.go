@@ -115,6 +115,7 @@ func main() {
 			exit(err, exitModelsInit)
 		}
 		app.ClearBootOneShot()
+		go app.RepairGrubCfg()
 
 		if err = handleSignals(myApp.Start()); err != nil {
 			exit(err, exitRuntime)

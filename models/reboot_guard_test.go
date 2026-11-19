@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -98,4 +99,27 @@ func TestRebootGuardReleasesLockOnFailure(t *testing.T) {
 		t.Fatal("lock still held after a failed reboot")
 	}
 	upgradeLock.Release(1)
+}
+
+func TestWithUpgradeLock(t *testing.T) {
+	held := false
+	if err := WithUpgradeLock(context.Background(), func() {
+		held = !upgradeLock.TryAcquire(1)
+	}); err != nil || !held {
+		t.Fatalf("err %v, lock held during fn %v", err, held)
+	}
+	if !upgradeLock.TryAcquire(1) {
+		t.Fatal("lock still held after fn")
+	}
+	upgradeLock.Release(1)
+}
+
+func TestWithUpgradeLockGivesUp(t *testing.T) {
+	holdLock(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ran := false
+	if err := WithUpgradeLock(ctx, func() { ran = true }); err == nil || ran {
+		t.Fatalf("err %v, fn ran %v", err, ran)
+	}
 }

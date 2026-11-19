@@ -892,6 +892,14 @@ two ways to make the boot single-use:
 - `next_entry`: otherwise, `grub-reboot`. The snapshot must enable
   `calaos-snapshot-oneshot.service`, which clears `next_entry` early in its boot.
 
+Rescue boots without a key, on BIOS as on UEFI. The package's `grub.d` script zeroes and exports
+`timeout` for the nested snapshot menus: in `next_entry` mode (BIOS, or UEFI without a FAT ESP)
+when GRUB has just consumed a `next_entry` (`boot_once` set by `00_header`, whether or not
+`save_env` succeeds), after a 3 s delay that Escape interrupts to show the normal menu; on UEFI
+with an ESP, inside the `calaos_oneshot` block. A normal boot keeps the usual menu and delay. This
+relies on the `grub.cfg` carrying `# calaos-snapshot-boot 4`; the package postinst regenerates it
+when the marker is older.
+
 A snapshot is `bootable` (and accepted here) only if its own tree, `/.snapshots/<N>/snapshot`,
 holds the overlay hook (`usr/share/initramfs-tools/scripts/local-bottom/grub-btrfs-overlay`) and,
 in `next_entry` mode, the
@@ -901,9 +909,11 @@ overlay, or keep booting itself.
 
 Known risk in `next_entry` mode (BIOS boxes, or no FAT ESP): a snapshot that dies before
 sysinit (kernel panic, root not mounted, `/boot/grub` not mounted) never clears `next_entry`, so
-every reboot starts it again. A box without a screen needs the entry chosen by hand in GRUB. This
-is inherent to `grub-reboot` on btrfs and is accepted for the few boxes concerned; the ESP mode
-does not have it, and the daemon does not refuse the boot outside an ESP.
+every reboot starts it again. GRUB waits 3 s with no menu, then boots the snapshot; pressing
+Escape during that delay shows the normal menu, where another entry can be chosen. A box without
+a keyboard or screen needs external media. This is inherent to `grub-reboot` on btrfs and is
+accepted for the few boxes concerned; the ESP mode does not have it, and the daemon does not
+refuse the boot outside an ESP.
 
 At every start, `calaos-container` clears a leftover `next_entry` and `calaos_oneshot`, so a
 normal boot never keeps a pending snapshot boot. If the deferred reboot fails, the daemon clears
@@ -919,6 +929,36 @@ When the script fails: `500 rollback_failed`, whose `msg` is `rollback failed: <
 of the script>` (the script's `Error on line N` trap line is skipped, the line is cut at 200
 characters); the full output is in the daemon log.
 The bearer-only `POST /api/v2/system/rollback_snapshot` stays for the CLI.
+
+`grub.cfg` names the kernel by its path inside the default subvolume, so the script also
+regenerates it, with `update-grub` in a chroot of the new default root, and checks that the
+default entry (the first one) loads its kernel and initrd from that subvolume. If not, it fails
+and nothing reboots, with one of these messages:
+- `No @/boot/grub subvolume...`, `Snapshot #N has no update-grub...` or `Default subvolume
+  unknown...`: checked before snapper, nothing has changed;
+- `Rollback undone, grub.cfg could not follow it (<cause>)...`, for any failure after snapper,
+  including `update-grub` running past its 10 minutes: the script sets the previous default
+  subvolume back, and the previous `grub.cfg` if `update-grub` replaced it, so the box boots as
+  before. Left as is, the normal boot would load the previous root's kernel on the new root, which
+  lacks its modules when the kernels differ: emergency mode, no network, and the daemon never
+  starts to repair it. The snapshots snapper created stay. The rollback can be tried again once
+  the cause is fixed;
+- `Could not undo the rollback, do not reboot...` (setting the default subvolume back failed; the
+  message gives its id) or `Rollback undone but grub.cfg could not be put back, do not reboot...`:
+  the default subvolume and `grub.cfg` disagree. Fix it from the rescue shell before any reboot
+  (`btrfs subvolume set-default <id>` on the mounted btrfs root, or `update-grub` in a chroot of
+  the default subvolume), and do not delete the previous root's snapshot before.
+
+The daemon kills the script after 20 minutes and answers a `rollback_failed` without a grub
+message. The default subvolume may then have changed already: check `default` in
+`GET /api/v2/system/snapshots` before trying again.
+
+The chroot leaves out the grub-btrfs `Calaos-OS snapshots` submenu. At startup, outside an
+overlay, `calaos-container` runs `update-grub` again when the rollback asked for it
+(`/var/lib/calaos-container/grub-refresh`), or when the default entry of `grub.cfg` does not boot
+the default subvolume, which repairs boxes rolled back before this check. It does so only when `/` is
+the default subvolume, under the upgrade guard, and logs it. The API does not wait for it. While
+`update-grub` cannot fix the default entry, every start runs it again.
 
 In rescue, upgrades are refused: `409 in_rescue` on `POST /api/v2/update/upgrade-all` and
 `POST /api/v2/update/upgrade`, `500 {"error":true,"msg":"upgrades are disabled while running from

@@ -11,7 +11,18 @@ set -euo pipefail
 
 trap 'die "Error on line $LINENO"' ERR
 
+# grub_default_entry_paths <grub.cfg>
+# Prints the kernel and initrd paths of the first boot entry, the default one.
+grub_default_entry_paths() {
+    awk '
+        $1 == "linux" && NF > 1 { if (seen) exit; print $2; seen = 1; next }
+        $1 == "initrd" && seen { for (i = 2; i <= NF; i++) print $i; exit }
+        $1 == "}" && seen { exit }
+    ' "$1"
+}
+
 dst="/mnt"
+update_grub_timeout="10m"
 
 # Find the btrfs device backing the /.snapshots mount. findmnt resolves the
 # actual mount table (mountinfo), anchored on the exact target, instead of
@@ -52,25 +63,127 @@ if ! [[ "$snapNumber" =~ ^[0-9]+$ ]]; then
     die "Could not determine snapshot number from /proc/cmdline (rootflags=${rootflags:-<unset>})"
 fi
 
-# Cleanup trap: make sure /mnt/.snapshots and /mnt end up unmounted even if
-# a later step fails, instead of leaving them mounted behind a dead script.
-cleanup_rollback_mounts() {
-    if mountpoint -q "$dst/.snapshots" 2>/dev/null; then
-        umount "$dst/.snapshots" || true
-    fi
-    if mountpoint -q "$dst" 2>/dev/null; then
-        umount "$dst" || true
-    fi
+# Everything mounted below $dst, unmounted in reverse order on any exit.
+mounted=()
+mnt() {
+    mount "$@" || return
+    mounted+=("${!#}")
 }
-register_cleanup cleanup_rollback_mounts
+unmount_all() {
+    local i
+    for ((i = ${#mounted[@]} - 1; i >= 0; i--)); do
+        umount "${mounted[$i]}" || true
+    done
+    mounted=()
+}
+override=""
+grubbak=""
+bakfile=""
+grubcfg="$dst/boot/grub/grub.cfg"
+cleanup_rollback() {
+    unmount_all
+    [ -z "$override" ] || rm -f "$override"
+    [ -z "$bakfile" ] || rm -f "$bakfile"
+}
+register_cleanup cleanup_rollback
 
 #mount temporary rootfs and snapshot subvolume to be able to use snapper
-mount -o noatime,compress=zstd "$rootdev" "$dst"
-mount -o noatime,compress=zstd,subvol=@/.snapshots "$rootdev" "$dst/.snapshots"
+mnt -o noatime,compress=zstd "$rootdev" "$dst"
+mnt -o noatime,compress=zstd,subvol=@/.snapshots "$rootdev" "$dst/.snapshots"
+
+# grub.cfg must follow the new default subvolume (see below): check what that
+# needs before snapper changes anything.
+if ! btrfs subvolume list "$dst" | awk '$NF == "@/boot/grub" { found = 1 } END { exit !found }'; then
+    die "No @/boot/grub subvolume: grub.cfg could not follow the rollback"
+fi
+if [ ! -x "$dst/.snapshots/$snapNumber/snapshot/usr/sbin/update-grub" ]; then
+    die "Snapshot #$snapNumber has no update-grub: grub.cfg could not follow the rollback"
+fi
+
+prev_default="$(btrfs subvolume get-default "$dst")" || prev_default=""
+prev_id="$(awk '$1 == "ID" { print $2 }' <<<"$prev_default")"
+prev_path="${prev_default##* path }"
+if ! [[ "$prev_id" =~ ^[0-9]+$ ]]; then
+    die "Default subvolume unknown: a failed rollback could not be undone"
+fi
+
+restore_default() {
+    { [ "${#mounted[@]}" -gt 0 ] || mnt -o noatime,compress=zstd "$rootdev" "$dst"; } &&
+        btrfs subvolume set-default "$prev_id" "$dst"
+}
+
+# grub.cfg keeps loading the previous root's kernel: on the new root, without
+# its modules when the kernels differ, the box stops in emergency mode without
+# network, so the daemon-start repair never runs. Put the previous root back.
+fail_grub() {
+    if ! restore_default; then
+        die "Could not undo the rollback, do not reboot: grub.cfg not updated ($1) and restoring the default subvolume $prev_id failed"
+    fi
+    if [ -n "$grubbak" ] && ! cmp -s "$grubbak" "$grubcfg" && ! cp "$grubbak" "$grubcfg"; then
+        die "Rollback undone but grub.cfg could not be put back, do not reboot ($1)"
+    fi
+    die "Rollback undone, grub.cfg could not follow it ($1): the default subvolume is back to $prev_path"
+}
 
 info "--> Rollback rootfs to snapshot #$snapNumber"
 arch-chroot "$dst" snapper --no-dbus rollback "$snapNumber"
-arch-chroot "$dst" snapper --no-dbus list
+# From here the default subvolume has changed: every failure must undo it.
+trap 'fail_grub "command failed at line $LINENO"' ERR
+arch-chroot "$dst" snapper --no-dbus list || warn "snapper list failed"
 
-umount "$dst/.snapshots"
-umount "$dst"
+# grub.cfg names the kernel by its path in the old default subvolume
+# (/@/.snapshots/N/snapshot/boot/...): once snapper cleans that snapshot up, the
+# normal entry no longer boots. It is regenerated from the new default root.
+unmount_all
+mnt -o noatime,compress=zstd "$rootdev" "$dst"
+newroot="$(btrfs subvolume get-default "$dst" | sed -n 's/^ID [0-9].* path //p')" || newroot=""
+[ -n "$newroot" ] || fail_grub "new default subvolume unknown"
+
+mnt -o noatime,compress=zstd,subvol=@/boot/grub "$rootdev" "$dst/boot/grub"
+# Without the ESP grub/41_calaos-snapshot-boot leaves out the one-shot block.
+if mountpoint -q /efi && [ -d "$dst/efi" ]; then
+    mnt --bind /efi "$dst/efi"
+fi
+# grub-btrfs fails in a chroot (calaos_install disables it too). A bind mount
+# keeps the root's config untouched; the daemon runs update-grub again at the
+# next boot, from the marker, to bring the snapshot submenu back.
+btrfscfg="$dst/etc/default/grub-btrfs/config"
+if [ -f "$btrfscfg" ]; then
+    override="$(mktemp)"
+    { cat "$btrfscfg"; echo 'GRUB_BTRFS_DISABLE="true"'; } >"$override"
+    mnt --bind "$override" "$btrfscfg"
+fi
+
+# fail_grub puts grub.cfg back only once the copy is complete.
+if [ -f "$grubcfg" ]; then
+    bakfile="$(mktemp)"
+    cp "$grubcfg" "$bakfile"
+    grubbak="$bakfile"
+fi
+
+# Bounded here rather than by the daemon's kill, so that the mounts are undone
+# and the message is readable. Keep below rollbackTimeout (app/snapshots.go).
+# The environment covers a grub-btrfs installed without its config file.
+info "--> Regenerate grub.cfg for $newroot"
+rc=0
+GRUB_BTRFS_DISABLE=true timeout --kill-after=30s "$update_grub_timeout" arch-chroot "$dst" update-grub || rc=$?
+case "$rc" in
+0) ;;
+124 | 137) fail_grub "update-grub timed out after $update_grub_timeout" ;;
+*) fail_grub "update-grub failed" ;;
+esac
+
+paths="$(grub_default_entry_paths "$grubcfg")" || paths=""
+[ -n "$paths" ] || fail_grub "grub.cfg has no boot entry"
+while read -r p; do
+    case "$p" in
+    "/$newroot/boot/"*) ;;
+    *) fail_grub "the default grub entry loads $p, outside $newroot" ;;
+    esac
+done <<<"$paths"
+
+# grub.cfg is right at this point: without the marker the snapshot submenu
+# only comes back with the next update-grub.
+marker="$dst/var/lib/calaos-container/grub-refresh"
+{ mkdir -p "${marker%/*}" && : >"$marker"; } ||
+    warn "Could not write $marker: the snapshot boot menu comes back at the next update-grub"
